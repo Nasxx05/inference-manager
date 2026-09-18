@@ -17,5 +17,8 @@
     "paths": { "@/*": ["./src/*"] }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
+  // The backend is a separate deployment with its own tsconfig and its own
+  // dependencies (express, cors). Without this, the root build pulls in
+  // server/src/index.ts and fails on imports only installed under server/.
+  "exclude": ["node_modules", "server"]
 }
