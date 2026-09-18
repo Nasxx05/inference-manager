@@ -22,6 +22,34 @@ npm test     # 63 tests
 npm run build
 ```
 
+## Deploying to Vercel
+
+Vercel detects Next.js automatically, so no configuration file is needed.
+
+1. Push this repo to GitHub (already done).
+2. Go to https://vercel.com/new and **Import** `Nasxx05/inference-manager`.
+3. Leave the defaults:
+   - Framework Preset: **Next.js**
+   - Build Command: `npm run build`
+   - Output Directory: `.next` (auto-filled)
+   - Install Command: `npm install`
+4. (Optional) Add env vars under **Settings → Environment Variables**:
+
+   | Name | Value |
+   |---|---|
+   | `AI_API_KEY` | key for AgentFund's internal planner |
+   | `AI_BASE_URL` | provider base URL, e.g. `https://api.openai.com/v1` |
+   | `AI_MODEL` | planner model id, e.g. `gpt-4o-mini` |
+
+   These are optional — with none set, AgentFund uses its deterministic local analyzer and
+   still returns a complete plan. They are server-only and never sent to the browser.
+5. Click **Deploy**. Every push to `main` redeploys automatically; other branches get preview URLs.
+
+Notes:
+- No database, auth, or external integrations are required to deploy.
+- Recent history is `localStorage`, so it is per-browser and not shared between visitors.
+- `.env.example` documents the variables; never commit a real `.env` (already gitignored).
+
 ## The loop
 
 ```
