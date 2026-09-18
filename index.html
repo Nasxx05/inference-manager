@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgentFund — plan a task, get a budget and a prompt</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="site-header">
+        <div class="brand">AgentFund <span>task planning and prompts</span></div>
+        <div id="modeNote" class="mode-note">Checking…</div>
+      </header>
+
+      <!-- PHASE 1a: landing -->
+      <section id="landing" class="landing">
+        <h1>Know what a task will cost before you run it.</h1>
+        <p>
+          Describe what you want built, pick a model and a budget. AgentFund tells
+          you whether the budget is enough, what to cut if it is not, and writes a
+          prompt you can copy straight into that model. Nothing is executed here —
+          you stay in control.
+        </p>
+        <button id="startBtn" class="btn btn-primary" type="button">Start Planning</button>
+      </section>
+
+      <!-- PHASE 1b: input -->
+      <section id="inputCard" class="card">
+        <h2>What do you want to build?</h2>
+        <p class="card-sub">
+          Be specific. The more detail you give, the tighter the estimate.
+        </p>
+
+        <div id="inputError" class="notice error hidden"></div>
+
+        <div class="field">
+          <label for="goal">Task goal</label>
+          <textarea
+            id="goal"
+            placeholder="Example: build a small Next.js app that lets a user paste a CSV, shows a table preview, and exports the cleaned data as JSON."
+          ></textarea>
+        </div>
+
+        <div class="grid-2">
+          <div class="field">
+            <label for="model">Model</label>
+            <select id="model"></select>
+          </div>
+
+          <div class="field">
+            <label for="optimization">Optimization</label>
+            <select id="optimization">
+              <option>Minimize Cost</option>
+              <option selected>Balanced</option>
+              <option>Prioritize Quality</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="budget">Budget (credits)</label>
+          <div id="budgetPresets" class="preset-row"></div>
+          <input id="budget" type="number" min="1" step="1" value="10" />
+          <p class="small muted" style="margin: 6px 0 0">
+            1 credit = $0.05. Costs are shown as a range, never a single number.
+          </p>
+        </div>
+
+        <div class="btn-row">
+          <button id="analyzeBtn" class="btn btn-primary" type="button">Analyze Task</button>
+          <span id="analyzeHint" class="small muted"></span>
+        </div>
+      </section>
+
+      <!-- PHASE 2: results -->
+      <section id="results" class="card hidden">
+        <div id="resultError" class="notice error hidden"></div>
+        <div id="resultWarning" class="notice warn hidden"></div>
+
+        <div class="btn-row" style="justify-content: space-between">
+          <h2 style="margin: 0">Analysis</h2>
+          <span id="statusBadge" class="status fits"></span>
+        </div>
+        <p id="statusSummary" class="card-sub" style="margin-top: 8px"></p>
+
+        <div class="section-label">Cost estimate</div>
+        <dl class="kv">
+          <dt>Estimated total</dt>
+          <dd><span id="costRange" class="num-lg"></span> <span class="muted small">credits</span></dd>
+          <dt>Your budget</dt>
+          <dd><span id="budgetShown" class="num"></span> <span class="muted small">credits</span></dd>
+          <dt>Recommended maximum</dt>
+          <dd><span id="recommendedMax" class="num"></span> <span class="muted small">credits</span></dd>
+          <dt>Recommended reserve</dt>
+          <dd><span id="reserve" class="num"></span> <span class="muted small">credits</span></dd>
+          <dt>Confidence</dt>
+          <dd><span id="confidence" class="tag"></span></dd>
+        </dl>
+
+        <div class="section-label">Classification</div>
+        <dl id="classification" class="kv"></dl>
+
+        <div class="section-label">Execution profile</div>
+        <p id="executionProfile" class="small"></p>
+
+        <div class="section-label">Phase breakdown</div>
+        <table class="phase-table">
+          <thead>
+            <tr>
+              <th>Phase</th>
+              <th>Credits</th>
+            </tr>
+          </thead>
+          <tbody id="phaseRows"></tbody>
+        </table>
+
+        <!-- shown only when cuts are needed -->
+        <div id="cutsCard" class="hidden">
+          <div class="divider"></div>
+          <div class="section-label">What fits, what gets cut</div>
+          <div class="cut-columns">
+            <div>
+              <p class="small muted" style="margin: 0 0 6px">Keep</p>
+              <ul id="keepList" class="plain-list"></ul>
+            </div>
+            <div>
+              <p class="small muted" style="margin: 0 0 6px">Skip for now</p>
+              <ul id="skipList" class="plain-list"></ul>
+            </div>
+          </div>
+          <p class="small" style="margin: 12px 0 0">
+            Reduced estimate: <span id="reducedRange" class="num"></span>
+            <span class="muted small">credits</span>
+          </p>
+          <div class="btn-row" style="margin-top: 12px">
+            <button id="optimizeBtn" class="btn" type="button">Optimize For My Budget</button>
+            <span id="optimizeState" class="small muted"></span>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="section-label">Model recommendation</div>
+        <p id="modelReason" class="small"></p>
+        <div id="modelComparison" class="compare"></div>
+
+        <div class="btn-row" style="margin-top: 20px">
+          <button id="generateBtn" class="btn btn-primary" type="button">Generate Prompt</button>
+          <button id="backBtn" class="btn" type="button">Back to input</button>
+        </div>
+      </section>
+
+      <!-- PHASE 3: prompt -->
+      <section id="promptSection" class="card hidden">
+        <h2>Your prompt</h2>
+        <p class="card-sub">
+          Copy this into the model you chose. Three versions of the same plan.
+        </p>
+
+        <div id="promptError" class="notice error hidden"></div>
+
+        <div class="section-label">Task summary</div>
+        <dl id="promptSummary" class="kv"></dl>
+
+        <div class="section-label">Phase plan</div>
+        <table class="phase-table">
+          <thead>
+            <tr>
+              <th>Phase</th>
+              <th>Credits</th>
+            </tr>
+          </thead>
+          <tbody id="promptPhaseRows"></tbody>
+        </table>
+
+        <div class="section-label">Version</div>
+        <div id="versionTabs" class="version-tabs">
+          <button class="version-tab is-active" type="button" data-version="standard">Standard</button>
+          <button class="version-tab" type="button" data-version="budget_optimized">Budget Optimized</button>
+          <button class="version-tab" type="button" data-version="quality">Quality</button>
+        </div>
+
+        <div id="promptView">
+          <pre id="promptBox" class="prompt-box"></pre>
+        </div>
+
+        <div id="promptEditView" class="hidden">
+          <textarea id="promptEdit" class="prompt-edit"></textarea>
+        </div>
+
+        <div class="btn-row" style="margin-top: 12px">
+          <button id="copyBtn" class="btn" type="button">Copy Prompt</button>
+          <button id="editToggleBtn" class="btn btn-sm" type="button">Edit Prompt</button>
+          <button id="saveEditBtn" class="btn btn-sm hidden" type="button">Save Edit</button>
+          <span id="copyNote" class="small muted"></span>
+        </div>
+
+        <div class="btn-row" style="margin-top: 16px">
+          <button id="newTaskBtn" class="btn" type="button">Plan another task</button>
+        </div>
+      </section>
+
+      <!-- PHASE 4: history -->
+      <section id="historyCard" class="card hidden">
+        <h2>Recent Tasks</h2>
+        <p class="card-sub">Saved in this browser only. Click one to reopen it.</p>
+        <div id="historyList"></div>
+        <p id="historyEmpty" class="small muted">No saved tasks yet.</p>
+      </section>
+
+      <footer class="site-footer">
+        <p>
+          Privacy: your data stays in this browser. The task text is sent out only
+          when you ask for an analysis or a prompt, and is not stored on a server.
+        </p>
+        <p>AgentFund plans and writes prompts. It never runs your task.</p>
+      </footer>
+    </div>
+
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>
