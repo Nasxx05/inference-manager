@@ -1,7 +1,7 @@
 "use client";
 
-import { Sparkles } from "lucide-react";
-import { AUTO_MODEL_ID, MODELS } from "@/data/models";
+import { X } from "lucide-react";
+import { AUTO_MODEL_ID, MODELS, TIER_LABEL } from "@/data/models";
 import type { OptimizationPreference } from "@/types";
 import { Button, Field, Select } from "./ui";
 
@@ -52,18 +52,34 @@ export function TaskForm({
       noValidate
     >
       <Field label="What do you want to accomplish?" htmlFor="task">
-        <textarea
-          id="task"
-          value={values.taskDescription}
-          onChange={(e) => set("taskDescription", e.target.value)}
-          rows={6}
-          aria-describedby={error ? "task-error" : undefined}
-          aria-invalid={error ? true : undefined}
-          placeholder={
-            "Build a responsive portfolio website using React and TypeScript with a projects section, contact form, dark mode, animations and mobile support."
-          }
-          className="w-full resize-y rounded border border-line bg-white px-3.5 py-3 text-[15px] leading-relaxed text-ink placeholder:text-[#A3A79F] transition-colors hover:border-[#CFCFC6] focus:border-forest"
-        />
+        <div className="relative">
+          <textarea
+            id="task"
+            value={values.taskDescription}
+            onChange={(e) => set("taskDescription", e.target.value)}
+            rows={6}
+            aria-describedby={error ? "task-error" : undefined}
+            aria-invalid={error ? true : undefined}
+            placeholder={
+              "Build a responsive portfolio website using React and TypeScript with a projects section, contact form, dark mode, animations and mobile support."
+            }
+            className="w-full resize-y rounded border border-line bg-white px-3.5 py-3 pr-11 text-[15px] leading-relaxed text-ink placeholder:text-[#A3A79F] transition-colors hover:border-[#CFCFC6] focus:border-forest"
+          />
+          {values.taskDescription.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => {
+                set("taskDescription", "");
+                document.getElementById("task")?.focus();
+              }}
+              aria-label="Clear task description"
+              title="Clear"
+              className="absolute right-2.5 top-2.5 rounded p-1.5 text-muted transition-colors hover:bg-[#F3F3EF] hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-forest"
+            >
+              <X aria-hidden="true" className="h-4 w-4" />
+            </button>
+          ) : null}
+        </div>
       </Field>
 
       <div className="grid gap-5 sm:grid-cols-3">
@@ -76,7 +92,7 @@ export function TaskForm({
             <option value={AUTO_MODEL_ID}>Auto-select</option>
             {MODELS.map((model) => (
               <option key={model.id} value={model.id}>
-                {model.displayName}
+                {model.displayName} · {TIER_LABEL[model.capabilityTier]}
               </option>
             ))}
           </Select>

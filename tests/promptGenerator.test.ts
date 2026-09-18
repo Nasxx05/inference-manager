@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { findModelOrThrow } from "@/data/models";
 import { heuristicAnalyze } from "@/lib/ai/taskAnalyzer";
-import { acceptablePrompt, generatePromptWithAI } from "@/lib/ai/promptGenerator";
+import {
+  PromptGenerationError,
+  acceptablePrompt,
+  generatePrompt,
+  promptProviderConfigured,
+} from "@/lib/ai/promptGenerator";
+import { parseSelections, toggleSelection } from "@/components/ClarifyingQuestions";
 import type { ClarifyingAnswer } from "@/types";
 
 const targetModel = findModelOrThrow("claude-sonnet");
@@ -120,36 +126,37 @@ afterEach(() => {
   process.env = { ...ORIGINAL_ENV };
 });
 
-describe("generatePromptWithAI", () => {
-  it("returns null when no provider is configured", async () => {
+describe("generatePrompt", () => {
+  it("reports whether the prompt-writing model is configured", () => {
+    expect(promptProviderConfigured()).toBe(true);
+    delete process.env.AI_BASE_URL;
+    expect(promptProviderConfigured()).toBe(false);
+  });
+
+  it("throws when no prompt-writing model is configured, with no fallback", async () => {
     delete process.env.AI_API_KEY;
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(generatePromptWithAI(input())).resolves.toBeNull();
+    await expect(generatePrompt(input())).rejects.toThrow(PromptGenerationError);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("returns the model-written prompt on a good response", async () => {
     vi.stubGlobal("fetch", stubFetch({ content: validPrompt() }));
-    const result = await generatePromptWithAI(input());
-    expect(result).toBe(`${validPrompt()}\n`);
+    await expect(generatePrompt(input())).resolves.toBe(`${validPrompt()}\n`);
   });
 
   it("strips markdown code fences from the response", async () => {
-    vi.stubGlobal(
-      "fetch",
-      stubFetch({ content: "```markdown\n" + validPrompt() + "\n```" }),
-    );
-    const result = await generatePromptWithAI(input());
-    expect(result).toBe(`${validPrompt()}\n`);
+    vi.stubGlobal("fetch", stubFetch({ content: "```markdown\n" + validPrompt() + "\n```" }));
+    await expect(generatePrompt(input())).resolves.toBe(`${validPrompt()}\n`);
   });
 
   it("sends a high max_tokens so reasoning cannot starve the content", async () => {
     const fetchMock = stubFetch({ content: validPrompt() });
     vi.stubGlobal("fetch", fetchMock);
 
-    await generatePromptWithAI(input());
+    await generatePrompt(input());
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     expect(body.max_tokens).toBeGreaterThanOrEqual(16000);
@@ -160,18 +167,17 @@ describe("generatePromptWithAI", () => {
     const fetchMock = stubFetch({ content: validPrompt() });
     vi.stubGlobal("fetch", fetchMock);
 
-    await generatePromptWithAI(input());
+    await generatePrompt(input());
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    const text = JSON.stringify(body.messages);
-    expect(text).toContain(targetModel.displayName);
+    expect(JSON.stringify(body.messages)).toContain(targetModel.displayName);
   });
 
-  it("marks confirmed answers as binding and skipped ones as assumptions", async () => {
+  it("marks confirmed answers binding and skipped answers as assumptions", async () => {
     const fetchMock = stubFetch({ content: validPrompt() });
     vi.stubGlobal("fetch", fetchMock);
 
-    await generatePromptWithAI(input());
+    await generatePrompt(input());
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     const text = JSON.stringify(body.messages);
@@ -180,47 +186,62 @@ describe("generatePromptWithAI", () => {
     expect(text).toContain("Single player against the computer");
   });
 
-  it("returns null when a reasoning model runs out of token budget", async () => {
-    // Observed failure mode: content null with finish_reason "length".
-    vi.stubGlobal("fetch", stubFetch({ content: null, finish_reason: "length" }));
-    await expect(generatePromptWithAI(input())).resolves.toBeNull();
-  });
-
-  it("returns null when the provider errors", async () => {
-    vi.stubGlobal("fetch", stubFetch({ ok: false, status: 500, content: validPrompt() }));
-    await expect(generatePromptWithAI(input())).resolves.toBeNull();
-  });
-
-  it("returns null when the response has no choices", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
+  it("retries once and succeeds when the first attempt is empty", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
         ok: true,
         status: 200,
-        json: async () => ({ choices: [] }),
-      }),
+        json: async () => ({ choices: [{ finish_reason: "length", message: { content: null } }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ finish_reason: "stop", message: { content: validPrompt() } }],
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(generatePrompt(input())).resolves.toBe(`${validPrompt()}\n`);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws when a reasoning model runs out of token budget on both attempts", async () => {
+    vi.stubGlobal("fetch", stubFetch({ content: null, finish_reason: "length" }));
+    await expect(generatePrompt(input())).rejects.toThrow(PromptGenerationError);
+  });
+
+  it("throws when the provider errors", async () => {
+    vi.stubGlobal("fetch", stubFetch({ ok: false, status: 500, content: validPrompt() }));
+    await expect(generatePrompt(input())).rejects.toThrow(PromptGenerationError);
+  });
+
+  it("throws when the response has no choices", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ choices: [] }) }),
     );
-    await expect(generatePromptWithAI(input())).resolves.toBeNull();
+    await expect(generatePrompt(input())).rejects.toThrow(PromptGenerationError);
   });
 
-  it("returns null when the network throws", async () => {
+  it("throws when the network fails", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
-    await expect(generatePromptWithAI(input())).resolves.toBeNull();
+    await expect(generatePrompt(input())).rejects.toThrow(PromptGenerationError);
   });
 
-  it("returns null when the model ignores the structure and writes prose", async () => {
+  it("throws when the model writes prose instead of the required structure", async () => {
     vi.stubGlobal(
       "fetch",
       stubFetch({
         content:
-          "Sure! Here is a great prompt you can use for building a game. " +
-          "You should definitely make sure the game is fun and works well on " +
-          "many devices and that the code is clean and readable and tested " +
-          "properly with good documentation and clear naming conventions " +
+          "Sure! Here is a great prompt you can use for building a game. You should definitely " +
+          "make sure the game is fun and works well on many devices and that the code is clean " +
+          "and readable and tested properly with good documentation and clear naming conventions " +
           "throughout the entire project structure.",
       }),
     );
-    await expect(generatePromptWithAI(input())).resolves.toBeNull();
+    await expect(generatePrompt(input())).rejects.toThrow(PromptGenerationError);
   });
 });
 
@@ -230,8 +251,7 @@ describe("acceptablePrompt", () => {
   });
 
   it("rejects prompts missing mandatory sections", () => {
-    const missing = validPrompt().replace("BUDGET CONSTRAINT", "COST NOTES");
-    expect(acceptablePrompt(missing)).toBe(false);
+    expect(acceptablePrompt(validPrompt().replace("BUDGET CONSTRAINT", "COST NOTES"))).toBe(false);
   });
 
   it("rejects prompts that open with preamble", () => {
@@ -242,5 +262,64 @@ describe("acceptablePrompt", () => {
     expect(acceptablePrompt("")).toBe(false);
     expect(acceptablePrompt("ROLE\nshort")).toBe(false);
     expect(acceptablePrompt(`${validPrompt()}\n${"x".repeat(13000)}`)).toBe(false);
+  });
+});
+
+describe("multi-select options", () => {
+  it("splits a stored answer back into selections", () => {
+    expect(parseSelections("Dark mode toggle, Responsive mobile layout")).toEqual([
+      "Dark mode toggle",
+      "Responsive mobile layout",
+    ]);
+    expect(parseSelections("")).toEqual([]);
+  });
+
+  it("adds a second option instead of replacing the first", () => {
+    const next = toggleSelection("Dark mode toggle", "Search or filtering", false);
+    expect(parseSelections(next)).toEqual(["Dark mode toggle", "Search or filtering"]);
+  });
+
+  it("removes an option when it is toggled off", () => {
+    const next = toggleSelection("Dark mode toggle, Search or filtering", "Dark mode toggle", false);
+    expect(parseSelections(next)).toEqual(["Search or filtering"]);
+  });
+
+  it("keeps typed text alongside picked options", () => {
+    const next = toggleSelection("a custom requirement", "Dark mode toggle", false);
+    expect(parseSelections(next)).toEqual(["a custom requirement", "Dark mode toggle"]);
+  });
+
+  it("replaces the choice on single-select questions", () => {
+    const options = ["TypeScript (Node)", "Python", "Go", "Rust"];
+    expect(parseSelections(toggleSelection("Python", "Go", true, options))).toEqual(["Go"]);
+  });
+
+  it("drops the previous choice when switching on a single-select question", () => {
+    const options = ["Python", "Go", "Rust"];
+    let value = toggleSelection("", "Python", true, options);
+    value = toggleSelection(value, "Go", true, options);
+    expect(parseSelections(value)).toEqual(["Go"]);
+  });
+
+  it("keeps typed text when switching on a single-select question", () => {
+    const options = ["Python", "Go"];
+    const value = toggleSelection("Python, must run on Node 22", "Go", true, options);
+    expect(parseSelections(value)).toEqual(["Go", "must run on Node 22"]);
+  });
+
+  it("clears the choice when the selected single option is toggled off", () => {
+    expect(toggleSelection("Go", "Go", true, ["Go", "Python"])).toBe("");
+  });
+
+  it("supports picking three options at once", () => {
+    let value = "";
+    value = toggleSelection(value, "Restart button", false);
+    value = toggleSelection(value, "Turn indicator", false);
+    value = toggleSelection(value, "Score tracking across rounds", false);
+    expect(parseSelections(value)).toEqual([
+      "Restart button",
+      "Turn indicator",
+      "Score tracking across rounds",
+    ]);
   });
 });

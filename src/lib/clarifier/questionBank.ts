@@ -18,6 +18,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
       question: "Which language, runtime or framework should it be written in?",
       defaultValue: "Use the language implied by the request, or the most common choice for this kind of problem.",
       options: ["TypeScript (Node)", "Python", "Go", "Rust", "JavaScript (browser)"],
+      singleSelect: true,
     },
     {
       id: "inputs",
@@ -35,6 +36,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
         "Code, tests and usage example",
         "Fully documented with tests and edge-case handling",
       ],
+      singleSelect: true,
     },
   ],
 
@@ -56,6 +58,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
       question: "What tech stack should be used?",
       defaultValue: "Use the stack the user implied, or a sensible modern default for this kind of site.",
       options: ["React + TypeScript + Tailwind", "Next.js + TypeScript + Tailwind", "Plain HTML, CSS and JS", "Vue or Svelte"],
+      singleSelect: true,
     },
     {
       id: "design",
@@ -67,6 +70,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
         "Dark, high contrast",
         "Corporate and understated",
       ],
+      singleSelect: true,
     },
     {
       id: "sections",
@@ -78,6 +82,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
         "Home, about, projects, contact",
         "Home, services, pricing, FAQ, contact",
       ],
+      singleSelect: true,
     },
     {
       id: "features",
@@ -110,6 +115,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
         "Detailed survey",
         "Exhaustive deep dive",
       ],
+      singleSelect: true,
     },
     {
       id: "sources",
@@ -126,6 +132,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
         "Annotated bibliography",
         "Recommendation with rationale",
       ],
+      singleSelect: true,
     },
   ],
 
@@ -141,6 +148,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
       question: "What tone should it take?",
       defaultValue: "Clear, direct and neutral.",
       options: ["Neutral and informative", "Conversational", "Persuasive", "Formal"],
+      singleSelect: true,
     },
     {
       id: "format",
@@ -152,6 +160,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
         "Long-form piece",
         "Outline first",
       ],
+      singleSelect: true,
     },
     {
       id: "points",
@@ -182,6 +191,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
         "Structured report",
         "Extracted data",
       ],
+      singleSelect: true,
     },
   ],
 
@@ -217,6 +227,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
         "Sound and defensible",
         "Statistically rigorous",
       ],
+      singleSelect: true,
     },
   ],
 
@@ -241,6 +252,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
         "A few months",
         "Long-term roadmap",
       ],
+      singleSelect: true,
     },
     {
       id: "format",
@@ -252,6 +264,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
         "Prioritised backlog",
         "Timeline with dates",
       ],
+      singleSelect: true,
     },
   ],
 
@@ -280,6 +293,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
         "Several variants to choose from",
         "An outline or sketch first",
       ],
+      singleSelect: true,
     },
   ],
 
@@ -299,6 +313,7 @@ export const CORE_BY_TYPE: Record<TaskType, ClarifyingQuestion[]> = {
       question: "How much detail do you want in the result?",
       defaultValue: "Enough detail to act on immediately, without padding.",
       options: ["Brief and to the point", "Moderate detail", "Thorough"],
+      singleSelect: true,
     },
     {
       id: "format",

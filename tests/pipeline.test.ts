@@ -1,11 +1,74 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AUTO_MODEL_ID } from "@/data/models";
 import { buildPlan } from "@/lib/planner";
-import { requiredSectionsPresent } from "@/lib/promptCompiler/promptCompiler";
+
+/**
+ * The prompt is written by the internal model, so these tests run the whole
+ * pipeline against a stubbed provider. Cost, feasibility and model selection
+ * stay deterministic regardless of what the stub returns.
+ */
+const STUB_PROMPT = [
+  "ROLE",
+  "Act as a senior engineer.",
+  "",
+  "OBJECTIVE",
+  "Deliver the requested work completely.",
+  "",
+  "CONTEXT",
+  "The requester supplied a task and a budget in CREDIT.",
+  "",
+  "REQUIREMENTS",
+  "- Satisfy the stated objective.",
+  "",
+  "SCOPE",
+  "- The core deliverable.",
+  "",
+  "OUT OF SCOPE",
+  "- Anything not listed under SCOPE.",
+  "",
+  "PRIORITIES",
+  "- Correctness first.",
+  "",
+  "EXECUTION STRATEGY",
+  "- Work through the objective in order.",
+  "",
+  "CONSTRAINTS",
+  "- Keep the output focused.",
+  "",
+  "BUDGET CONSTRAINT",
+  "- Stay within the stated CREDIT budget.",
+  "",
+  "VALIDATION",
+  "- Check the result against every requirement.",
+  "",
+  "REVISION POLICY",
+  "- Use targeted corrections.",
+  "",
+  "STOPPING CONDITIONS",
+  "- Stop when the work is complete.",
+  "",
+  "OUTPUT FORMAT",
+  "- Return the finished work directly.",
+].join("\n");
+
+function stubProvider() {
+  return vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [{ finish_reason: "stop", message: { content: STUB_PROMPT } }],
+    }),
+  });
+}
 
 beforeEach(() => {
+  // Task analysis stays heuristic; only the prompt writer needs a provider.
   delete process.env.AI_API_KEY;
   delete process.env.AI_BASE_URL;
+  process.env.AI_API_KEY = "test-key";
+  process.env.AI_BASE_URL = "https://example.test/v1";
+  process.env.AI_MODEL = "test-model";
+  vi.stubGlobal("fetch", stubProvider());
 });
 
 const LANDING_PAGE =
@@ -27,9 +90,10 @@ describe("planning pipeline", () => {
     expect(plan.cost.maximum).toBeGreaterThan(plan.cost.minimum);
     expect(plan.reserve.recommendedReserve).toBeGreaterThanOrEqual(0);
     expect(plan.analysis.phases.length).toBeGreaterThan(0);
-    expect(requiredSectionsPresent(plan.prompt)).toBe(true);
     expect(plan.executionPlan.steps.length).toBeGreaterThan(0);
     expect(plan.comparison.length).toBeGreaterThan(0);
+    expect(plan.promptSource).toBe("ai");
+    expect(plan.prompt).toContain("ROLE");
   });
 
   it("honours an explicitly selected model", async () => {
@@ -100,6 +164,61 @@ describe("planning pipeline", () => {
     expect(Number.isFinite(plan.cost.minimum)).toBe(true);
   });
 
+  it("carries clarifying answers through the pipeline", async () => {
+    const plan = await buildPlan({
+      taskDescription: "build a tic-tac-toe game",
+      modelId: "claude-sonnet",
+      optimization: "balanced",
+      budget: 10,
+      clarifyingQuestions: [
+        {
+          id: "game_mode",
+          question: "Should it be single-player or multiplayer?",
+          defaultValue: "Two players sharing the same screen, taking turns.",
+        },
+        {
+          id: "game_extras",
+          question: "Which extras do you want?",
+          defaultValue: "A restart button and a clear indicator of whose turn it is.",
+        },
+      ],
+      clarifyingResponses: {
+        game_mode: "Single player against the computer",
+        game_extras: "Restart button, Turn indicator, Score tracking across rounds",
+      },
+    });
+
+    expect(plan.answersUsed).toBe(true);
+    expect(plan.clarifyingAnswers).toHaveLength(2);
+    expect(plan.clarifyingAnswers[0].answer).toBe("Single player against the computer");
+    expect(plan.clarifyingAnswers[1].answer).toBe(
+      "Restart button, Turn indicator, Score tracking across rounds",
+    );
+  });
+
+  it("marks unanswered questions as defaults without blocking the run", async () => {
+    const plan = await buildPlan({
+      taskDescription: "build a tic-tac-toe game",
+      modelId: "claude-sonnet",
+      optimization: "balanced",
+      budget: 10,
+      clarifyingQuestions: [
+        {
+          id: "game_mode",
+          question: "Should it be single-player or multiplayer?",
+          defaultValue: "Two players sharing the same screen, taking turns.",
+        },
+      ],
+    });
+
+    expect(plan.answersUsed).toBe(false);
+    expect(plan.clarifyingAnswers[0].answered).toBe(false);
+    expect(plan.clarifyingAnswers[0].answer).toBe(
+      "Two players sharing the same screen, taking turns.",
+    );
+    expect(plan.prompt.length).toBeGreaterThan(0);
+  });
+
   it("generates a prompt that mentions the budget and never claims to execute", async () => {
     const plan = await buildPlan({
       taskDescription: LANDING_PAGE,
@@ -110,5 +229,18 @@ describe("planning pipeline", () => {
 
     expect(plan.prompt).toContain("CREDIT");
     expect(plan.prompt.toLowerCase()).not.toContain("run with orbio");
+  });
+
+  it("fails loudly when the prompt model cannot be reached, instead of falling back", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+
+    await expect(
+      buildPlan({
+        taskDescription: LANDING_PAGE,
+        modelId: "claude-sonnet",
+        optimization: "balanced",
+        budget: 10,
+      }),
+    ).rejects.toThrow();
   });
 });

@@ -99,8 +99,13 @@ export interface ClarifyingQuestion {
   hint?: string;
   /** Applied when the user skips the question. */
   defaultValue: string;
-  /** Quick-pick choices. Free text is always allowed. */
+  /**
+   * Quick-pick choices. Multiple can be selected at once unless the question
+   * is marked singleSelect. Free text is always allowed alongside them.
+   */
   options?: string[];
+  /** True when the options are mutually exclusive, so picking one clears the rest. */
+  singleSelect?: boolean;
 }
 
 export interface ClarifyingAnswer {

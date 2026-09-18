@@ -24,7 +24,12 @@ function parseClarifyingQuestions(value: unknown): ClarifyingQuestion[] {
     const question = String(entry.question ?? "").trim();
     const defaultValue = String(entry.defaultValue ?? "").trim();
     if (!id || !question || !defaultValue) continue;
-    out.push({ id, question, defaultValue });
+    out.push({
+      id,
+      question,
+      defaultValue,
+      ...(entry.singleSelect === true ? { singleSelect: true } : {}),
+    });
   }
   return out;
 }
@@ -96,10 +101,14 @@ export async function POST(request: Request) {
     });
     return NextResponse.json({ plan });
   } catch {
-    // Never surface raw provider errors to the client.
+    // Never surface raw provider errors to the client. The prompt is always
+    // model-written, so a failure here means there is no prompt to return.
     return NextResponse.json(
-      { error: "We couldn't analyze this task. Please try again." },
-      { status: 500 },
+      {
+        error:
+          "We couldn't write your prompt just now. The prompt model didn't respond in time — please try again.",
+      },
+      { status: 502 },
     );
   }
 }

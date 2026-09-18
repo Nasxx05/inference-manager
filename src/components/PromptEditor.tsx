@@ -66,9 +66,7 @@ export function PromptEditor({
             {model?.displayName ?? plan.modelId} · {formatRange(plan.cost.minimum, plan.cost.maximum)} CREDIT
           </p>
           <p className="mt-1 text-xs text-muted">
-            {plan.promptSource === "ai"
-              ? "Written for this model by AgentFund's prompt-writing model, following your answers."
-              : "Compiled locally from your answers. Edit it if anything is off."}
+            Written for this model by AgentFund's prompt-writing model, following your answers.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

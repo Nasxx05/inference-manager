@@ -29,6 +29,7 @@ export const TRIGGERED_SETS: TriggeredSet[] = [
           "Online multiplayer",
           "Both: local two-player plus a computer opponent",
         ],
+        singleSelect: true,
       },
       {
         id: "game_difficulty",
@@ -40,6 +41,7 @@ export const TRIGGERED_SETS: TriggeredSet[] = [
           "Strong and hard to beat",
           "Unbeatable",
         ],
+        singleSelect: true,
       },
       {
         id: "game_visuals",
@@ -51,6 +53,7 @@ export const TRIGGERED_SETS: TriggeredSet[] = [
           "Retro or pixel art",
           "Dark and neon",
         ],
+        singleSelect: true,
       },
       {
         id: "game_rules",
@@ -63,6 +66,7 @@ export const TRIGGERED_SETS: TriggeredSet[] = [
           "Highlight the winning line, then offer a rematch",
           "Track a running score across rounds",
         ],
+        singleSelect: true,
       },
       {
         id: "game_extras",
@@ -88,6 +92,7 @@ export const TRIGGERED_SETS: TriggeredSet[] = [
           "Terminal or command line",
           "Mobile app",
         ],
+        singleSelect: true,
       },
     ],
   },
@@ -107,6 +112,7 @@ export const TRIGGERED_SETS: TriggeredSet[] = [
           "Products with variants (size, colour)",
           "Imported from an external source",
         ],
+        singleSelect: true,
       },
       {
         id: "checkout",
@@ -119,12 +125,14 @@ export const TRIGGERED_SETS: TriggeredSet[] = [
           "Simulated checkout with mock payment",
           "Real payment integration",
         ],
+        singleSelect: true,
       },
       {
         id: "accounts",
         question: "Do users need accounts, or is guest checkout enough?",
         defaultValue: "Guest checkout only, with no user accounts required.",
         options: ["Guest checkout only", "Optional accounts", "Accounts required"],
+        singleSelect: true,
       },
     ],
   },
@@ -144,6 +152,7 @@ export const TRIGGERED_SETS: TriggeredSet[] = [
           "Social or OAuth sign-in",
           "Passkeys or biometrics",
         ],
+        singleSelect: true,
       },
       {
         id: "auth_storage",
@@ -157,6 +166,7 @@ export const TRIGGERED_SETS: TriggeredSet[] = [
           "Managed auth service",
           "In-memory only, for a prototype",
         ],
+        singleSelect: true,
       },
     ],
   },
@@ -170,6 +180,7 @@ export const TRIGGERED_SETS: TriggeredSet[] = [
         question: "What style should the interface use?",
         defaultValue: "A conventional REST API with predictable resource-based URLs and JSON bodies.",
         options: ["REST", "GraphQL", "RPC-style endpoints", "Webhooks only"],
+        singleSelect: true,
       },
       {
         id: "api_surface",
@@ -188,6 +199,7 @@ export const TRIGGERED_SETS: TriggeredSet[] = [
           "Light manual checks",
           "Generated types and documentation",
         ],
+        singleSelect: true,
       },
     ],
   },
@@ -200,6 +212,7 @@ export const TRIGGERED_SETS: TriggeredSet[] = [
         question: "Which platforms must it support?",
         defaultValue: "Both iOS and Android from a single shared codebase.",
         options: ["iOS only", "Android only", "Both from one codebase"],
+        singleSelect: true,
       },
       {
         id: "device_features",
@@ -229,6 +242,7 @@ export const TRIGGERED_SETS: TriggeredSet[] = [
           "MongoDB",
           "Browser or device local storage",
         ],
+        singleSelect: true,
       },
       {
         id: "schema_shape",

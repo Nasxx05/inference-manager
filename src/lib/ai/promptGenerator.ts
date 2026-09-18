@@ -11,9 +11,11 @@ import type {
  * from the user and writes the final prompt, shaped for the specific model
  * the user selected. It never executes the task.
  *
- * Configured server-side only (AI_API_KEY / AI_BASE_URL / AI_MODEL). When it
- * is unavailable or returns something unusable, the caller falls back to the
- * deterministic compiler in promptCompiler.ts.
+ * This is the ONLY path that produces a prompt. There is no local fallback:
+ * a failed attempt is retried, and if it still fails the request errors so
+ * the user is told rather than handed a degraded prompt.
+ *
+ * Configured server-side only (AI_API_KEY / AI_BASE_URL / AI_MODEL).
  */
 
 export interface PromptDraftInput {
@@ -79,7 +81,14 @@ Quality bar:
 - Keep it tight and useful. Around 500-900 words. Never pad.
 - Stay under 6000 characters total.`;
 
-function configured(): boolean {
+export class PromptGenerationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PromptGenerationError";
+  }
+}
+
+export function promptProviderConfigured(): boolean {
   return Boolean(process.env.AI_API_KEY && process.env.AI_BASE_URL);
 }
 
@@ -185,13 +194,7 @@ export function acceptablePrompt(prompt: string): boolean {
   return prompt.trimStart().startsWith("ROLE");
 }
 
-/**
- * Returns a model-written prompt, or null whenever the result cannot be
- * trusted. Callers must fall back rather than surface a broken prompt.
- */
-export async function generatePromptWithAI(input: PromptDraftInput): Promise<string | null> {
-  if (!configured()) return null;
-
+async function attempt(input: PromptDraftInput): Promise<string> {
   const baseUrl = String(process.env.AI_BASE_URL).replace(/\/$/, "");
   const model = process.env.AI_MODEL || "gpt-4o-mini";
 
@@ -217,7 +220,9 @@ export async function generatePromptWithAI(input: PromptDraftInput): Promise<str
       signal: controller.signal,
     });
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+      throw new PromptGenerationError(`Prompt model returned ${response.status}`);
+    }
 
     const payload = (await response.json()) as {
       choices?: Array<{
@@ -230,13 +235,42 @@ export async function generatePromptWithAI(input: PromptDraftInput): Promise<str
 
     // A reasoning model that runs out of budget returns null content while
     // reporting finish_reason "length". Treat that as unusable, not empty.
-    if (!content || choice?.finish_reason === "length") return null;
+    if (!content || choice?.finish_reason === "length") {
+      throw new PromptGenerationError("Prompt model ran out of its token budget");
+    }
 
     const prompt = stripFences(content);
-    return acceptablePrompt(prompt) ? `${prompt}\n` : null;
-  } catch {
-    return null;
+    if (!acceptablePrompt(prompt)) {
+      throw new PromptGenerationError("Prompt model returned an unusable structure");
+    }
+    return `${prompt}\n`;
+  } catch (error) {
+    if (error instanceof PromptGenerationError) throw error;
+    throw new PromptGenerationError("Prompt model request failed");
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Writes the prompt with the internal model. Retries once, because a
+ * reasoning model occasionally returns an empty or malformed body. Throws
+ * `PromptGenerationError` when no usable prompt can be produced.
+ */
+export async function generatePrompt(input: PromptDraftInput): Promise<string> {
+  if (!promptProviderConfigured()) {
+    throw new PromptGenerationError("No prompt-writing model is configured");
+  }
+
+  let lastError: unknown;
+  for (let i = 0; i < 2; i += 1) {
+    try {
+      return await attempt(input);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new PromptGenerationError("Prompt model request failed");
 }

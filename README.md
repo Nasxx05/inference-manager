@@ -16,8 +16,12 @@ optimizes scope when needed, and produces an execution-ready prompt you can copy
    audience, design direction, stack and pages; a tic-tac-toe game is asked about single vs two
    player, visual style, win/draw handling and extras.
 3. **Review the plan.** Cost estimate, feasibility against your budget, and model recommendation.
-4. **Copy the prompt.** The answers are folded into the prompt, and build tasks also get explicit
-   structure and architecture guidance.
+4. **Copy the prompt.** The internal model writes it from your answers, shaped for the model you
+   selected.
+
+Pick as many options as apply on any question — they are combined into that answer, and you can
+type your own alongside them. Questions where only one answer makes sense (language, tone,
+duration) are exclusive: choosing one replaces the other.
 
 Skipping is always allowed. Every question carries a sensible default, so if you skip you still
 get a usable prompt — just less detailed. Skipped questions appear in the prompt under
@@ -36,7 +40,7 @@ npm run dev
 Open http://localhost:3000.
 
 ```bash
-npm test     # 112 tests
+npm test     # 103 tests
 npm run build
 ```
 
@@ -97,11 +101,10 @@ src/
                         PromptEditor, HistoryPanel
   data/models.ts        Extensible model metadata (pricing, capabilities, context window)
   lib/
-    ai/                 Internal model: task analysis + prompt writing, with fallbacks
+    ai/                 Internal model: task analysis + prompt writing (the prompt source)
     clarifier/          Task-specific clarifying questions, defaults, answer resolution
     estimator/          Cost estimation and budget feasibility
     models/             Model selection and comparison
-    promptCompiler/     Structured, model-aware prompt generation
     scopeOptimizer/     Scope reduction when a task exceeds budget
     validation/         Structured-output validation and input parsing
     planner.ts          Orchestrates the full pipeline
@@ -139,11 +142,14 @@ Estimates are always shown as a **range**. They are planning figures, not guaran
 The internal model **writes the prompt**, tailored to the model the user selected. It receives the
 task, the planning analysis, every clarifying answer (marked binding when answered, or as an
 assumption to restate when skipped), and the target model's capability tier and context window.
-It returns the prompt following the same section structure the local compiler uses.
+It returns the prompt following the section structure it is given (ROLE, OBJECTIVE, CONTEXT,
+REQUIREMENTS, ASSUMED DEFAULTS, STRUCTURE AND ARCHITECTURE, SCOPE, OUT OF SCOPE, PRIORITIES,
+EXECUTION STRATEGY, CONSTRAINTS, BUDGET CONSTRAINT, VALIDATION, REVISION POLICY, STOPPING
+CONDITIONS, OUTPUT FORMAT).
 
-If the internal provider is unavailable, slow, or returns something unusable, AgentFund falls back
-to the deterministic local compiler so the user always gets a prompt. `plan.promptSource` reports
-which path was used (`"ai"` or `"compiled"`).
+The prompt is **always** model-written — there is no local compiler. A failed attempt is retried
+once, and if it still fails the request returns an error rather than a degraded prompt, so the
+user is told instead of being handed something weaker than they asked for.
 
 Configure it via server-side env vars (see `.env.example`):
 

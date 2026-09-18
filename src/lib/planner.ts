@@ -1,11 +1,10 @@
 import { AUTO_MODEL_ID, findModelOrThrow } from "@/data/models";
 import { analyzeTask } from "@/lib/ai/provider";
-import { generatePromptWithAI } from "@/lib/ai/promptGenerator";
+import { generatePrompt } from "@/lib/ai/promptGenerator";
 import { resolveAnswers, answersUsed } from "@/lib/clarifier";
 import { allocatePhaseCosts, estimateCost, formatRange } from "@/lib/estimator/costEstimator";
 import { evaluateFeasibility, planReserve } from "@/lib/estimator/feasibilityEngine";
 import { buildComparison, selectModel } from "@/lib/models/modelSelector";
-import { compilePrompt } from "@/lib/promptCompiler/promptCompiler";
 import { applyScopeReduction, optimizeScope } from "@/lib/scopeOptimizer/scopeOptimizer";
 import type {
   ClarifyingAnswer,
@@ -117,10 +116,9 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
     phases: allocatePhaseCosts(analysis, cost),
   };
 
-  // The internal model writes the prompt when available, shaped around the
-  // model the user selected. The deterministic compiler remains the fallback
-  // so a provider failure never leaves the user with nothing.
-  const aiPrompt = await generatePromptWithAI({
+  // The internal model is the only thing that writes the prompt, shaped around
+  // the model the user selected. It throws if no usable prompt comes back.
+  const prompt = await generatePrompt({
     taskDescription,
     analysis: analysisWithCosts,
     targetModel: model,
@@ -133,24 +131,6 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
     },
     clarifyingAnswers,
   });
-
-  const prompt =
-    aiPrompt ??
-    compilePrompt({
-      taskDescription,
-      analysis: analysisWithCosts,
-      model,
-      budget,
-      optimization,
-      scopeApplied,
-      optimizedScope,
-      clarifyingAnswers,
-      costRange: {
-        minimum: cost.minimum,
-        maximum: cost.maximum,
-        recommendedMaximum: cost.recommendedMaximum,
-      },
-    });
 
   return {
     id: `plan_${Date.now().toString(36)}`,
@@ -180,7 +160,7 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
     executionPlan: executionPlanFor(analysisWithCosts, optimization),
     clarifyingAnswers,
     answersUsed: usedAnswers,
-    promptSource: aiPrompt ? "ai" : "compiled",
+    promptSource: "ai",
     prompt,
   };
 }
