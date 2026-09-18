@@ -82,9 +82,13 @@ Quality bar:
 - Stay under 6000 characters total.`;
 
 export class PromptGenerationError extends Error {
-  constructor(message: string) {
+  /** False for failures that will not improve on a retry (bad key, bad request). */
+  readonly retryable: boolean;
+
+  constructor(message: string, retryable = true) {
     super(message);
     this.name = "PromptGenerationError";
+    this.retryable = retryable;
   }
 }
 
@@ -96,13 +100,15 @@ export function promptProviderConfigured(): boolean {
  * This model reasons before it writes, and the reasoning shares the token
  * budget. Observed: ~37k reasoning tokens before ~3k of content. With a low
  * cap the reasoning consumes everything and `content` comes back null, so the
- * cap has to be high enough to leave room for the actual prompt.
+ * cap has to be high enough to leave room for the actual prompt. Measured
+ * ceiling for reasoning is ~37k, so the default leaves a wide margin.
  */
-const MAX_TOKENS = Number(process.env.AI_MAX_TOKENS ?? 16000);
+const MAX_TOKENS = Number(process.env.AI_MAX_TOKENS ?? 48000);
 
 /**
- * Generous, because a reasoning model can take a couple of minutes. The caller
- * keeps its own loading state; on timeout we fall back rather than fail.
+ * Per-attempt budget. A real prompt takes ~150s end to end, so this must be
+ * generous enough for one attempt to finish. Total worst case is bounded by
+ * the caller, not by retrying forever.
  */
 const TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS ?? 240000);
 
@@ -176,9 +182,19 @@ function stripFences(text: string): string {
     .trim();
 }
 
+/** A real prompt always clears this; anything shorter is a fragment. */
+export const MIN_PROMPT_CHARS = 400;
+
+/**
+ * Upper bound on a usable prompt. Generous on purpose: a reasoning model can
+ * legitimately write a long-but-valid prompt, and rejecting it would discard
+ * work that took minutes to produce.
+ */
+export const MAX_PROMPT_CHARS = 40000;
+
 /** Keeps the model from returning an essay or a fragment. */
 export function acceptablePrompt(prompt: string): boolean {
-  if (!prompt || prompt.length < 400 || prompt.length > 12000) return false;
+  if (!prompt || prompt.length < MIN_PROMPT_CHARS || prompt.length > MAX_PROMPT_CHARS) return false;
   const mandatory = [
     "ROLE",
     "OBJECTIVE",
@@ -191,7 +207,16 @@ export function acceptablePrompt(prompt: string): boolean {
   ];
   if (!mandatory.every((s) => prompt.includes(s))) return false;
   // Must start at the first section rather than with conversational preamble.
-  return prompt.trimStart().startsWith("ROLE");
+  // A stray blank line or markdown heading is tolerated; real prose is not.
+  const head = prompt.trimStart();
+  return head.startsWith("ROLE") || /^#{0,6}\s*ROLE\b/.test(head);
+}
+
+/** Trims anything before the ROLE header instead of discarding the response. */
+function trimToStart(prompt: string): string {
+  const index = prompt.search(/^#{0,6}\s*ROLE\b/m);
+  if (index <= 0) return prompt.trimStart();
+  return prompt.slice(index).trimStart();
 }
 
 async function attempt(input: PromptDraftInput): Promise<string> {
@@ -210,7 +235,10 @@ async function attempt(input: PromptDraftInput): Promise<string> {
       },
       body: JSON.stringify({
         model,
-        temperature: 0.4,
+        // Low: this model reasons before writing, and a higher temperature
+        // lengthens the reasoning chain, which both slows the call down and
+        // eats the shared token budget.
+        temperature: 0.2,
         max_tokens: MAX_TOKENS,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
@@ -221,7 +249,13 @@ async function attempt(input: PromptDraftInput): Promise<string> {
     });
 
     if (!response.ok) {
-      throw new PromptGenerationError(`Prompt model returned ${response.status}`);
+      // A 4xx means our request or credentials are wrong. Retrying just burns
+      // minutes and fails the same way, so mark it non-retryable.
+      const clientFault = response.status >= 400 && response.status < 500;
+      throw new PromptGenerationError(
+        `Prompt model returned ${response.status}`,
+        !clientFault,
+      );
     }
 
     const payload = (await response.json()) as {
@@ -239,7 +273,8 @@ async function attempt(input: PromptDraftInput): Promise<string> {
       throw new PromptGenerationError("Prompt model ran out of its token budget");
     }
 
-    const prompt = stripFences(content);
+    // Salvage a good body that merely opens with preamble before ROLE.
+    const prompt = trimToStart(stripFences(content));
     if (!acceptablePrompt(prompt)) {
       throw new PromptGenerationError("Prompt model returned an unusable structure");
     }
@@ -252,22 +287,32 @@ async function attempt(input: PromptDraftInput): Promise<string> {
   }
 }
 
+const MAX_ATTEMPTS = 3;
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * Writes the prompt with the internal model. Retries once, because a
- * reasoning model occasionally returns an empty or malformed body. Throws
+ * Writes the prompt with the internal model. Retries up to MAX_ATTEMPTS,
+ * because a reasoning model occasionally returns an empty or malformed body.
+ * Failures flagged non-retryable (a 4xx) stop immediately. Throws
  * `PromptGenerationError` when no usable prompt can be produced.
  */
 export async function generatePrompt(input: PromptDraftInput): Promise<string> {
   if (!promptProviderConfigured()) {
-    throw new PromptGenerationError("No prompt-writing model is configured");
+    throw new PromptGenerationError("No prompt-writing model is configured", false);
   }
 
   let lastError: unknown;
-  for (let i = 0; i < 2; i += 1) {
+  for (let i = 0; i < MAX_ATTEMPTS; i += 1) {
     try {
       return await attempt(input);
     } catch (error) {
       lastError = error;
+      if (error instanceof PromptGenerationError && !error.retryable) break;
+      // Brief pause so a rate limit or transient fault can clear.
+      if (i < MAX_ATTEMPTS - 1) await wait(1500 * (i + 1));
     }
   }
   throw lastError instanceof Error

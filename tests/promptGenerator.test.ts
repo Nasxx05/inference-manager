@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { findModelOrThrow } from "@/data/models";
 import { heuristicAnalyze } from "@/lib/ai/taskAnalyzer";
 import {
+  MAX_PROMPT_CHARS,
   PromptGenerationError,
   acceptablePrompt,
   generatePrompt,
@@ -261,7 +262,17 @@ describe("acceptablePrompt", () => {
   it("rejects empty, tiny and oversized prompts", () => {
     expect(acceptablePrompt("")).toBe(false);
     expect(acceptablePrompt("ROLE\nshort")).toBe(false);
-    expect(acceptablePrompt(`${validPrompt()}\n${"x".repeat(13000)}`)).toBe(false);
+    // Padded past the exported ceiling, so this tracks the real limit rather
+    // than a duplicate of it.
+    const oversized = `${validPrompt()}\n${"x".repeat(MAX_PROMPT_CHARS)}`;
+    expect(oversized.length).toBeGreaterThan(MAX_PROMPT_CHARS);
+    expect(acceptablePrompt(oversized)).toBe(false);
+  });
+
+  it("accepts a long-but-valid prompt below the ceiling", () => {
+    const padded = `${validPrompt()}\n${"x".repeat(MAX_PROMPT_CHARS - validPrompt().length - 1)}`;
+    expect(padded.length).toBeLessThanOrEqual(MAX_PROMPT_CHARS);
+    expect(acceptablePrompt(padded)).toBe(true);
   });
 });
 

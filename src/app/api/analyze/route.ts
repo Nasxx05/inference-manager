@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { AUTO_MODEL_ID, getModel } from "@/data/models";
+import { PromptGenerationError } from "@/lib/ai/promptGenerator";
 import { buildPlan } from "@/lib/planner";
 import { parseBudget, parseOptimization } from "@/lib/validation/schemas";
 import type { ClarifyingQuestion, OptimizationPreference } from "@/types";
@@ -8,6 +9,26 @@ export const runtime = "nodejs";
 
 const MAX_QUESTIONS = 12;
 const MAX_ANSWER_LENGTH = 2000;
+
+/**
+ * Maps an internal failure to something the user can act on. Raw provider
+ * text is never forwarded.
+ */
+function userFacingPromptError(error: unknown): string {
+  if (!(error instanceof PromptGenerationError)) {
+    return "We couldn't write your prompt just now. The prompt model didn't respond in time — please try again.";
+  }
+  if (!error.retryable) {
+    return "The prompt model rejected the request, so nothing was written. Check the server AI configuration.";
+  }
+  if (error.message.includes("token budget")) {
+    return "The prompt model spent its whole budget thinking and returned nothing. Try a shorter task description, or try again.";
+  }
+  if (error.message.includes("unusable structure")) {
+    return "The prompt model returned something we couldn't use. Please try again.";
+  }
+  return "We couldn't write your prompt just now. The prompt model didn't respond in time — please try again.";
+}
 
 /**
  * Only the question definitions are trusted from the client, and only enough
@@ -100,15 +121,9 @@ export async function POST(request: Request) {
       clarifyingResponses,
     });
     return NextResponse.json({ plan });
-  } catch {
+  } catch (error) {
     // Never surface raw provider errors to the client. The prompt is always
     // model-written, so a failure here means there is no prompt to return.
-    return NextResponse.json(
-      {
-        error:
-          "We couldn't write your prompt just now. The prompt model didn't respond in time — please try again.",
-      },
-      { status: 502 },
-    );
+    return NextResponse.json({ error: userFacingPromptError(error) }, { status: 502 });
   }
 }
