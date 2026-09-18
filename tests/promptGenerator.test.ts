@@ -218,6 +218,43 @@ describe("generatePrompt", () => {
     await expect(generatePrompt(input())).rejects.toThrow(PromptGenerationError);
   });
 
+  it("retries a rate limit instead of treating it as a bad configuration", async () => {
+    let calls = 0;
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) return { ok: false, status: 429 };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ finish_reason: "stop", message: { content: validPrompt() } }],
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(generatePrompt(input())).resolves.toBe(`${validPrompt()}\n`);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("marks bad credentials as non-retryable and stops after one attempt", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 401 });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(generatePrompt(input())).rejects.toMatchObject({
+      retryable: false,
+      status: 401,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks an out-of-credit account as retryable but records the status", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 402 });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(generatePrompt(input())).rejects.toMatchObject({ status: 402 });
+  });
+
   it("throws when the response has no choices", async () => {
     vi.stubGlobal(
       "fetch",

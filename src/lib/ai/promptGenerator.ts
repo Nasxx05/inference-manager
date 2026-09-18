@@ -85,10 +85,14 @@ export class PromptGenerationError extends Error {
   /** False for failures that will not improve on a retry (bad key, bad request). */
   readonly retryable: boolean;
 
-  constructor(message: string, retryable = true) {
+  /** The HTTP status, when the failure came from a provider response. */
+  readonly status?: number;
+
+  constructor(message: string, retryable = true, status?: number) {
     super(message);
     this.name = "PromptGenerationError";
     this.retryable = retryable;
+    this.status = status;
   }
 }
 
@@ -249,12 +253,17 @@ async function attempt(input: PromptDraftInput): Promise<string> {
     });
 
     if (!response.ok) {
-      // A 4xx means our request or credentials are wrong. Retrying just burns
-      // minutes and fails the same way, so mark it non-retryable.
-      const clientFault = response.status >= 400 && response.status < 500;
+      // Not every 4xx is a bad request. 429 (rate limit) and 408/409 are
+      // transient and often clear within a retry or two, and 402 means the
+      // account is out of credit rather than misconfigured. Only treat the
+      // genuinely terminal codes - 401/403 (bad key) and 400/404/422 (our
+      // request is wrong) - as non-retryable, so a rate limit is not reported
+      // to the user as a configuration problem.
+      const terminal = [400, 401, 403, 404, 422].includes(response.status);
       throw new PromptGenerationError(
         `Prompt model returned ${response.status}`,
-        !clientFault,
+        !terminal,
+        response.status,
       );
     }
 

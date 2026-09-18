@@ -18,7 +18,22 @@ function userFacingPromptError(error: unknown): string {
   if (!(error instanceof PromptGenerationError)) {
     return "We couldn't write your prompt just now. The prompt model didn't respond in time — please try again.";
   }
-  if (!error.retryable) {
+
+  // Status-specific causes first. These are the conditions a server operator
+  // can actually act on, so they must not collapse into a generic message.
+  if (error.status === 402) {
+    return "The prompt model's account has run out of credit, so nothing was written. Top up the server AI account.";
+  }
+  if (error.status === 429) {
+    return "The prompt model is rate limited right now, so nothing was written. Wait a moment and try again.";
+  }
+  if (error.status === 408 || error.status === 409) {
+    return "The prompt model was busy and did not accept the request. Please try again.";
+  }
+  if (error.status === 401 || error.status === 403) {
+    return "The prompt model rejected the credentials, so nothing was written. Check AI_API_KEY on the server.";
+  }
+  if (error.status !== undefined && !error.retryable) {
     return "The prompt model rejected the request, so nothing was written. Check the server AI configuration.";
   }
   if (error.message.includes("token budget")) {
