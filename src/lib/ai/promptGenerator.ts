@@ -101,20 +101,27 @@ export function promptProviderConfigured(): boolean {
 }
 
 /**
- * This model reasons before it writes, and the reasoning shares the token
- * budget. Observed: ~37k reasoning tokens before ~3k of content. With a low
- * cap the reasoning consumes everything and `content` comes back null, so the
- * cap has to be high enough to leave room for the actual prompt. Measured
- * ceiling for reasoning is ~37k, so the default leaves a wide margin.
+ * Read at call time, not module load. The backend is a long-lived process, so
+ * a constant captured here would freeze the value at startup and ignore any
+ * change to the environment. Reading per call also lets tests set these vars
+ * and have them actually take effect.
+ *
+ * The reasoning shares the token budget: observed ~37k reasoning tokens before
+ * ~3k of content. With a low cap the reasoning consumes everything and
+ * `content` comes back null, so the default leaves a wide margin.
  */
-const MAX_TOKENS = Number(process.env.AI_MAX_TOKENS ?? 48000);
+function maxTokens(): number {
+  return Number(process.env.AI_MAX_TOKENS ?? 48000);
+}
 
 /**
  * Per-attempt budget. A real prompt takes ~150s end to end, so this must be
  * generous enough for one attempt to finish. Total worst case is bounded by
  * the caller, not by retrying forever.
  */
-const TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS ?? 240000);
+function timeoutMs(): number {
+  return Number(process.env.AI_TIMEOUT_MS ?? 240000);
+}
 
 function modelNotes(model: ModelConfig): string {
   const tier =
@@ -228,7 +235,7 @@ async function attempt(input: PromptDraftInput): Promise<string> {
   const model = process.env.AI_MODEL || "gpt-4o-mini";
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs());
 
   try {
     const response = await fetch(`${baseUrl}/chat/completions`, {
@@ -243,7 +250,7 @@ async function attempt(input: PromptDraftInput): Promise<string> {
         // lengthens the reasoning chain, which both slows the call down and
         // eats the shared token budget.
         temperature: 0.2,
-        max_tokens: MAX_TOKENS,
+        max_tokens: maxTokens(),
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: userMessage(input) },

@@ -2,6 +2,8 @@ node_modules/
 .next/
 out/
 build/
+# Backend compiled output. Render rebuilds this from source on every deploy.
+server/dist/
 .env
 .env.local
 .env*.local

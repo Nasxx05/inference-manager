@@ -68,6 +68,9 @@ beforeEach(() => {
   process.env.AI_API_KEY = "test-key";
   process.env.AI_BASE_URL = "https://example.test/v1";
   process.env.AI_MODEL = "test-model";
+  // Keep the retry path fast. These are read per call, so lowering the
+  // per-attempt timeout does not weaken what the test asserts.
+  process.env.AI_TIMEOUT_MS = "50";
   vi.stubGlobal("fetch", stubProvider());
 });
 

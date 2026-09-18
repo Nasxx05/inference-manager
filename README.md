@@ -32,7 +32,16 @@ recommendation are unchanged whether you answer or skip.
 
 ## Quick start
 
+Run both halves. The backend must be up, because it writes the prompts.
+
 ```bash
+# Terminal 1 - backend (owns the AI credentials, does the slow work)
+cd server
+npm install
+npm run build
+npm start          # listens on http://localhost:10000
+
+# Terminal 2 - frontend
 npm install
 npm run dev
 ```
@@ -40,37 +49,76 @@ npm run dev
 Open http://localhost:3000.
 
 ```bash
-npm test     # 103 tests
+npm test           # 109 tests
 npm run build
 ```
 
-## Deploying to Vercel
+## How it is deployed
 
-Vercel detects Next.js automatically, so no configuration file is needed.
+AgentFund ships as two services. The split exists because writing a prompt takes
+a few minutes, and a serverless function would time out long before it finished.
 
-1. Push this repo to GitHub (already done).
-2. Go to https://vercel.com/new and **Import** `Nasxx05/inference-manager`.
-3. Leave the defaults:
+| | Frontend | Backend |
+|---|---|---|
+| Platform | Vercel | Render |
+| Code | repo root | `server/` |
+| Type | Next.js, fully static | Express web service |
+| Holds | no credentials | `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL` |
+| Does | UI, cost math, model choice | task analysis, prompt writing |
+
+The browser calls the backend **directly**, so Vercel is never in the path of the
+slow request and no platform timeout applies.
+
+### Backend on Render
+
+1. Create a **Web Service** from this repo.
+2. Set **Root Directory** to `server`.
+3. Build Command: `npm install && npm run build`
+4. Start Command: `npm start`
+5. Add these environment variables:
+
+   | Name | Value |
+   |---|---|
+   | `AI_BASE_URL` | provider base URL, e.g. `https://api.orbio.so/api/v1` |
+   | `AI_API_KEY` | key for the internal planner |
+   | `AI_MODEL` | model id, e.g. `tencent/hy4-preview` |
+   | `AI_MAX_TOKENS` | optional, defaults to `48000` |
+   | `AI_TIMEOUT_MS` | optional, per-attempt budget, defaults to `240000` |
+   | `ALLOWED_ORIGINS` | optional, e.g. `https://your-app.vercel.app` |
+
+   `ALLOWED_ORIGINS` restricts which browsers may call the API. Leave it empty to
+   allow any origin.
+
+Check it with `/health` once deployed — it reports whether the provider is
+configured, without contacting the provider itself, so a provider outage never
+makes Render think the instance is unhealthy.
+
+### Frontend on Vercel
+
+1. Go to https://vercel.com/new and **Import** `Nasxx05/inference-manager`.
+2. Leave the defaults:
    - Framework Preset: **Next.js**
    - Build Command: `npm run build`
    - Output Directory: `.next` (auto-filled)
    - Install Command: `npm install`
-4. (Optional) Add env vars under **Settings → Environment Variables**:
+3. Add one environment variable:
 
    | Name | Value |
    |---|---|
-   | `AI_API_KEY` | key for AgentFund's internal planner |
-   | `AI_BASE_URL` | provider base URL, e.g. `https://api.openai.com/v1` |
-   | `AI_MODEL` | planner model id, e.g. `gpt-4o-mini` |
+   | `NEXT_PUBLIC_BACKEND_URL` | your Render URL, e.g. `https://agentfund-backend.onrender.com` |
 
-   These are optional — with none set, AgentFund uses its deterministic local analyzer and
-   still returns a complete plan. They are server-only and never sent to the browser.
-5. Click **Deploy**. Every push to `main` redeploys automatically; other branches get preview URLs.
+   No trailing slash. This value is public — it ships in the JavaScript bundle —
+   so it must be a URL only, never a credential. It is read at **build** time, so
+   redeploy Vercel after changing it.
+4. Click **Deploy**. Every push to `main` redeploys automatically; other branches
+   get preview URLs.
 
 Notes:
 - No database, auth, or external integrations are required to deploy.
 - Recent history is `localStorage`, so it is per-browser and not shared between visitors.
 - `.env.example` documents the variables; never commit a real `.env` (already gitignored).
+- On Render's free tier the instance sleeps when idle, so the first request after
+  a pause can take an extra ~30s to wake it.
 
 ## The loop
 
@@ -95,23 +143,31 @@ COPY PROMPT
 ## Architecture
 
 ```
+server/                 BACKEND - Express on Render. Owns the AI credentials.
+  src/index.ts          /health, /api/clarify, /api/plan
+  scripts/              Post-build fix so the compiled ESM runs on plain Node
+  Compiles the shared lib/ below together with its own entry point.
+
 src/
-  app/                  Next.js App Router: page + /api/analyze + /api/clarify
+  app/                  Next.js App Router: static page only, no API routes
   components/           Workspace, TaskForm, ClarifyingQuestions, AnalysisPanel,
                         PromptEditor, HistoryPanel
   data/models.ts        Extensible model metadata (pricing, capabilities, context window)
   lib/
-    ai/                 Internal model: task analysis + prompt writing (the prompt source)
+    ai/                 Internal model client: task analysis + prompt writing
+    backend.ts          Resolves the backend URL the browser calls
     clarifier/          Task-specific clarifying questions, defaults, answer resolution
     estimator/          Cost estimation and budget feasibility
     models/             Model selection and comparison
     scopeOptimizer/     Scope reduction when a task exceeds budget
     validation/         Structured-output validation and input parsing
-    planner.ts          Orchestrates the full pipeline
+    planner.ts          Orchestrates the full pipeline (shared by both sides)
 tests/                  Unit tests for every module
 ```
 
-Each concern is a separate module so pricing, models and the analyzer can be replaced independently.
+`src/lib` is deliberately platform-free — no React, no `window` — so the backend can
+import the same planning code the frontend ships. Each concern is a separate module,
+so pricing, models and the analyzer can be replaced independently.
 
 ## Cost estimation
 
@@ -148,20 +204,23 @@ EXECUTION STRATEGY, CONSTRAINTS, BUDGET CONSTRAINT, VALIDATION, REVISION POLICY,
 CONDITIONS, OUTPUT FORMAT).
 
 The prompt is **always** model-written — there is no local compiler. A failed attempt is retried
-once, and if it still fails the request returns an error rather than a degraded prompt, so the
-user is told instead of being handed something weaker than they asked for.
+up to three times, and if it still fails the request returns an error rather than a degraded
+prompt, so the user is told instead of being handed something weaker than they asked for.
+Permanent problems (a bad key, a malformed request) are not retried; transient ones (a rate
+limit, a busy provider) are, and each cause gets its own message rather than all collapsing into
+"check your configuration".
 
-Configure it via server-side env vars (see `.env.example`):
+Configure it on the backend via server-side env vars (see `.env.example`):
 
 ```
-AI_API_KEY=...
 AI_BASE_URL=...
+AI_API_KEY=...
 AI_MODEL=...
-AI_MAX_TOKENS=16000
+AI_MAX_TOKENS=48000
 AI_TIMEOUT_MS=240000
 ```
 
-These are never exposed to the browser, and `.env.local` is gitignored.
+These live on Render, never on Vercel, and are never exposed to the browser.
 
 ### Note on reasoning models
 

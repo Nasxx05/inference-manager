@@ -120,6 +120,10 @@ beforeEach(() => {
   process.env.AI_API_KEY = "test-key";
   process.env.AI_BASE_URL = "https://example.test/v1";
   process.env.AI_MODEL = "test-model";
+  // Small on purpose: these are read per call now, so the values below really
+  // do take effect and the retry tests stay fast instead of waiting seconds.
+  process.env.AI_MAX_TOKENS = "32000";
+  process.env.AI_TIMEOUT_MS = "50";
 });
 
 afterEach(() => {
@@ -162,6 +166,28 @@ describe("generatePrompt", () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     expect(body.max_tokens).toBeGreaterThanOrEqual(16000);
     expect(body.model).toBe("test-model");
+  });
+
+  it("reads AI_MAX_TOKENS on each call instead of freezing it at startup", async () => {
+    const fetchMock = stubFetch({ content: validPrompt() });
+    vi.stubGlobal("fetch", fetchMock);
+    process.env.AI_MAX_TOKENS = "21000";
+
+    await generatePrompt(input());
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.max_tokens).toBe(21000);
+  });
+
+  it("falls back to the safe default when AI_MAX_TOKENS is not set", async () => {
+    const fetchMock = stubFetch({ content: validPrompt() });
+    vi.stubGlobal("fetch", fetchMock);
+    delete process.env.AI_MAX_TOKENS;
+
+    await generatePrompt(input());
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.max_tokens).toBe(48000);
   });
 
   it("tells the writer which model the prompt is for", async () => {

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Plus } from "lucide-react";
 import { AUTO_MODEL_ID } from "@/data/models";
+import { endpoint } from "@/lib/backend";
 import { readHistory, saveEntry } from "@/lib/historyManager";
 import { planToHistoryName } from "@/lib/promptCompiler/promptCompiler";
 import { formatRange } from "@/lib/estimator/costEstimator";
@@ -97,7 +98,7 @@ export function Workspace() {
       setStep(0);
 
       try {
-        const response = await fetch("/api/analyze", {
+        const response = await fetch(endpoint("/api/plan"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -155,7 +156,7 @@ export function Workspace() {
     setLoading(true);
 
     try {
-      const response = await fetch("/api/clarify", {
+      const response = await fetch(endpoint("/api/clarify"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ taskDescription: values.taskDescription.trim() }),
