@@ -1,5 +1,6 @@
 import { AUTO_MODEL_ID, findModelOrThrow } from "@/data/models";
 import { analyzeTask } from "@/lib/ai/provider";
+import { generatePromptWithAI } from "@/lib/ai/promptGenerator";
 import { resolveAnswers, answersUsed } from "@/lib/clarifier";
 import { allocatePhaseCosts, estimateCost, formatRange } from "@/lib/estimator/costEstimator";
 import { evaluateFeasibility, planReserve } from "@/lib/estimator/feasibilityEngine";
@@ -116,21 +117,40 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
     phases: allocatePhaseCosts(analysis, cost),
   };
 
-  const prompt = compilePrompt({
+  // The internal model writes the prompt when available, shaped around the
+  // model the user selected. The deterministic compiler remains the fallback
+  // so a provider failure never leaves the user with nothing.
+  const aiPrompt = await generatePromptWithAI({
     taskDescription,
     analysis: analysisWithCosts,
-    model,
-    budget,
+    targetModel: model,
     optimization,
-    scopeApplied,
-    optimizedScope,
-    clarifyingAnswers,
-    costRange: {
+    budget,
+    cost: {
       minimum: cost.minimum,
       maximum: cost.maximum,
       recommendedMaximum: cost.recommendedMaximum,
     },
+    clarifyingAnswers,
   });
+
+  const prompt =
+    aiPrompt ??
+    compilePrompt({
+      taskDescription,
+      analysis: analysisWithCosts,
+      model,
+      budget,
+      optimization,
+      scopeApplied,
+      optimizedScope,
+      clarifyingAnswers,
+      costRange: {
+        minimum: cost.minimum,
+        maximum: cost.maximum,
+        recommendedMaximum: cost.recommendedMaximum,
+      },
+    });
 
   return {
     id: `plan_${Date.now().toString(36)}`,
@@ -160,6 +180,7 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
     executionPlan: executionPlanFor(analysisWithCosts, optimization),
     clarifyingAnswers,
     answersUsed: usedAnswers,
+    promptSource: aiPrompt ? "ai" : "compiled",
     prompt,
   };
 }

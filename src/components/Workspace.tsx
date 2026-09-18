@@ -30,8 +30,12 @@ const LOADING_STEPS = [
   "Understanding task...",
   "Estimating scope...",
   "Checking budget...",
-  "Preparing prompt...",
+  "Selecting model...",
+  "Writing your prompt...",
 ];
+
+// The prompt-writing model reasons before it writes, so this step is slow.
+const LOADING_STEP_MS = 2600;
 
 export function Workspace() {
   const [values, setValues] = useState<TaskFormValues>(INITIAL_VALUES);
@@ -53,7 +57,7 @@ export function Workspace() {
     if (!loading) return;
     const timer = window.setInterval(() => {
       setStep((s) => (s + 1) % LOADING_STEPS.length);
-    }, 420);
+    }, LOADING_STEP_MS);
     return () => window.clearInterval(timer);
   }, [loading]);
 

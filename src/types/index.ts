@@ -152,6 +152,8 @@ export interface PlanResult {
   clarifyingAnswers: ClarifyingAnswer[];
   /** True when at least one clarifying question was answered rather than skipped. */
   answersUsed: boolean;
+  /** "ai" when the internal model wrote the prompt, "compiled" on fallback. */
+  promptSource: "ai" | "compiled";
   prompt: string;
 }
 

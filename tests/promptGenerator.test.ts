@@ -1,0 +1,246 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { findModelOrThrow } from "@/data/models";
+import { heuristicAnalyze } from "@/lib/ai/taskAnalyzer";
+import { acceptablePrompt, generatePromptWithAI } from "@/lib/ai/promptGenerator";
+import type { ClarifyingAnswer } from "@/types";
+
+const targetModel = findModelOrThrow("claude-sonnet");
+const analysis = heuristicAnalyze("build a tic-tac-toe game");
+
+const answers: ClarifyingAnswer[] = [
+  {
+    id: "game_mode",
+    question: "Should it be single-player or multiplayer?",
+    answer: "Single player against the computer",
+    answered: true,
+  },
+  {
+    id: "game_rules",
+    question: "How should winning, losing and draws be handled?",
+    answer: "Detect a win or a draw immediately, announce the result clearly.",
+    answered: false,
+  },
+];
+
+function input() {
+  return {
+    taskDescription: "build a tic-tac-toe game",
+    analysis,
+    targetModel,
+    optimization: "balanced" as const,
+    budget: 10,
+    cost: { minimum: 3.62, maximum: 4.61, recommendedMaximum: 4.94 },
+    clarifyingAnswers: answers,
+  };
+}
+
+function stubFetch(response: {
+  content?: string | null;
+  finish_reason?: string;
+  ok?: boolean;
+  status?: number;
+}) {
+  return vi.fn().mockResolvedValue({
+    ok: response.ok ?? true,
+    status: response.status ?? 200,
+    json: async () => ({
+      choices: [
+        {
+          finish_reason: response.finish_reason ?? "stop",
+          message: { content: response.content ?? null },
+        },
+      ],
+    }),
+  });
+}
+
+function validPrompt(): string {
+  return [
+    "ROLE",
+    "Act as a senior engineer.",
+    "",
+    "OBJECTIVE",
+    "Build the game.",
+    "",
+    "CONTEXT",
+    "The requester wants a tic-tac-toe game for the browser.",
+    "",
+    "REQUIREMENTS",
+    "- Implement a 3x3 board with alternating turns.",
+    "- Detect a win or a draw immediately and announce it clearly.",
+    "",
+    "ASSUMED DEFAULTS",
+    "- Assume a single-page browser implementation.",
+    "",
+    "STRUCTURE AND ARCHITECTURE",
+    "- Separate board state from rules from rendering.",
+    "",
+    "SCOPE",
+    "- The complete playable game.",
+    "",
+    "OUT OF SCOPE",
+    "- Multiplayer networking.",
+    "",
+    "PRIORITIES",
+    "- Correct rules first.",
+    "",
+    "EXECUTION STRATEGY",
+    "- Build the rules, then the interface.",
+    "",
+    "CONSTRAINTS",
+    "- Keep it focused.",
+    "",
+    "BUDGET CONSTRAINT",
+    "- Stay within the stated budget.",
+    "",
+    "VALIDATION",
+    "- Verify win and draw detection.",
+    "",
+    "REVISION POLICY",
+    "- Use targeted corrections.",
+    "",
+    "STOPPING CONDITIONS",
+    "- Stop when the game is complete.",
+    "",
+    "OUTPUT FORMAT",
+    "- Return the finished code.",
+  ].join("\n");
+}
+
+const ORIGINAL_ENV = { ...process.env };
+
+beforeEach(() => {
+  process.env.AI_API_KEY = "test-key";
+  process.env.AI_BASE_URL = "https://example.test/v1";
+  process.env.AI_MODEL = "test-model";
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  process.env = { ...ORIGINAL_ENV };
+});
+
+describe("generatePromptWithAI", () => {
+  it("returns null when no provider is configured", async () => {
+    delete process.env.AI_API_KEY;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(generatePromptWithAI(input())).resolves.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns the model-written prompt on a good response", async () => {
+    vi.stubGlobal("fetch", stubFetch({ content: validPrompt() }));
+    const result = await generatePromptWithAI(input());
+    expect(result).toBe(`${validPrompt()}\n`);
+  });
+
+  it("strips markdown code fences from the response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      stubFetch({ content: "```markdown\n" + validPrompt() + "\n```" }),
+    );
+    const result = await generatePromptWithAI(input());
+    expect(result).toBe(`${validPrompt()}\n`);
+  });
+
+  it("sends a high max_tokens so reasoning cannot starve the content", async () => {
+    const fetchMock = stubFetch({ content: validPrompt() });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await generatePromptWithAI(input());
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.max_tokens).toBeGreaterThanOrEqual(16000);
+    expect(body.model).toBe("test-model");
+  });
+
+  it("tells the writer which model the prompt is for", async () => {
+    const fetchMock = stubFetch({ content: validPrompt() });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await generatePromptWithAI(input());
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    const text = JSON.stringify(body.messages);
+    expect(text).toContain(targetModel.displayName);
+  });
+
+  it("marks confirmed answers as binding and skipped ones as assumptions", async () => {
+    const fetchMock = stubFetch({ content: validPrompt() });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await generatePromptWithAI(input());
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    const text = JSON.stringify(body.messages);
+    expect(text).toContain("CONFIRMED (binding)");
+    expect(text).toContain("SKIPPED (assume this and restate it)");
+    expect(text).toContain("Single player against the computer");
+  });
+
+  it("returns null when a reasoning model runs out of token budget", async () => {
+    // Observed failure mode: content null with finish_reason "length".
+    vi.stubGlobal("fetch", stubFetch({ content: null, finish_reason: "length" }));
+    await expect(generatePromptWithAI(input())).resolves.toBeNull();
+  });
+
+  it("returns null when the provider errors", async () => {
+    vi.stubGlobal("fetch", stubFetch({ ok: false, status: 500, content: validPrompt() }));
+    await expect(generatePromptWithAI(input())).resolves.toBeNull();
+  });
+
+  it("returns null when the response has no choices", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: [] }),
+      }),
+    );
+    await expect(generatePromptWithAI(input())).resolves.toBeNull();
+  });
+
+  it("returns null when the network throws", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+    await expect(generatePromptWithAI(input())).resolves.toBeNull();
+  });
+
+  it("returns null when the model ignores the structure and writes prose", async () => {
+    vi.stubGlobal(
+      "fetch",
+      stubFetch({
+        content:
+          "Sure! Here is a great prompt you can use for building a game. " +
+          "You should definitely make sure the game is fun and works well on " +
+          "many devices and that the code is clean and readable and tested " +
+          "properly with good documentation and clear naming conventions " +
+          "throughout the entire project structure.",
+      }),
+    );
+    await expect(generatePromptWithAI(input())).resolves.toBeNull();
+  });
+});
+
+describe("acceptablePrompt", () => {
+  it("accepts a well-formed prompt", () => {
+    expect(acceptablePrompt(validPrompt())).toBe(true);
+  });
+
+  it("rejects prompts missing mandatory sections", () => {
+    const missing = validPrompt().replace("BUDGET CONSTRAINT", "COST NOTES");
+    expect(acceptablePrompt(missing)).toBe(false);
+  });
+
+  it("rejects prompts that open with preamble", () => {
+    expect(acceptablePrompt(`Here is your prompt:\n\n${validPrompt()}`)).toBe(false);
+  });
+
+  it("rejects empty, tiny and oversized prompts", () => {
+    expect(acceptablePrompt("")).toBe(false);
+    expect(acceptablePrompt("ROLE\nshort")).toBe(false);
+    expect(acceptablePrompt(`${validPrompt()}\n${"x".repeat(13000)}`)).toBe(false);
+  });
+});

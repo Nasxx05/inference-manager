@@ -36,7 +36,7 @@ npm run dev
 Open http://localhost:3000.
 
 ```bash
-npm test     # 97 tests
+npm test     # 112 tests
 npm run build
 ```
 
@@ -97,7 +97,7 @@ src/
                         PromptEditor, HistoryPanel
   data/models.ts        Extensible model metadata (pricing, capabilities, context window)
   lib/
-    ai/                 Internal planning model client + deterministic fallback analyzer
+    ai/                 Internal model: task analysis + prompt writing, with fallbacks
     clarifier/          Task-specific clarifying questions, defaults, answer resolution
     estimator/          Cost estimation and budget feasibility
     models/             Model selection and comparison
@@ -133,25 +133,47 @@ Estimates are always shown as a **range**. They are planning figures, not guaran
 
 | | Role |
 |---|---|
-| **AgentFund's internal AI** | Understands the task, estimates scope, compiles the prompt. Server-side, optional. |
+| **AgentFund's internal AI** | Understands the task and writes the final prompt. Server-side, optional. |
 | **User's target AI** | Whatever model the user chose. Runs the prompt later, elsewhere. |
 
-If no internal provider is configured, AgentFund falls back to a deterministic local analyzer and
-still produces a complete plan. Configure it via server-side env vars (see `.env.example`):
+The internal model **writes the prompt**, tailored to the model the user selected. It receives the
+task, the planning analysis, every clarifying answer (marked binding when answered, or as an
+assumption to restate when skipped), and the target model's capability tier and context window.
+It returns the prompt following the same section structure the local compiler uses.
+
+If the internal provider is unavailable, slow, or returns something unusable, AgentFund falls back
+to the deterministic local compiler so the user always gets a prompt. `plan.promptSource` reports
+which path was used (`"ai"` or `"compiled"`).
+
+Configure it via server-side env vars (see `.env.example`):
 
 ```
 AI_API_KEY=...
 AI_BASE_URL=...
 AI_MODEL=...
+AI_MAX_TOKENS=16000
+AI_TIMEOUT_MS=240000
 ```
 
-These are never exposed to the browser.
+These are never exposed to the browser, and `.env.local` is gitignored.
+
+### Note on reasoning models
+
+The default internal model (`tencent/hy4-preview` via Orbio) reasons before it writes, and the
+reasoning shares the same token budget. Given a low `max_tokens`, reasoning consumes everything and
+the response contains **no content at all** — only reasoning. Observed: ~37k reasoning tokens
+before ~3k of content. `AI_MAX_TOKENS` must stay high, and a request can take 2–3 minutes, which is
+why the timeout is generous and the UI shows a "Writing your prompt..." state.
 
 ## Explicitly not included
 
-No Orbio connection, wallet, seed phrase, API-key input, CREDIT transfer, agent marketplace,
-worker marketplace, autonomous execution, or chatbot UI. CREDIT is a user-provided planning
-budget, not a balance.
+No wallet, seed phrase, API-key input in the browser, CREDIT transfer, agent marketplace, worker
+marketplace, autonomous execution, or chatbot UI. CREDIT is a user-provided planning budget, not
+a balance.
+
+The Orbio connection is AgentFund's own internal planning and prompt-writing model. It is
+server-side only, configured by the operator, and never surfaced to the user — the user never
+enters an API key, and the app never touches a wallet or executes a task.
 
 ## Notes
 
