@@ -2,9 +2,43 @@ import { NextResponse } from "next/server";
 import { AUTO_MODEL_ID, getModel } from "@/data/models";
 import { buildPlan } from "@/lib/planner";
 import { parseBudget, parseOptimization } from "@/lib/validation/schemas";
-import type { OptimizationPreference } from "@/types";
+import type { ClarifyingQuestion, OptimizationPreference } from "@/types";
 
 export const runtime = "nodejs";
+
+const MAX_QUESTIONS = 12;
+const MAX_ANSWER_LENGTH = 2000;
+
+/**
+ * Only the question definitions are trusted from the client, and only enough
+ * of them to pair answers with defaults. Anything malformed is dropped.
+ */
+function parseClarifyingQuestions(value: unknown): ClarifyingQuestion[] {
+  if (!Array.isArray(value)) return [];
+
+  const out: ClarifyingQuestion[] = [];
+  for (const raw of value.slice(0, MAX_QUESTIONS)) {
+    if (!raw || typeof raw !== "object") continue;
+    const entry = raw as Record<string, unknown>;
+    const id = String(entry.id ?? "").trim();
+    const question = String(entry.question ?? "").trim();
+    const defaultValue = String(entry.defaultValue ?? "").trim();
+    if (!id || !question || !defaultValue) continue;
+    out.push({ id, question, defaultValue });
+  }
+  return out;
+}
+
+function parseClarifyingResponses(value: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return out;
+
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw !== "string") continue;
+    out[String(key).slice(0, 64)] = raw.slice(0, MAX_ANSWER_LENGTH);
+  }
+  return out;
+}
 
 export async function POST(request: Request) {
   let body: unknown;
@@ -47,6 +81,9 @@ export async function POST(request: Request) {
 
   const applyOptimizedScope = payload.applyOptimizedScope === true;
 
+  const clarifyingQuestions = parseClarifyingQuestions(payload.clarifyingQuestions);
+  const clarifyingResponses = parseClarifyingResponses(payload.clarifyingResponses);
+
   try {
     const plan = await buildPlan({
       taskDescription,
@@ -54,6 +91,8 @@ export async function POST(request: Request) {
       optimization,
       budget,
       applyOptimizedScope,
+      clarifyingQuestions,
+      clarifyingResponses,
     });
     return NextResponse.json({ plan });
   } catch {

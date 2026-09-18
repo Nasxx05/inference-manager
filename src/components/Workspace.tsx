@@ -6,8 +6,14 @@ import { AUTO_MODEL_ID } from "@/data/models";
 import { readHistory, saveEntry } from "@/lib/historyManager";
 import { planToHistoryName } from "@/lib/promptCompiler/promptCompiler";
 import { formatRange } from "@/lib/estimator/costEstimator";
-import type { HistoryEntry, OptimizationPreference, PlanResult } from "@/types";
+import type {
+  ClarifyingQuestion,
+  HistoryEntry,
+  OptimizationPreference,
+  PlanResult,
+} from "@/types";
 import { AnalysisPanel } from "./AnalysisPanel";
+import { ClarifyingQuestions } from "./ClarifyingQuestions";
 import { HistoryPanel } from "./HistoryPanel";
 import { PromptEditor } from "./PromptEditor";
 import { TaskForm, type TaskFormValues } from "./TaskForm";
@@ -35,6 +41,10 @@ export function Workspace() {
   const [step, setStep] = useState(0);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
 
+  const [questions, setQuestions] = useState<ClarifyingQuestion[] | null>(null);
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [clarifying, setClarifying] = useState(false);
+
   useEffect(() => {
     setHistory(readHistory());
   }, []);
@@ -59,7 +69,13 @@ export function Workspace() {
   }, [values]);
 
   const analyze = useCallback(
-    async (overrides?: Partial<TaskFormValues> & { applyOptimizedScope?: boolean }) => {
+    async (
+      overrides?: Partial<TaskFormValues> & {
+        applyOptimizedScope?: boolean;
+        clarifyingQuestions?: ClarifyingQuestion[];
+        clarifyingResponses?: Record<string, string>;
+      },
+    ) => {
       const merged = { ...values, ...overrides };
       const budget = Number(merged.budget);
 
@@ -86,6 +102,8 @@ export function Workspace() {
             optimization: merged.optimization,
             budget,
             applyOptimizedScope: overrides?.applyOptimizedScope === true,
+            clarifyingQuestions: overrides?.clarifyingQuestions ?? [],
+            clarifyingResponses: overrides?.clarifyingResponses ?? {},
           }),
         });
 
@@ -98,6 +116,9 @@ export function Workspace() {
 
         setPlan(payload.plan);
         setValues((v) => ({ ...v, optimization: merged.optimization }));
+        setQuestions(null);
+        setAnswers({});
+        setClarifying(false);
 
         const entry: HistoryEntry = {
           id: payload.plan.id,
@@ -119,13 +140,42 @@ export function Workspace() {
     [values],
   );
 
-  function handleSubmit() {
+  async function handleSubmit() {
     const validationError = validate();
     if (validationError) {
       setError(validationError);
       return;
     }
-    void analyze();
+
+    setError(null);
+    setLoading(true);
+
+    try {
+      const response = await fetch("/api/clarify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskDescription: values.taskDescription.trim() }),
+      });
+      const payload = (await response.json()) as {
+        questions?: ClarifyingQuestion[];
+        error?: string;
+      };
+
+      if (!response.ok || !payload.questions || payload.questions.length === 0) {
+        // No questions available: fall straight through to the old behaviour.
+        void analyze();
+        return;
+      }
+
+      setQuestions(payload.questions);
+      setAnswers({});
+      setClarifying(true);
+    } catch {
+      // Never block on the clarifying step.
+      void analyze();
+    } finally {
+      setLoading(false);
+    }
   }
 
   function handleReoptimize(preference: OptimizationPreference) {
@@ -135,6 +185,9 @@ export function Workspace() {
   function handleNewTask() {
     setPlan(null);
     setError(null);
+    setQuestions(null);
+    setAnswers({});
+    setClarifying(false);
     setValues({ ...INITIAL_VALUES, modelId: values.modelId, budget: values.budget });
   }
 
@@ -145,6 +198,8 @@ export function Workspace() {
         : "Know what your AI budget can accomplish before you spend it.",
     [plan],
   );
+
+  const showClarifying = clarifying && questions !== null;
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -170,32 +225,55 @@ export function Workspace() {
 
       <main className="mx-auto w-full max-w-[1180px] flex-1 px-5 py-8 sm:py-12">
         {!plan ? (
-          <div className="animate-fade-up">
-            <div className="mx-auto max-w-[640px] text-center">
-              <h1 className="text-2xl font-semibold leading-snug tracking-tight sm:text-[28px]">
-                {heading}
-              </h1>
-              <p className="mx-auto mt-3 max-w-[520px] text-sm leading-relaxed text-muted">
-                Describe what you want to build, choose your model and budget, and AgentFund creates
-                a realistic execution plan and optimized prompt for the task.
-              </p>
-            </div>
-
-            <div className="mx-auto mt-9 max-w-[820px] rounded border border-line bg-white p-5 sm:p-7">
-              <TaskForm
-                values={values}
-                onChange={setValues}
-                onSubmit={handleSubmit}
-                loading={loading}
-                error={error}
-              />
-              {loading ? (
-                <p aria-live="polite" className="mt-4 text-center text-xs text-muted">
-                  {LOADING_STEPS[step]}
+          showClarifying ? (
+            <ClarifyingQuestions
+              questions={questions}
+              answers={answers}
+              onChange={(id, value) => setAnswers((a) => ({ ...a, [id]: value }))}
+              onBack={() => {
+                setClarifying(false);
+                setQuestions(null);
+                setAnswers({});
+                setError(null);
+              }}
+              onSubmit={() =>
+                void analyze({
+                  clarifyingQuestions: questions,
+                  clarifyingResponses: answers,
+                })
+              }
+              onSkip={() => void analyze({ clarifyingQuestions: questions })}
+              busy={loading}
+              error={error}
+            />
+          ) : (
+            <div className="animate-fade-up">
+              <div className="mx-auto max-w-[640px] text-center">
+                <h1 className="text-2xl font-semibold leading-snug tracking-tight sm:text-[28px]">
+                  {heading}
+                </h1>
+                <p className="mx-auto mt-3 max-w-[520px] text-sm leading-relaxed text-muted">
+                  Describe what you want to build, choose your model and budget, and AgentFund
+                  creates a realistic execution plan and optimized prompt for the task.
                 </p>
-              ) : null}
+              </div>
+
+              <div className="mx-auto mt-9 max-w-[820px] rounded border border-line bg-white p-5 sm:p-7">
+                <TaskForm
+                  values={values}
+                  onChange={setValues}
+                  onSubmit={handleSubmit}
+                  loading={loading}
+                  error={error}
+                />
+                {loading ? (
+                  <p aria-live="polite" className="mt-4 text-center text-xs text-muted">
+                    {LOADING_STEPS[step]}
+                  </p>
+                ) : null}
+              </div>
             </div>
-          </div>
+          )
         ) : (
           <div className="animate-fade-up">
             <div className="mb-6">

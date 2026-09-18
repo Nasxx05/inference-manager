@@ -8,6 +8,24 @@ optimizes scope when needed, and produces an execution-ready prompt you can copy
 
 **AgentFund never executes your task.** The prompt is the product.
 
+## How it works
+
+1. **Describe the task.** AgentFund classifies it and detects what kind of work it is.
+2. **Answer a few clarifying questions.** Before anything final is generated, you get 3–6
+   questions specific to *your* task — not a fixed generic list. A portfolio site is asked about
+   audience, design direction, stack and pages; a tic-tac-toe game is asked about single vs two
+   player, visual style, win/draw handling and extras.
+3. **Review the plan.** Cost estimate, feasibility against your budget, and model recommendation.
+4. **Copy the prompt.** The answers are folded into the prompt, and build tasks also get explicit
+   structure and architecture guidance.
+
+Skipping is always allowed. Every question carries a sensible default, so if you skip you still
+get a usable prompt — just less detailed. Skipped questions appear in the prompt under
+**ASSUMED DEFAULTS** so the executor can restate them and you can correct them.
+
+The clarifying step only affects the prompt. Cost estimation, feasibility and model
+recommendation are unchanged whether you answer or skip.
+
 ## Quick start
 
 ```bash
@@ -18,7 +36,7 @@ npm run dev
 Open http://localhost:3000.
 
 ```bash
-npm test     # 63 tests
+npm test     # 97 tests
 npm run build
 ```
 
@@ -55,6 +73,8 @@ Notes:
 ```
 What do you want to build?
         ↓
+Which questions actually matter here?
+        ↓
 How complex is it?
         ↓
 What can my budget support?
@@ -72,11 +92,13 @@ COPY PROMPT
 
 ```
 src/
-  app/                  Next.js App Router: page + /api/analyze
-  components/           Workspace, TaskForm, AnalysisPanel, PromptEditor, HistoryPanel
+  app/                  Next.js App Router: page + /api/analyze + /api/clarify
+  components/           Workspace, TaskForm, ClarifyingQuestions, AnalysisPanel,
+                        PromptEditor, HistoryPanel
   data/models.ts        Extensible model metadata (pricing, capabilities, context window)
   lib/
     ai/                 Internal planning model client + deterministic fallback analyzer
+    clarifier/          Task-specific clarifying questions, defaults, answer resolution
     estimator/          Cost estimation and budget feasibility
     models/             Model selection and comparison
     promptCompiler/     Structured, model-aware prompt generation

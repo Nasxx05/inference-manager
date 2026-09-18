@@ -1,11 +1,14 @@
 import { AUTO_MODEL_ID, findModelOrThrow } from "@/data/models";
 import { analyzeTask } from "@/lib/ai/provider";
+import { resolveAnswers, answersUsed } from "@/lib/clarifier";
 import { allocatePhaseCosts, estimateCost, formatRange } from "@/lib/estimator/costEstimator";
 import { evaluateFeasibility, planReserve } from "@/lib/estimator/feasibilityEngine";
 import { buildComparison, selectModel } from "@/lib/models/modelSelector";
 import { compilePrompt } from "@/lib/promptCompiler/promptCompiler";
 import { applyScopeReduction, optimizeScope } from "@/lib/scopeOptimizer/scopeOptimizer";
 import type {
+  ClarifyingAnswer,
+  ClarifyingQuestion,
   ExecutionPlan,
   ModelConfig,
   OptimizationPreference,
@@ -19,6 +22,10 @@ export interface PlanRequest {
   optimization: OptimizationPreference;
   budget: number;
   applyOptimizedScope?: boolean;
+  /** Questions that were shown to the user, if the clarifying step ran. */
+  clarifyingQuestions?: ClarifyingQuestion[];
+  /** Raw user answers keyed by question id. Missing or blank means skipped. */
+  clarifyingResponses?: Record<string, string>;
 }
 
 function executionPlanFor(
@@ -43,9 +50,23 @@ function executionPlanFor(
 }
 
 export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
-  const { taskDescription, modelId, optimization, budget, applyOptimizedScope = false } = request;
+  const {
+    taskDescription,
+    modelId,
+    optimization,
+    budget,
+    applyOptimizedScope = false,
+    clarifyingQuestions = [],
+    clarifyingResponses = {},
+  } = request;
 
   const { analysis: rawAnalysis } = await analyzeTask(taskDescription);
+
+  const clarifyingAnswers: ClarifyingAnswer[] = resolveAnswers(
+    clarifyingQuestions,
+    clarifyingResponses,
+  );
+  const usedAnswers = answersUsed(clarifyingAnswers);
 
   const autoSelected = modelId === AUTO_MODEL_ID;
   const recommendation = autoSelected ? selectModel(rawAnalysis, budget, optimization) : null;
@@ -103,6 +124,7 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
     optimization,
     scopeApplied,
     optimizedScope,
+    clarifyingAnswers,
     costRange: {
       minimum: cost.minimum,
       maximum: cost.maximum,
@@ -136,6 +158,8 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
       },
     ),
     executionPlan: executionPlanFor(analysisWithCosts, optimization),
+    clarifyingAnswers,
+    answersUsed: usedAnswers,
     prompt,
   };
 }

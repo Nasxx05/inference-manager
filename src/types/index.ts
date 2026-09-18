@@ -92,6 +92,25 @@ export interface OptimizedScope {
   rationale: string;
 }
 
+export interface ClarifyingQuestion {
+  id: string;
+  question: string;
+  /** Short explanation of why this answer matters. */
+  hint?: string;
+  /** Applied when the user skips the question. */
+  defaultValue: string;
+  /** Quick-pick choices. Free text is always allowed. */
+  options?: string[];
+}
+
+export interface ClarifyingAnswer {
+  id: string;
+  question: string;
+  answer: string;
+  /** False when the default was applied because the user skipped. */
+  answered: boolean;
+}
+
 export interface ExecutionPlan {
   strategy: string;
   steps: string[];
@@ -130,6 +149,9 @@ export interface PlanResult {
   recommendation: ModelRecommendation | null;
   comparison: ModelComparisonRow[];
   executionPlan: ExecutionPlan;
+  clarifyingAnswers: ClarifyingAnswer[];
+  /** True when at least one clarifying question was answered rather than skipped. */
+  answersUsed: boolean;
   prompt: string;
 }
 
