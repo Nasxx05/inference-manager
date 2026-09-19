@@ -34,8 +34,8 @@ export const REQUIRED_CONCEPTS = [
   "executionstrategy",
   "constraints",
   // Required in its own right, not merely as part of "constraints": the budget
-  // is the point of AgentFund, and a prompt that never states it is not an
-  // AgentFund prompt.
+  // is the point of Promgent, and a prompt that never states it is not an
+  // Promgent prompt.
   "budgetconstraint",
   "validation",
   "revisionpolicy",

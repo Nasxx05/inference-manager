@@ -1,5 +1,5 @@
 /**
- * Where the AgentFund backend lives.
+ * Where the Promgent backend lives.
  *
  * The browser calls the backend directly rather than going through a Next.js
  * route, because writing a prompt takes minutes and a serverless function

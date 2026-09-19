@@ -5,6 +5,7 @@
 :root {
   --font-sans: "IBM Plex Sans", "Inter", system-ui, -apple-system, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-display: "Newsreader", "Georgia", "Times New Roman", serif;
 }
 
 html {
@@ -16,13 +17,24 @@ body {
   font-feature-settings: "kern" 1;
 }
 
+/* Visible, calm focus ring: never removed, only restyled. */
 *:focus-visible {
-  outline: 2px solid #176b52;
+  outline: 2px solid #1b5e46;
   outline-offset: 2px;
 }
 
 ::selection {
-  background: #d6e6df;
+  background: #e9f0eb;
+}
+
+/* Editorial display headings. The serif carries the personality, so weight
+   stays light and letter-spacing slightly negative — large type that reads as
+   confident rather than heavy. Used for headings only, never body copy. */
+.display {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.015em;
+  line-height: 1.12;
 }
 
 textarea,
@@ -31,39 +43,39 @@ select {
   font-family: inherit;
 }
 
-/* AgentFund generation mark.
+/* Promgent generation mark.
 
    Four small rounded elements moving vertically with a gentle stagger, so they
    read as assembling and organising rather than as a spinner, a face or a
    mascot. Built from plain spans and CSS only: no image asset, no new
    dependency, and it scales from mobile to desktop without change.
 
-   The 1000ms loop sits inside the requested 800-1200ms range, and travel is
-   deliberately small so the motion stays subtle. */
-.af-mark {
+   The 1000ms loop sits inside the 800-1200ms range, and travel is deliberately
+   small so the motion stays subtle. */
+.pg-mark {
   display: block;
   width: 10px;
   height: 10px;
   border-radius: 9999px;
-  background: #176b52;
+  background: #1b5e46;
   /* Staggered negative delays start each element mid-cycle so they are out of
      phase from the very first frame, with no waiting for the loop to spread. */
-  animation: af-assemble 1000ms ease-in-out infinite;
+  animation: pg-settle 1000ms ease-in-out infinite;
 }
 
-.af-mark-2 {
+.pg-mark-2 {
   animation-delay: -750ms;
 }
 
-.af-mark-3 {
+.pg-mark-3 {
   animation-delay: -500ms;
 }
 
-.af-mark-4 {
+.pg-mark-4 {
   animation-delay: -250ms;
 }
 
-@keyframes af-assemble {
+@keyframes pg-settle {
   0%,
   100% {
     transform: translateY(0);

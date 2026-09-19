@@ -130,10 +130,10 @@ export function GeneratingScreen({
           marks assemble and settle rather than spin, so it reads as work being
           put in order instead of a generic loading spinner. */}
       <div className="flex items-end gap-2" aria-hidden="true">
-        <span className="af-mark af-mark-1" />
-        <span className="af-mark af-mark-2" />
-        <span className="af-mark af-mark-3" />
-        <span className="af-mark af-mark-4" />
+        <span className="pg-mark pg-mark-1" />
+        <span className="pg-mark pg-mark-2" />
+        <span className="pg-mark pg-mark-3" />
+        <span className="pg-mark pg-mark-4" />
       </div>
 
       <div className="space-y-2">

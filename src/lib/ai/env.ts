@@ -1,14 +1,14 @@
 /**
- * Environment access for AgentFund's INTERNAL planning model.
+ * Environment access for Promgent's INTERNAL planning model.
  *
  * Two different models are involved in this system and they must never be
  * confused:
  *
- *   AGENTFUND_AI_MODEL  the model that powers AgentFund itself (analysis,
+ *   AGENTFUND_AI_MODEL  the model that powers Promgent itself (analysis,
  *                       cost planning, prompt compilation). Server-side only.
  *   user's target model  the model the user picked in the UI, which the
  *                       generated prompt is written FOR. Never a secret, and
- *                       never used to make AgentFund's own calls.
+ *                       never used to make Promgent's own calls.
  *
  * Values set in a hosting dashboard frequently arrive with trailing whitespace
  * or a newline. An API key with a trailing newline is a different string to the

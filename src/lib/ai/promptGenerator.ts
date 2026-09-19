@@ -1,5 +1,5 @@
 /**
- * AgentFund's INTERNAL prompt-writing model.
+ * Promgent's INTERNAL prompt-writing model.
  *
  * It takes everything collected from the user and writes the final prompt,
  * shaped for the specific model the user selected. It never executes the task.
@@ -29,7 +29,7 @@ import type {
 export interface PromptDraftInput {
   taskDescription: string;
   analysis: TaskAnalysis;
-  /** The model the user will actually run the prompt on. Never AgentFund's own. */
+  /** The model the user will actually run the prompt on. Never Promgent's own. */
   targetModel: ModelConfig;
   optimization: OptimizationPreference;
   budget: number;
@@ -65,7 +65,7 @@ const SECTIONS = [
   "OUTPUT FORMAT",
 ];
 
-const SYSTEM_PROMPT = `You are the prompt-writing engine inside AgentFund, a budget-aware AI task planner.
+const SYSTEM_PROMPT = `You are the prompt-writing engine inside Promgent, a budget-aware AI task planner.
 
 Your ONLY job is to write a prompt. You never execute, simulate, or solve the user's task.
 You write a prompt that the user will later hand to the AI model they selected.
@@ -241,7 +241,7 @@ async function attempt(input: PromptDraftInput): Promise<Attempt> {
         "AI_VALIDATION_FAILED",
         missing.length
           ? `The prompt is missing required sections: ${missing.join(", ")}.`
-          : "The prompt model returned something that is not a usable AgentFund prompt.",
+          : "The prompt model returned something that is not a usable Promgent prompt.",
         { retryable: true, requestId: result.requestId },
       ),
     };
@@ -266,7 +266,7 @@ export async function generatePrompt(input: PromptDraftInput): Promise<PromptRes
   if (!aiProviderConfigured()) {
     throw new AiError(
       "BACKEND_NOT_CONFIGURED",
-      `AgentFund's model is not configured. Missing: ${missingConfig().join(", ")}.`,
+      `Promgent's model is not configured. Missing: ${missingConfig().join(", ")}.`,
     );
   }
 

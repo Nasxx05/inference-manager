@@ -171,7 +171,7 @@ export interface PlanResult {
    *
    * The LLM calls are the only meaningful contributors to latency, so
    * reporting them separately makes a slow request diagnosable: the log and the
-   * response both say whether the delay was in the model or in AgentFund.
+   * response both say whether the delay was in the model or in Promgent.
    */
   analysisDurationMs?: number;
   promptDurationMs?: number;

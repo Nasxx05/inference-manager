@@ -1,5 +1,5 @@
 /**
- * AgentFund backend.
+ * Promgent backend.
  *
  * This service owns the LLM credentials and does the slow work: task analysis
  * and prompt generation. The Next.js frontend on Vercel holds no credentials
@@ -189,7 +189,7 @@ app.get("/health/ai/test", async (_request, response) => {
 function userFacingMessage(ai: AiError): string {
   switch (ai.code) {
     case "BACKEND_NOT_CONFIGURED":
-      return "The AgentFund backend is not configured with a model. Set AGENTFUND_AI_API_KEY, AGENTFUND_AI_BASE_URL and AGENTFUND_AI_MODEL, then restart.";
+      return "The Promgent backend is not configured with a model. Set AGENTFUND_AI_API_KEY, AGENTFUND_AI_BASE_URL and AGENTFUND_AI_MODEL, then restart.";
     case "AI_AUTH_FAILED":
       return "The AI provider rejected the credentials. Check that AGENTFUND_AI_API_KEY is correct and complete, with no trailing space or newline.";
     case "AI_MODEL_UNAVAILABLE":
@@ -202,7 +202,7 @@ function userFacingMessage(ai: AiError): string {
       return "The AI provider took too long to respond. Please try again.";
     case "AI_INVALID_RESPONSE":
     case "AI_VALIDATION_FAILED":
-      return "The AI provider returned a response AgentFund could not use. Please try again.";
+      return "The AI provider returned a response Promgent could not use. Please try again.";
     default:
       return "Something went wrong while planning your task. Please try again.";
   }
@@ -453,7 +453,7 @@ app.use((_request, response) => {
 app.listen(PORT, () => {
   const health = backendHealth();
   const budgets = tokenBudgets();
-  console.log(`AgentFund backend listening on port ${PORT}`);
+  console.log(`Promgent backend listening on port ${PORT}`);
   console.log(`Provider configured: ${health.providerConfigured ? "yes" : "no"}`);
   console.log(`Model: ${health.model ?? "(unset)"}`);
   console.log(
@@ -487,7 +487,7 @@ app.listen(PORT, () => {
   }
   if (!aiProviderConfigured()) {
     console.warn(
-      "AgentFund's model is not configured: /api/plan will fail until the AGENTFUND_AI_* variables are set.",
+      "Promgent's model is not configured: /api/plan will fail until the AGENTFUND_AI_* variables are set.",
     );
   }
 });

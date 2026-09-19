@@ -5,8 +5,8 @@ import type { ClarifyingQuestion } from "@/types";
 import { Button, Field } from "./ui";
 
 const INPUT_CLASS =
-  "w-full rounded border border-line bg-white px-3 py-2.5 text-sm text-ink transition-colors " +
-  "placeholder:text-[#A8ADA4] hover:border-[#CFCFC6] focus:border-forest";
+  "w-full rounded border border-line bg-paper px-3 py-2.5 text-sm text-ink transition-colors " +
+  "placeholder:text-muted hover:border-lineStrong focus:border-forest";
 
 const OPTION_SEPARATOR = ", ";
 
@@ -78,7 +78,7 @@ export function ClarifyingQuestions({
         </p>
       </div>
 
-      <div className="mx-auto mt-9 max-w-[820px] rounded border border-line bg-white p-5 sm:p-7">
+      <div className="mx-auto mt-9 max-w-[820px] rounded border border-line bg-paper p-5 sm:p-7">
         <div className="flex flex-col gap-6">
           {questions.map((question, index) => {
             const value = answers[question.id] ?? "";
@@ -108,7 +108,7 @@ export function ClarifyingQuestions({
                         onClick={() => onChange(question.id, "")}
                         aria-label={`Clear answer for: ${question.question}`}
                         title="Clear"
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-1.5 text-muted transition-colors hover:bg-[#F3F3EF] hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-forest"
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-1.5 text-muted transition-colors hover:bg-canvas hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-forest"
                       >
                         <X aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
@@ -134,7 +134,7 @@ export function ClarifyingQuestions({
                           className={`inline-flex items-center gap-1 rounded border px-2.5 py-1 text-xs transition-colors ${
                             isOn
                               ? "border-forest bg-forest text-white"
-                              : "border-line bg-white text-muted hover:border-[#CFCFC6] hover:text-ink"
+                              : "border-line bg-paper text-muted hover:border-lineStrong hover:text-ink"
                           }`}
                         >
                           {isOn ? (
@@ -147,7 +147,7 @@ export function ClarifyingQuestions({
                       );
                     })}
                     {!single ? (
-                      <span className="text-[11px] text-[#A8ADA4]">choose any that apply</span>
+                      <span className="text-[11px] text-muted">choose any that apply</span>
                     ) : null}
                   </div>
                 ) : null}
@@ -157,7 +157,7 @@ export function ClarifyingQuestions({
                     "Using your answer."
                   ) : (
                     <>
-                      <span className="text-[#A8ADA4]">Skipped &middot; </span>
+                      <span className="text-muted">Skipped &middot; </span>
                       assumed: {question.defaultValue}
                     </>
                   )}

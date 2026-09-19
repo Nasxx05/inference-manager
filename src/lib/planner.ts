@@ -12,7 +12,7 @@
  *   scope reduction, model recommendation, comparison, execution plan
  *
  * The model is never asked for money. It supplies token estimates and scope
- * judgements; AgentFund turns those into CREDIT figures using model metadata.
+ * judgements; Promgent turns those into CREDIT figures using model metadata.
  * That keeps the product's numbers reproducible and auditable.
  *
  * If the combined call cannot be used — AGENTFUND_AI_COMBINED=0, or the
@@ -330,7 +330,7 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     analysisDurationMs: llmDurationMs,
     promptDurationMs: 0,
     // Route and latency breakdown. Diagnostic only, but it is what lets a slow
-    // request be attributed to the provider or to AgentFund without guessing.
+    // request be attributed to the provider or to Promgent without guessing.
     route,
     requestId,
     llmCalls,

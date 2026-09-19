@@ -63,7 +63,7 @@ export function TaskForm({
             placeholder={
               "Build a responsive portfolio website using React and TypeScript with a projects section, contact form, dark mode, animations and mobile support."
             }
-            className="w-full resize-y rounded border border-line bg-white px-3.5 py-3 pr-11 text-[15px] leading-relaxed text-ink placeholder:text-[#A3A79F] transition-colors hover:border-[#CFCFC6] focus:border-forest"
+            className="w-full resize-y rounded border border-line bg-paper px-3.5 py-3 pr-11 text-[15px] leading-relaxed text-ink placeholder:text-muted transition-colors hover:border-lineStrong focus:border-forest"
           />
           {values.taskDescription.length > 0 ? (
             <button
@@ -74,7 +74,7 @@ export function TaskForm({
               }}
               aria-label="Clear task description"
               title="Clear"
-              className="absolute right-2.5 top-2.5 rounded p-1.5 text-muted transition-colors hover:bg-[#F3F3EF] hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-forest"
+              className="absolute right-2.5 top-2.5 rounded p-1.5 text-muted transition-colors hover:bg-canvas hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-forest"
             >
               <X aria-hidden="true" className="h-4 w-4" />
             </button>
@@ -126,7 +126,7 @@ export function TaskForm({
               step="0.5"
               value={values.budget}
               onChange={(e) => set("budget", e.target.value)}
-              className="w-full rounded border border-line bg-white px-3 py-2.5 pr-20 font-mono text-sm text-ink transition-colors hover:border-[#CFCFC6] focus:border-forest"
+              className="w-full rounded border border-line bg-paper px-3 py-2.5 pr-20 font-mono text-sm text-ink transition-colors hover:border-lineStrong focus:border-forest"
             />
             <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 font-mono text-xs text-credit">
               CREDIT
@@ -139,7 +139,7 @@ export function TaskForm({
         <p
           id="task-error"
           role="alert"
-          className="rounded border border-[#E4CFC9] bg-[#FBF3F1] px-3 py-2 text-sm text-danger"
+          className="rounded border border-danger-light bg-danger-light px-3 py-2 text-sm text-danger"
         >
           {error}
         </p>
@@ -152,7 +152,7 @@ export function TaskForm({
       </div>
 
       <p className="text-center text-xs text-muted">
-        AgentFund plans and compiles. It never runs your task.
+        Promgent plans and compiles. It never runs your task.
       </p>
     </form>
   );

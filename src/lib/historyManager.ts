@@ -1,6 +1,6 @@
 import type { HistoryEntry } from "@/types";
 
-const STORAGE_KEY = "agentfund.history.v1";
+const STORAGE_KEY = "promgent.history.v1";
 const MAX_ENTRIES = 12;
 
 export function readHistory(): HistoryEntry[] {

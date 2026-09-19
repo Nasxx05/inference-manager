@@ -22,7 +22,7 @@ export function HistoryPanel({
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-controls="recent-list"
-        className="inline-flex items-center gap-1.5 rounded border border-line bg-white px-2.5 py-1.5 text-xs text-muted transition-colors hover:border-[#CFCFC6] hover:text-ink"
+        className="inline-flex items-center gap-1.5 rounded border border-line bg-paper px-2.5 py-1.5 text-xs text-muted transition-colors hover:border-lineStrong hover:text-ink"
       >
         Recent
         <ChevronDown
@@ -34,7 +34,7 @@ export function HistoryPanel({
       {open ? (
         <ul
           id="recent-list"
-          className="absolute right-0 z-20 mt-1.5 w-64 overflow-hidden rounded border border-line bg-white"
+          className="absolute right-0 z-20 mt-1.5 w-64 overflow-hidden rounded border border-line bg-paper"
         >
           {entries.map((entry) => (
             <li key={entry.id}>
@@ -44,7 +44,7 @@ export function HistoryPanel({
                   onSelect(entry);
                   setOpen(false);
                 }}
-                className="flex w-full items-baseline justify-between gap-3 px-3 py-2 text-left transition-colors hover:bg-[#FCFCFA]"
+                className="flex w-full items-baseline justify-between gap-3 px-3 py-2 text-left transition-colors hover:bg-paper"
               >
                 <span className="min-w-0 truncate text-xs">{entry.taskName}</span>
                 <span className="shrink-0 font-mono text-[11px] text-credit">

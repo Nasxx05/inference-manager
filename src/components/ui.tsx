@@ -24,8 +24,8 @@ export function Field({
 }
 
 const SELECT_CLASS =
-  "w-full appearance-none rounded border border-line bg-white px-3 py-2.5 text-sm text-ink " +
-  "transition-colors hover:border-[#CFCFC6] focus:border-forest";
+  "w-full appearance-none rounded border border-line bg-paper px-3 py-2.5 text-sm text-ink " +
+  "transition-colors hover:border-lineStrong focus:border-forest";
 
 export function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
   return (
@@ -55,7 +55,7 @@ export function Button({
     "transition-colors disabled:cursor-not-allowed disabled:opacity-50";
   const styles = {
     primary: "bg-forest text-white hover:bg-forest-dark",
-    secondary: "border border-line bg-white text-ink hover:border-[#CFCFC6] hover:bg-[#FCFCFA]",
+    secondary: "border border-line bg-paper text-ink hover:border-lineStrong hover:bg-paper",
     ghost: "text-muted hover:text-ink",
   }[variant];
   return (
@@ -75,7 +75,7 @@ export function Card({
   action?: React.ReactNode;
 }) {
   return (
-    <section className="rounded border border-line bg-white">
+    <section className="rounded border border-line bg-paper">
       {title ? (
         <header className="flex items-center justify-between border-b border-line px-4 py-2.5">
           <h2 className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">

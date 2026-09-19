@@ -1,7 +1,7 @@
 import type { PlanResult } from "@/types";
 
 /**
- * The prompt is written by AgentFund's internal model
+ * The prompt is written by Promgent's internal model
  * (`src/lib/ai/promptGenerator.ts`), which follows the section structure
  * defined there. This module no longer compiles prompts locally; it keeps only
  * the helpers the rest of the app depends on.

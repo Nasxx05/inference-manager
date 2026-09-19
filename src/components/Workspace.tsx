@@ -253,7 +253,7 @@ export function Workspace() {
     <div className="flex min-h-screen flex-col">
       <header className="border-b border-line bg-canvas">
         <div className="mx-auto flex max-w-[1180px] items-center justify-between gap-4 px-5 py-3.5">
-          <span className="font-mono text-sm font-medium tracking-tight">AgentFund</span>
+          <span className="font-mono text-sm font-medium tracking-tight">Promgent</span>
           <div className="flex items-center gap-2">
             <HistoryPanel
               entries={history}
@@ -298,16 +298,18 @@ export function Workspace() {
           ) : (
             <div className="animate-fade-up">
               <div className="mx-auto max-w-[640px] text-center">
-                <h1 className="text-2xl font-semibold leading-snug tracking-tight sm:text-[28px]">
+                {/* Editorial serif on the primary heading: the type carries the
+                    personality, so weight stays light and spacing stays calm. */}
+                <h1 className="display text-[30px] leading-snug text-ink sm:text-[36px]">
                   {heading}
                 </h1>
                 <p className="mx-auto mt-3 max-w-[520px] text-sm leading-relaxed text-muted">
-                  Describe what you want to build, choose your model and budget, and AgentFund
+                  Describe what you want to build, choose your model and budget, and Promgent
                   creates a realistic execution plan and optimized prompt for the task.
                 </p>
               </div>
 
-              <div className="mx-auto mt-9 max-w-[820px] rounded border border-line bg-white p-5 sm:p-7">
+              <div className="mx-auto mt-9 max-w-[820px] rounded border border-line bg-paper p-5 sm:p-7">
                 <TaskForm
                   values={values}
                   onChange={setValues}
@@ -335,7 +337,7 @@ export function Workspace() {
         ) : (
           <div className="animate-fade-up">
             <div className="mb-6">
-              <h1 className="text-lg font-semibold tracking-tight">Task analysis</h1>
+              <h1 className="display text-[24px] text-ink">Task analysis</h1>
               <p className="mt-1 text-sm text-muted">
                 {plan.autoSelected
                   ? "Model auto-selected for this task and budget."
@@ -355,7 +357,7 @@ export function Workspace() {
                 />
               </div>
 
-              <div className="order-1 rounded border border-line bg-white p-4 sm:p-5 lg:order-2">
+              <div className="order-1 rounded border border-line bg-paper p-4 sm:p-5 lg:order-2">
                 <PromptEditor plan={plan} onReoptimize={handleReoptimize} busy={loading} />
               </div>
             </div>
@@ -381,7 +383,7 @@ export function Workspace() {
       <footer className="border-t border-line">
         <div className="mx-auto max-w-[1180px] px-5 py-4">
           <p className="text-xs text-muted">
-            AgentFund plans and compiles prompts only. It never executes your task, and it is not
+            Promgent plans and compiles prompts only. It never executes your task, and it is not
             connected to any wallet or billing system.
           </p>
         </div>

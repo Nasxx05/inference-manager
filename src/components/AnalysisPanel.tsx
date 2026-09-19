@@ -11,7 +11,7 @@ function StatusBadge({ plan }: { plan: PlanResult }) {
   const styles = {
     fits: "border-forest/30 bg-forest-light text-forest",
     "fits-with-optimization": "border-credit/30 bg-credit-light text-credit",
-    "does-not-fit": "border-[#E4CFC9] bg-[#FBF3F1] text-danger",
+    "does-not-fit": "border-danger-light bg-danger-light text-danger",
   }[status];
 
   const Icon = status === "fits" ? Check : status === "fits-with-optimization" ? Minus : AlertTriangle;

@@ -372,7 +372,7 @@ export async function listModels(): Promise<
  *
  * Split into LLM, parse and local time deliberately: a slow request is only
  * fixable once it is clear whether the time went to the provider, to parsing
- * the response, or to AgentFund's own calculations.
+ * the response, or to Promgent's own calculations.
  */
 export function logTiming(fields: {
   requestId: string;

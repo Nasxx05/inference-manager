@@ -1,5 +1,5 @@
 /**
- * AgentFund's INTERNAL planning model: task analysis.
+ * Promgent's INTERNAL planning model: task analysis.
  *
  * Separate from the user's target model — this only plans and compiles, it
  * never executes the task, and it is never the model the prompt is written for.
@@ -34,7 +34,7 @@ export interface AnalysisResult {
   attemptCount: number;
 }
 
-const SYSTEM_PROMPT = `You are the planning engine inside AgentFund, a budget-aware AI task planner.
+const SYSTEM_PROMPT = `You are the planning engine inside Promgent, a budget-aware AI task planner.
 You never execute the user's task. You only analyze it and return structured planning metadata.
 
 Analyse the user's request and return ONLY valid JSON with this exact shape:
@@ -79,7 +79,7 @@ export async function analyzeTask(taskDescription: string): Promise<AnalysisResu
   if (!aiProviderConfigured()) {
     throw new AiError(
       "BACKEND_NOT_CONFIGURED",
-      `AgentFund's model is not configured. Missing: ${missingConfig().join(", ")}.`,
+      `Promgent's model is not configured. Missing: ${missingConfig().join(", ")}.`,
     );
   }
 
@@ -97,7 +97,7 @@ export async function analyzeTask(taskDescription: string): Promise<AnalysisResu
         messages,
         jsonMode: true,
         // Small and explicit: the analyser returns one compact JSON object, so
-        // a large cap would only buy reasoning and prose AgentFund discards.
+        // a large cap would only buy reasoning and prose Promgent discards.
         maxTokens: aiAnalysisMaxTokens(),
         temperature: 0.1,
         stage: "task-analysis",
@@ -161,7 +161,7 @@ export async function analyzeTask(taskDescription: string): Promise<AnalysisResu
   );
 }
 
-/** The model currently configured for AgentFund's own calls. */
+/** The model currently configured for Promgent's own calls. */
 export function configuredModel(): string | undefined {
   return aiModel();
 }

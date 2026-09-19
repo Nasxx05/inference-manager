@@ -45,7 +45,7 @@ import type {
 
 export interface CombinedInput {
   taskDescription: string;
-  /** The model the user will run the prompt on. Never AgentFund's own model. */
+  /** The model the user will run the prompt on. Never Promgent's own model. */
   targetModel: ModelConfig;
   optimization: OptimizationPreference;
   budget: number;
@@ -65,7 +65,7 @@ export interface CombinedResult {
   attemptCount: number;
 }
 
-const COMBINED_SYSTEM = `You are the planning and prompt-writing engine inside AgentFund.
+const COMBINED_SYSTEM = `You are the planning and prompt-writing engine inside Promgent.
 
 You do two things in ONE response:
 1. Analyse the task.
@@ -212,7 +212,7 @@ function parseCombined(raw: unknown): {
       "AI_VALIDATION_FAILED",
       missing.length
         ? `The generated prompt is missing required sections: ${missing.join(", ")}.`
-        : `The generated prompt is not a usable AgentFund prompt (${prompt.length} chars, valid range 400-${MAX_PROMPT_CHARS}).`,
+        : `The generated prompt is not a usable Promgent prompt (${prompt.length} chars, valid range 400-${MAX_PROMPT_CHARS}).`,
     );
   }
 
@@ -236,7 +236,7 @@ export async function generatePlan(input: CombinedInput): Promise<CombinedResult
   if (!aiProviderConfigured()) {
     throw new AiError(
       "BACKEND_NOT_CONFIGURED",
-      `AgentFund's model is not configured. Missing: ${missingConfig().join(", ")}.`,
+      `Promgent's model is not configured. Missing: ${missingConfig().join(", ")}.`,
     );
   }
 

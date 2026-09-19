@@ -66,7 +66,7 @@ export function PromptEditor({
             {model?.displayName ?? plan.modelId} · {formatRange(plan.cost.minimum, plan.cost.maximum)} CREDIT
           </p>
           <p className="mt-1 text-xs text-muted">
-            Written for this model by AgentFund's prompt-writing model, following your answers.
+            Written for this model by Promgent's prompt-writing model, following your answers.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -117,7 +117,7 @@ export function PromptEditor({
         readOnly={!editing}
         spellCheck={false}
         aria-label="Generated prompt"
-        className={`min-h-[420px] w-full flex-1 resize-y rounded border border-line bg-white p-4 font-mono text-[13px] leading-relaxed text-ink transition-colors ${
+        className={`min-h-[420px] w-full flex-1 resize-y rounded border border-line bg-paper p-4 font-mono text-[13px] leading-relaxed text-ink transition-colors ${
           editing ? "focus:border-forest" : "cursor-default"
         }`}
       />
@@ -137,7 +137,7 @@ export function PromptEditor({
               className={`rounded border px-2.5 py-1 text-xs transition-colors disabled:opacity-50 ${
                 plan.optimization === key
                   ? "border-forest bg-forest-light text-forest"
-                  : "border-line bg-white text-muted hover:border-[#CFCFC6] hover:text-ink"
+                  : "border-line bg-paper text-muted hover:border-lineStrong hover:text-ink"
               }`}
             >
               {REOPTIMIZE_LABELS[key]}
@@ -150,7 +150,7 @@ export function PromptEditor({
       </div>
 
       <p className="text-xs leading-relaxed text-muted">
-        Read the prompt before you use it. AgentFund does not run this prompt — copy it and run it
+        Read the prompt before you use it. Promgent does not run this prompt — copy it and run it
         yourself in your preferred AI environment.
       </p>
     </div>
