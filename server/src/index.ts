@@ -14,6 +14,7 @@ import express from "express";
 import { selectQuestions } from "@/lib/clarifier";
 import { analyzeTask } from "@/lib/ai/provider";
 import { PromptGenerationError } from "@/lib/ai/promptGenerator";
+import { aiApiKey, aiBaseUrl, aiModel, aiProviderConfigured } from "@/lib/ai/env";
 import { buildPlan } from "@/lib/planner";
 import { parseBudget, parseOptimization } from "@/lib/validation/schemas";
 import type { ClarifyingQuestion, OptimizationPreference, TaskType } from "@/types";
@@ -63,8 +64,13 @@ app.use(express.json({ limit: "1mb" }));
 app.get("/health", (_request, response) => {
   response.json({
     status: "ok",
-    providerConfigured: Boolean(process.env.AI_API_KEY && process.env.AI_BASE_URL),
-    model: process.env.AI_MODEL ?? null,
+    providerConfigured: aiProviderConfigured(),
+    // Presence only, never the value. A key that is set but empty on the host
+    // reads as "configured: false" here, which is the most common cause of a
+    // 401 that looks like a bad key.
+    apiKeyPresent: Boolean(aiApiKey()),
+    baseUrlPresent: Boolean(aiBaseUrl()),
+    model: aiModel(),
   });
 });
 
@@ -87,7 +93,12 @@ function userFacingPromptError(error: unknown): string {
     return "The prompt model was busy and did not accept the request. Please try again.";
   }
   if (error.status === 401 || error.status === 403) {
-    return "The prompt model rejected the credentials, so nothing was written. Check AI_API_KEY on the server.";
+    // A blank key fails preflight with the same status as a real rejection, but
+    // the fix is different, so keep the two messages distinct.
+    if (error.message.includes("No prompt-model API key")) {
+      return "No AI_API_KEY is set on the server, so nothing was written. Set it and restart the backend.";
+    }
+    return "The prompt model rejected the credentials, so nothing was written. Check that AI_API_KEY on the server is correct and complete (no trailing spaces or newline).";
   }
   if (error.status !== undefined && !error.retryable) {
     return "The prompt model rejected the request, so nothing was written. Check the server AI configuration.";
@@ -230,8 +241,8 @@ app.use((_request, response) => {
 });
 
 app.listen(PORT, () => {
-  const configured = Boolean(process.env.AI_API_KEY && process.env.AI_BASE_URL);
   console.log(`AgentFund backend listening on port ${PORT}`);
-  console.log(`Provider configured: ${configured ? "yes" : "no"}`);
-  console.log(`Model: ${process.env.AI_MODEL ?? "(unset)"}`);
+  console.log(`Provider configured: ${aiProviderConfigured() ? "yes" : "no"}`);
+  console.log(`API key present: ${aiApiKey() ? "yes" : "no"}`);
+  console.log(`Model: ${aiModel()}`);
 });
