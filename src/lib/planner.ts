@@ -62,7 +62,12 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
 
   // Throws a structured AiError if the model is unconfigured or fails: the
   // pipeline never continues with a substituted analysis.
-  const { analysis: rawAnalysis, model: agentModel } = await analyzeTask(taskDescription);
+  // This is LLM call #1 of the two a completed task makes.
+  const {
+    analysis: rawAnalysis,
+    model: agentModel,
+    durationMs: analysisDurationMs,
+  } = await analyzeTask(taskDescription);
 
   const clarifyingAnswers: ClarifyingAnswer[] = resolveAnswers(
     clarifyingQuestions,
@@ -118,8 +123,9 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
     phases: allocatePhaseCosts(analysis, cost),
   };
 
-  // The internal model is the only thing that writes the prompt, shaped around
-  // the model the user selected. It throws if no usable prompt comes back.
+  // LLM call #2, and the last one. Everything between the two calls is local
+  // calculation: cost, feasibility, scope and model recommendation cost no LLM
+  // time at all.
   const generated = await generatePrompt({
     taskDescription,
     analysis: analysisWithCosts,
@@ -167,6 +173,10 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
     // Which internal model produced this plan. Diagnostic only: it is not the
     // user's target model, and it never contains a credential.
     agentModel,
+    // Per-stage timings, so a slow request can be attributed to the stage that
+    // caused it rather than only to the request as a whole.
+    analysisDurationMs,
+    promptDurationMs: generated.durationMs,
   };
 }
 

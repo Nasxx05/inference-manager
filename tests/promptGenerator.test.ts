@@ -122,7 +122,7 @@ beforeEach(() => {
   process.env.AGENTFUND_AI_MODEL = "test-model";
   // Small on purpose: these are read per call now, so the values below really
   // do take effect and the retry tests stay fast instead of waiting seconds.
-  process.env.AGENTFUND_AI_MAX_TOKENS = "32000";
+  process.env.AGENTFUND_AI_PROMPT_MAX_TOKENS = "3500";
   process.env.AGENTFUND_AI_TIMEOUT_MS = "50";
 });
 
@@ -195,38 +195,49 @@ describe("generatePrompt", () => {
     });
   });
 
-  it("sends a bounded max_tokens so no model can run unbounded", async () => {
+  it("sends the prompt stage's own bounded max_tokens", async () => {
     const fetchMock = stubFetch({ content: validPrompt() });
     vi.stubGlobal("fetch", fetchMock);
 
     await generatePrompt(input());
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    expect(body.max_tokens).toBeGreaterThan(0);
-    expect(body.max_tokens).toBeLessThanOrEqual(32000);
+    expect(body.max_tokens).toBe(3500);
     expect(body.model).toBe("test-model");
   });
 
-  it("reads AGENTFUND_AI_MAX_TOKENS on each call instead of freezing it at startup", async () => {
+  it("reads AGENTFUND_AI_PROMPT_MAX_TOKENS on each call instead of freezing it", async () => {
     const fetchMock = stubFetch({ content: validPrompt() });
     vi.stubGlobal("fetch", fetchMock);
-    process.env.AGENTFUND_AI_MAX_TOKENS = "21000";
+    process.env.AGENTFUND_AI_PROMPT_MAX_TOKENS = "4000";
 
     await generatePrompt(input());
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    expect(body.max_tokens).toBe(21000);
+    expect(body.max_tokens).toBe(4000);
   });
 
-  it("falls back to the documented default when AGENTFUND_AI_MAX_TOKENS is not set", async () => {
+  it("falls back to the documented default when the prompt cap is not set", async () => {
     const fetchMock = stubFetch({ content: validPrompt() });
     vi.stubGlobal("fetch", fetchMock);
-    delete process.env.AGENTFUND_AI_MAX_TOKENS;
+    delete process.env.AGENTFUND_AI_PROMPT_MAX_TOKENS;
 
     await generatePrompt(input());
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    expect(body.max_tokens).toBe(8000);
+    expect(body.max_tokens).toBe(3500);
+  });
+
+  it("never raises the cap because of the deprecated AI_MAX_TOKENS", async () => {
+    const fetchMock = stubFetch({ content: validPrompt() });
+    vi.stubGlobal("fetch", fetchMock);
+    delete process.env.AGENTFUND_AI_PROMPT_MAX_TOKENS;
+    process.env.AI_MAX_TOKENS = "48000";
+
+    await generatePrompt(input());
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.max_tokens).toBe(3500);
   });
 
   it("tells the writer which model the prompt is for", async () => {

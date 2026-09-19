@@ -9,20 +9,35 @@
  * use. Configure on Render:
  *
  *   AGENTFUND_AI_BASE_URL, AGENTFUND_AI_API_KEY, AGENTFUND_AI_MODEL
- *   (optional: AGENTFUND_AI_MAX_TOKENS, AGENTFUND_AI_TIMEOUT_MS,
- *              AGENTFUND_AI_FALLBACK_MODEL, ALLOWED_ORIGINS)
+ *   (optional: AGENTFUND_AI_ANALYSIS_MAX_TOKENS, AGENTFUND_AI_PROMPT_MAX_TOKENS,
+ *              AGENTFUND_AI_TIMEOUT_MS, AGENTFUND_AI_FALLBACK_MODEL,
+ *              ALLOWED_ORIGINS)
  *
  * Changing AGENTFUND_AI_MODEL is enough to switch the internal model.
+ *
+ * LLM call budget for a completed task: exactly two.
+ *
+ *   1. /api/clarify  local classification only — no LLM call
+ *   2. /api/plan     one analysis call, then one prompt-writing call
+ *
+ * Cost, feasibility, scope optimization and model recommendation are all local
+ * calculations, so they cost no LLM time at all.
  */
 
 import cors from "cors";
 import express from "express";
 import { loadLocalEnv } from "./loadEnv";
 import { AiError, newRequestId, toAiError } from "@/lib/ai/errors";
-import { ENV, aiModel, usingLegacyEnvNames } from "@/lib/ai/env";
-import { aiHealth, backendHealth, simpleAiTest } from "@/lib/ai/health";
+import {
+  ENV,
+  aiModel,
+  legacyMaxTokensPresent,
+  usingLegacyEnvNames,
+} from "@/lib/ai/env";
+import { aiHealth, backendHealth, simpleAiTest, tokenBudgets } from "@/lib/ai/health";
 import { analyzeTask } from "@/lib/ai/provider";
 import { aiProviderConfigured } from "@/lib/ai/env";
+import { heuristicAnalyze } from "@/lib/ai/taskAnalyzer";
 import { buildPlan } from "@/lib/planner";
 import { selectQuestions } from "@/lib/clarifier";
 import { parseBudget, parseOptimization } from "@/lib/validation/schemas";
@@ -77,6 +92,30 @@ app.use(
 app.use(express.json({ limit: "1mb" }));
 
 /* -------------------------------------------------------------------------- */
+/* Timing                                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One line per stage, plus a total.
+ *
+ * The point is to make it obvious where time goes: `clarify` is local and
+ * should be ~0ms, while `task-analysis` and `prompt-generation` are the two
+ * LLM stages. If the total is dominated by one of them, the log says which.
+ */
+function logStage(
+  requestId: string,
+  stage: "clarify" | "task-analysis" | "prompt-generation" | "total",
+  durationMs: number,
+  success: boolean,
+  detail = "",
+): void {
+  console.log(
+    `[stage] ts=${new Date().toISOString()} requestId=${requestId} stage=${stage} ` +
+      `durationMs=${durationMs} success=${success}${detail ? ` ${detail}` : ""}`,
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Health                                                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -86,7 +125,10 @@ app.use(express.json({ limit: "1mb" }));
  * Render to kill a perfectly good instance.
  */
 app.get("/health", (_request, response) => {
-  response.json({ success: true, data: backendHealth() });
+  response.json({
+    success: true,
+    data: { ...backendHealth(), budgets: tokenBudgets() },
+  });
 });
 
 /**
@@ -116,6 +158,7 @@ app.get("/health/ai", async (_request, response) => {
  *
  * Separates "the provider connection is broken" from "the planner is broken":
  * if this succeeds but /api/plan fails, the fault is in prompt generation.
+ * It uses a 32-token cap, so it is fast and cheap.
  */
 app.get("/health/ai/test", async (_request, response) => {
   const result = await simpleAiTest();
@@ -253,63 +296,77 @@ function validatePlanInput(payload: Record<string, unknown>):
   return { ok: true, taskDescription, optimization, budget };
 }
 
-/** Returns the clarifying questions for a task before any prompt is written. */
+/**
+ * Returns the clarifying questions for a task. NO LLM CALL.
+ *
+ * Classification is local and deterministic. The only thing this step needs is
+ * a task type good enough to pick a relevant question set; the full AI analysis
+ * happens once in /api/plan, after the user answers or skips. Removing the
+ * call here takes a completed task from three LLM calls to two.
+ */
 app.post("/api/clarify", async (request, response) => {
+  const started = Date.now();
+  const requestId = newRequestId();
   const payload = (request.body ?? {}) as Record<string, unknown>;
 
   const taskDescription = String(payload.taskDescription ?? "").trim();
   if (!taskDescription) {
+    logStage(requestId, "clarify", Date.now() - started, false);
     return response.status(400).json({
       success: false,
       error: {
         code: "AI_VALIDATION_FAILED",
         message: "Describe what you want to accomplish before continuing.",
-        requestId: newRequestId(),
+        requestId,
       },
     });
   }
   if (taskDescription.length > MAX_TASK_LENGTH) {
+    logStage(requestId, "clarify", Date.now() - started, false);
     return response.status(400).json({
       success: false,
       error: {
         code: "AI_VALIDATION_FAILED",
         message: "Task description is too long.",
-        requestId: newRequestId(),
+        requestId,
       },
     });
   }
 
+  // Local only: classify from the task text, or trust the client's type when it
+  // supplies a valid one. No provider call, so this returns immediately even
+  // when the provider is down or unconfigured.
   let taskType = asTaskType(payload.taskType);
-
   if (!taskType) {
-    try {
-      const { analysis } = await analyzeTask(taskDescription);
-      taskType = analysis.taskType;
-    } catch (error) {
-      const ai = toAiError(error);
-      // Questions are task-specific, so a failed analysis cannot produce a
-      // meaningful set. Report the real cause instead of guessing a type.
-      return response.status(502).json(errorResponse(ai, 502).body);
-    }
+    taskType = heuristicAnalyze(taskDescription).taskType;
   }
 
-  return response.json({
-    success: true,
-    data: { taskType, questions: selectQuestions(taskDescription, taskType) },
-  });
+  const questions = selectQuestions(taskDescription, taskType);
+  logStage(requestId, "clarify", Date.now() - started, true, `taskType=${taskType}`);
+
+  return response.json({ success: true, data: { taskType, questions } });
 });
 
-/** Builds the full plan, including the model-written prompt. */
+/**
+ * Builds the full plan. Normally exactly two LLM calls: one task analysis,
+ * then one prompt generation. Everything between them is local.
+ */
 app.post("/api/plan", async (request, response) => {
+  const totalStarted = Date.now();
+  const requestId = newRequestId();
   const payload = (request.body ?? {}) as Record<string, unknown>;
 
   const input = validatePlanInput(payload);
   if (!input.ok) {
+    logStage(requestId, "total", Date.now() - totalStarted, false);
     return response.status(400).json({
       success: false,
-      error: { code: "AI_VALIDATION_FAILED", message: input.message, requestId: newRequestId() },
+      error: { code: "AI_VALIDATION_FAILED", message: input.message, requestId },
     });
   }
+
+  let analysisMs = 0;
+  let promptMs = 0;
 
   try {
     const plan = await buildPlan({
@@ -321,11 +378,30 @@ app.post("/api/plan", async (request, response) => {
       clarifyingQuestions: parseClarifyingQuestions(payload.clarifyingQuestions),
       clarifyingResponses: parseClarifyingResponses(payload.clarifyingResponses),
     });
+
+    // Attribute the elapsed time to the two LLM stages using the durations the
+    // planner already measured, so the log says which half was slow.
+    analysisMs = plan.analysisDurationMs ?? 0;
+    promptMs = plan.promptDurationMs ?? 0;
+    logStage(requestId, "task-analysis", analysisMs, true);
+    logStage(requestId, "prompt-generation", promptMs, true);
+    logStage(
+      requestId,
+      "total",
+      Date.now() - totalStarted,
+      true,
+      `local=${Math.max(0, Date.now() - totalStarted - analysisMs - promptMs)}ms`,
+    );
     return response.json({ success: true, data: plan });
   } catch (error) {
-    const ai = toAiError(error);
-    // 503 for conditions that may clear; 502 for everything else. Raw provider
-    // text is never forwarded, and the requestId ties this to the server log.
+    const ai = toAiError(error, requestId);
+    // The analysis stage ran and failed before prompt generation started, so
+    // any failure that reached here without a prompt duration belongs to it.
+    const failedStage: "task-analysis" | "prompt-generation" =
+      promptMs > 0 || ai.code === "AI_VALIDATION_FAILED" ? "prompt-generation" : "task-analysis";
+    logStage(requestId, failedStage, Date.now() - totalStarted, false, `code=${ai.code}`);
+    logStage(requestId, "total", Date.now() - totalStarted, false, `code=${ai.code}`);
+
     const status =
       ai.code === "AI_TIMEOUT" ||
       ai.code === "AI_RATE_LIMITED" ||
@@ -336,7 +412,7 @@ app.post("/api/plan", async (request, response) => {
     console.error(
       `[api] requestId=${ai.requestId} code=${ai.code} status=${ai.status ?? "-"} message=${ai.message}`,
     );
-    return response.status(status).json(body);
+    return response.status(status).json({ ...body, error: { ...body.error, requestId } });
   }
 });
 
@@ -349,10 +425,13 @@ app.use((_request, response) => {
 
 app.listen(PORT, () => {
   const health = backendHealth();
+  const budgets = tokenBudgets();
   console.log(`AgentFund backend listening on port ${PORT}`);
   console.log(`Provider configured: ${health.providerConfigured ? "yes" : "no"}`);
   console.log(`Model: ${health.model ?? "(unset)"}`);
-  console.log(`maxTokens=${health.maxTokens} timeoutMs=${health.timeoutMs}`);
+  console.log(
+    `Budgets: analysis=${budgets.analysis} prompt=${budgets.prompt} timeoutMs=${health.timeoutMs}`,
+  );
   console.log(
     envFilesLoaded.length
       ? `Env files loaded: ${envFilesLoaded.join(", ")}`
@@ -364,6 +443,13 @@ app.listen(PORT, () => {
   if (usingLegacyEnvNames()) {
     console.warn(
       `Using legacy AI_* variable names. Rename to ${ENV.API_KEY}, ${ENV.BASE_URL}, ${ENV.MODEL}.`,
+    );
+  }
+  if (legacyMaxTokensPresent()) {
+    // Ignored on purpose: honouring it would restore one oversized cap for both
+    // stages and undo the split budgets that keep calls fast.
+    console.warn(
+      `AI_MAX_TOKENS is set but ignored. Use ${ENV.ANALYSIS_MAX_TOKENS} and ${ENV.PROMPT_MAX_TOKENS} instead.`,
     );
   }
   if (isProduction && !allowList) {

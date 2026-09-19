@@ -166,6 +166,15 @@ export interface PlanResult {
    * credential. Useful for confirming a model switch actually took effect.
    */
   agentModel?: string;
+  /**
+   * Time spent in each LLM stage, in milliseconds.
+   *
+   * The two LLM calls are the only meaningful contributors to latency, so
+   * reporting them separately makes a slow request diagnosable: the log and the
+   * response both say whether the delay was analysis or prompt generation.
+   */
+  analysisDurationMs?: number;
+  promptDurationMs?: number;
 }
 
 export interface HistoryEntry {

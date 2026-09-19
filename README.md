@@ -10,12 +10,14 @@ optimizes scope when needed, and produces an execution-ready prompt you can copy
 
 ## How it works
 
-1. **Describe the task.** AgentFund classifies it and detects what kind of work it is.
-2. **Answer a few clarifying questions.** Before anything final is generated, you get 3–6
-   questions specific to *your* task — not a fixed generic list. A portfolio site is asked about
-   audience, design direction, stack and pages; a tic-tac-toe game is asked about single vs two
-   player, visual style, win/draw handling and extras.
-3. **Review the plan.** Cost estimate, feasibility against your budget, and model recommendation.
+1. **Describe the task.** AgentFund classifies it locally and returns 3–6
+   questions specific to *your* task — not a fixed generic list. A portfolio site
+   is asked about audience, design direction, stack and pages; a tic-tac-toe game
+   is asked about single vs two player, visual style, win/draw handling and extras.
+2. **Answer or skip.** Any combination, or type your own. Every question has a
+   sensible default, so skipping still yields a usable prompt.
+3. **Review the plan.** The model analyzes the task once; cost, feasibility,
+   scope and model recommendation are then calculated locally.
 4. **Copy the prompt.** The internal model writes it from your answers, shaped for the model you
    selected.
 
@@ -27,8 +29,9 @@ Skipping is always allowed. Every question carries a sensible default, so if you
 get a usable prompt — just less detailed. Skipped questions appear in the prompt under
 **ASSUMED DEFAULTS** so the executor can restate them and you can correct them.
 
-The clarifying step only affects the prompt. Cost estimation, feasibility and model
-recommendation are unchanged whether you answer or skip.
+The clarifying step is local and instant — it only affects the prompt. Cost
+estimation, feasibility and model recommendation are unchanged whether you
+answer or skip.
 
 ## Quick start
 
@@ -52,13 +55,34 @@ Locally the backend reads the `AGENTFUND_AI_*` values from the root `.env.local`
 on startup (a plain Node process does not do this by itself). Values already
 present in the real environment are never overwritten, so the same code is
 driven by the Render dashboard in production and by `.env.local` on your
-machine. The startup log prints `Env files loaded: ...` (or `none`) so you can
-see which one is in play.
+machine. The startup log prints `Env files loaded: ...` (or `none`), the model
+in use, and the per-stage budgets.
 
 ```bash
-npm test           # 127 tests
+npm test           # 136 tests
 npm run build
 ```
+
+## The two-call flow
+
+A completed task makes exactly **two** LLM calls. Everything else is local.
+
+```text
+User task
+  ↓   POST /api/clarify    local classifier only — NO LLM call
+Clarifying questions
+  ↓   user answers or skips
+  ↓   POST /api/plan       LLM call 1: task analysis (compact JSON)
+Local cost estimation, feasibility, scope optimization, model recommendation
+  ↓   POST /api/plan       LLM call 2: prompt generation
+Final result → browser
+```
+
+Classification for the clarifying step is deterministic (`heuristicAnalyze`). It
+only needs to be good enough to pick a relevant question set; the full AI
+analysis happens once, after the user answers. So `/api/clarify` returns
+immediately, and keeps working even when the provider is down or unconfigured —
+whereas `/api/plan` correctly reports a structured error in that case.
 
 ## How it is deployed
 
@@ -88,9 +112,10 @@ slow request and no platform timeout applies.
    |---|---|
    | `AGENTFUND_AI_BASE_URL` | provider API base, e.g. `https://api.example.com/v1` |
    | `AGENTFUND_AI_API_KEY` | key for AgentFund's internal model |
-   | `AGENTFUND_AI_MODEL` | model id, e.g. `tencent/hy4-preview` |
-   | `AGENTFUND_AI_MAX_TOKENS` | optional, defaults to `8000` |
-   | `AGENTFUND_AI_TIMEOUT_MS` | optional, per-attempt budget, defaults to `120000` |
+   | `AGENTFUND_AI_MODEL` | model id, e.g. `z-ai/glm-5.3-flash` |
+   | `AGENTFUND_AI_ANALYSIS_MAX_TOKENS` | optional, defaults to `1800` |
+   | `AGENTFUND_AI_PROMPT_MAX_TOKENS` | optional, defaults to `3500` |
+   | `AGENTFUND_AI_TIMEOUT_MS` | optional, per-attempt budget, defaults to `90000` |
    | `AGENTFUND_AI_FALLBACK_MODEL` | optional, used only if the primary is unavailable |
    | `ALLOWED_ORIGINS` | optional, e.g. `https://your-app.vercel.app` |
 
@@ -103,6 +128,23 @@ slow request and no platform timeout applies.
    The old `AI_*` names still work if the `AGENTFUND_AI_*` ones are unset, but
    a stale `AI_MODEL` never overrides `AGENTFUND_AI_MODEL`. Rename when you can:
    the startup log warns while legacy names are in use.
+
+### Token budgets
+
+Each stage has its own output cap. There is no shared 48000-token limit.
+
+| Stage | Variable | Default | Why |
+|---|---|---|---|
+| Task analysis | `AGENTFUND_AI_ANALYSIS_MAX_TOKENS` | `1800` | Returns one compact JSON object. More would only buy reasoning and prose AgentFund discards. |
+| Prompt generation | `AGENTFUND_AI_PROMPT_MAX_TOKENS` | `3500` | The prompt is the deliverable, roughly 500-900 words. Bounded so the model cannot pad. |
+| Any call | `AGENTFUND_AI_TIMEOUT_MS` | `90000` | Per-attempt deadline, enforced with `AbortController`. |
+
+The deprecated `AI_MAX_TOKENS` (historically `48000`) is **ignored**: honouring
+it would restore one oversized cap for both stages and undo the split budgets.
+The backend warns at startup while it is present. Delete it.
+
+The health echo test uses a fixed 32-token cap, so a health check never costs
+what a real request costs.
 
 ### The internal model is configurable
 
@@ -149,7 +191,10 @@ It verifies the configured model against the provider's model list rather than
 assuming it is valid, then sends a trivial request expecting the exact string
 `AGENTFUND_TEST_OK`. That echo test separates provider problems from
 prompt-generation problems: if it passes but `/api/plan` fails, the fault is in
-prompt generation, not the connection.
+prompt generation, not the connection. It never uses the full AgentFund prompt.
+
+`/health` also reports the caps in force under `budgets`, so a deployment can be
+confirmed without reading the dashboard.
 
 Troubleshooting order: key present → base URL present → model present → model
 exists → provider reachable → test request succeeds. `modelAvailable:false`
@@ -194,9 +239,12 @@ Test in this order, so a failure points at the right layer:
 1. `GET /health` — backend is up and configured.
 2. `GET /health/ai` — model exists and the provider answers.
 3. `GET /health/ai/test` — the trivial echo returns `AGENTFUND_TEST_OK`.
-4. `POST /api/clarify` — task analysis.
-5. `POST /api/plan` — the full pipeline, including prompt generation.
+4. `POST /api/clarify` — local classification, returns immediately.
+5. `POST /api/plan` — one analysis call, then one prompt call.
 6. The Vercel frontend.
+
+A completed task should show `clarify` at ~0ms and exactly two LLM calls in
+`/api/plan`. If it shows three, a stage is re-running the model.
 
 To confirm the backend really is model-agnostic, set `AGENTFUND_AI_MODEL` to a
 different valid id and repeat steps 2, 3 and 5. No code change is involved: if
@@ -227,6 +275,7 @@ COPY PROMPT
 ```
 server/                 BACKEND - Express on Render. Owns the AI credentials.
   src/index.ts          /health, /health/ai, /health/ai/test, /api/clarify, /api/plan
+                        clarify = local only; plan = 2 LLM calls, timed per stage
   scripts/              Post-build fix so the compiled ESM runs on plain Node
   Compiles the shared lib/ below together with its own entry point.
 
@@ -237,13 +286,13 @@ src/
   data/models.ts        Extensible model metadata (pricing, capabilities, context window)
   lib/
     ai/                 Internal model client: task analysis + prompt writing
-      env.ts            AGENTFUND_AI_* configuration, read per call, trimmed
+      env.ts            AGENTFUND_AI_* config, per-stage caps, read per call
       errors.ts         Error codes, request ids, retry classification
       chatClient.ts     Generic OpenAI-compatible adapter (the only HTTP caller)
       health.ts         Provider diagnostics and the AGENTFUND_TEST_OK echo test
-      provider.ts       Task analysis, validated, never silently falls back
-      promptGenerator.ts Prompt compilation, validated, one controlled retry
-      taskAnalyzer.ts   Deterministic normalizer for fields the model omits
+      provider.ts       Task analysis: one LLM call, small cap, validated
+      promptGenerator.ts Prompt compilation: one LLM call, its own cap, validated
+      taskAnalyzer.ts   Local classifier for /api/clarify + field normalizer
     backend.ts          Resolves the backend URL the browser calls
     clarifier/          Task-specific clarifying questions, defaults, answer resolution
     estimator/          Cost estimation and budget feasibility
@@ -297,10 +346,11 @@ heuristic substitute. If the model fails or returns something unusable, the
 request fails loudly with a structured error; the user is never handed a degraded
 prompt that looks like success.
 
-Retries are strictly bounded: at most one retry, and only for failures that can
-plausibly clear (a rate limit, a timeout, a 502/503, a temporary network fault).
-A bad key, an unknown model or a malformed request is never retried, because it
-can only delay the same answer. Every request is bounded by
+Retries are strictly bounded and never stack. Transport and transient failures
+(a rate limit, a timeout, a 502/503, a network fault) get at most one retry,
+inside the adapter. Malformed structured output gets at most one further
+attempt. A bad key, an unknown model or a malformed request is never retried,
+because it can only delay the same answer. Every request is bounded by
 `AGENTFUND_AI_TIMEOUT_MS`, so a slow provider cannot hold a call open.
 
 Configure it on the backend via server-side env vars (see `.env.example`):
@@ -309,8 +359,9 @@ Configure it on the backend via server-side env vars (see `.env.example`):
 AGENTFUND_AI_BASE_URL=...
 AGENTFUND_AI_API_KEY=...
 AGENTFUND_AI_MODEL=...
-AGENTFUND_AI_MAX_TOKENS=8000
-AGENTFUND_AI_TIMEOUT_MS=120000
+AGENTFUND_AI_ANALYSIS_MAX_TOKENS=1800
+AGENTFUND_AI_PROMPT_MAX_TOKENS=3500
+AGENTFUND_AI_TIMEOUT_MS=90000
 ```
 
 These live on Render, never on Vercel, and are never exposed to the browser.
@@ -328,19 +379,36 @@ Codes: `BACKEND_NOT_CONFIGURED`, `AI_PROVIDER_UNREACHABLE`, `AI_AUTH_FAILED`,
 `AI_VALIDATION_FAILED`, `AI_UNKNOWN_ERROR`.
 
 Every AI call is assigned a `requestId`, returned in errors and logged in one
-structured line: timestamp, requestId, endpoint, model, duration, success, HTTP
-status and error code. Nothing sensitive is logged — no key, no Authorization
-header, no prompt body.
+structured line: timestamp, requestId, **stage**, endpoint, model, duration,
+success, HTTP status and error code. Nothing sensitive is logged — no key, no
+Authorization header, no prompt body.
+
+Each request also logs one line per stage, which is what makes a slow request
+diagnosable:
+
+```text
+[stage] requestId=req_2fcaddd4b2 stage=task-analysis     durationMs=7  success=true
+[stage] requestId=req_2fcaddd4b2 stage=prompt-generation durationMs=9  success=true
+[stage] requestId=req_2fcaddd4b2 stage=total             durationMs=27 success=true local=11ms
+```
+
+`clarify` is logged too and should be ~0ms, since it is local. `local=` is the
+time spent in cost, feasibility, scope and model-selection calculations. So the
+logs say directly whether a delay is in `task-analysis`, in
+`prompt-generation`, or neither. The same two durations are returned in the plan
+as `analysisDurationMs` and `promptDurationMs`.
 
 ### Note on reasoning models
 
-Some models reason before they write, and reasoning shares the same token
-budget: given a low `max_tokens`, reasoning can consume everything and the
-response comes back with **no content at all**. `AGENTFUND_AI_MAX_TOKENS` is
-therefore kept high enough to leave headroom, and reasoning models are given a
-low `reasoning_effort` through `getCompatibleRequestOptions()` — the only place
-any model-specific parameter is set. Reasoning models can also be slow, which is
-why the timeout is generous and the UI shows a "Writing your prompt..." state.
+Some models reason before they write, and reasoning shares the same output cap:
+given too low a cap, reasoning can consume everything and the response comes
+back with **no content at all**. Reasoning models are therefore given a low
+`reasoning_effort` through `getCompatibleRequestOptions()` — the only place any
+model-specific parameter is set — which keeps them inside the same modest caps
+as every other model. If a model still runs out of room, the response is treated
+as unusable and retried once rather than truncated into a broken prompt. Raise
+`AGENTFUND_AI_ANALYSIS_MAX_TOKENS` or `AGENTFUND_AI_PROMPT_MAX_TOKENS` only if a
+specific model genuinely needs it.
 
 ## Explicitly not included
 

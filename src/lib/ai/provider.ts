@@ -17,7 +17,7 @@
 
 import { chat } from "./chatClient";
 import { AiError, toAiError } from "./errors";
-import { aiModel, aiProviderConfigured, missingConfig } from "./env";
+import { aiAnalysisMaxTokens, aiModel, aiProviderConfigured, missingConfig } from "./env";
 import { heuristicAnalyze } from "./taskAnalyzer";
 import { AnalysisValidationError, validateAnalysis } from "@/lib/validation/schemas";
 import type { TaskAnalysis } from "@/types";
@@ -50,9 +50,11 @@ Analyse the user's request and return ONLY valid JSON with this exact shape:
 }
 
 Rules:
+- Return the JSON only. No preamble, no explanation, no markdown fences, no commentary before or after.
 - estimatedInputTokens/estimatedOutputTokens are realistic totals across all iterations.
 - expectedIterations includes validation and revision passes.
 - phases must be ordered and appropriate to the task type, not a fixed template.
+- Keep every string short: summary is one sentence, risks and adjustments are short phrases.
 - costWeight values across phases should sum to about 1.0.
 - Be conservative and realistic. Do not inflate or deflate estimates.`;
 
@@ -79,9 +81,8 @@ export function extractJson(text: string): unknown {
  * Analyzes a task with the configured model.
  *
  * Throws `AiError` on any failure. One retry happens inside `chat()` for
- * transient faults, and one further attempt here if the response parses but
- * fails validation — a different wording request, not an unbounded loop. If it
- * still fails, the error propagates.
+ * transient faults, and at most one further attempt here if the response
+ * arrives but fails validation. If it still fails, the error propagates.
  */
 export async function analyzeTask(taskDescription: string): Promise<AnalysisResult> {
   if (!aiProviderConfigured()) {
@@ -101,7 +102,15 @@ export async function analyzeTask(taskDescription: string): Promise<AnalysisResu
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const result = await chat({ messages, jsonMode: true });
+      const result = await chat({
+        messages,
+        jsonMode: true,
+        // Small and explicit: the analyser returns one compact JSON object, so
+        // a large cap would only buy reasoning and prose AgentFund discards.
+        maxTokens: aiAnalysisMaxTokens(),
+        temperature: 0.1,
+        stage: "task-analysis",
+      });
       // A model that hits its output cap mid-JSON returns a truncated object.
       // That is a retryable response problem, not a validation success.
       if (result.finishReason === "length") {
@@ -138,6 +147,8 @@ export async function analyzeTask(taskDescription: string): Promise<AnalysisResu
             retryable: true,
             requestId: result.requestId,
           });
+          // Exactly one further attempt, and only because the provider did
+          // answer: a differently-worded request can produce valid JSON.
           continue;
         }
         throw error;

@@ -11,11 +11,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ENV,
+  aiAnalysisMaxTokens,
   aiBaseUrl,
-  aiMaxTokens,
   aiModel,
+  aiPromptMaxTokens,
   aiProviderConfigured,
   aiTimeoutMs,
+  legacyMaxTokensPresent,
   missingConfig,
   usingLegacyEnvNames,
 } from "@/lib/ai/env";
@@ -65,6 +67,18 @@ describe("env configuration", () => {
     expect(usingLegacyEnvNames()).toBe(true);
   });
 
+  it("resolves the model per variable, so a partial rename still works", () => {
+    // Canonical key and URL, but the model still under the old name: the
+    // canonical variables must not switch off the legacy fallback for a
+    // variable that was never migrated.
+    process.env.AGENTFUND_AI_API_KEY = "k";
+    process.env.AGENTFUND_AI_BASE_URL = "https://example.test/v1";
+    process.env.AI_MODEL = "vendor-b/old-pinned-model";
+
+    expect(aiModel()).toBe("vendor-b/old-pinned-model");
+    expect(aiProviderConfigured()).toBe(true);
+  });
+
   it("does not report legacy names once the canonical ones are used", () => {
     process.env.AGENTFUND_AI_API_KEY = "k";
     process.env.AGENTFUND_AI_BASE_URL = "https://example.test/v1";
@@ -91,25 +105,50 @@ describe("env configuration", () => {
     expect(aiProviderConfigured()).toBe(true);
   });
 
-  it("uses the documented defaults for max tokens and timeout", () => {
-    expect(aiMaxTokens()).toBe(8000);
-    expect(aiTimeoutMs()).toBe(120000);
+  it("gives each stage its own small default output cap", () => {
+    // Separate and modest: the analyser returns one compact JSON object and the
+    // writer returns a prompt of roughly 500-900 words. Neither needs 48000.
+    expect(aiAnalysisMaxTokens()).toBe(1800);
+    expect(aiPromptMaxTokens()).toBe(3500);
+    expect(aiTimeoutMs()).toBe(90000);
   });
 
-  it("honours configured max tokens and timeout", () => {
-    process.env.AGENTFUND_AI_MAX_TOKENS = "4000";
-    process.env.AGENTFUND_AI_TIMEOUT_MS = "30000";
+  it("honours configured per-stage caps and timeout", () => {
+    process.env.AGENTFUND_AI_ANALYSIS_MAX_TOKENS = "1500";
+    process.env.AGENTFUND_AI_PROMPT_MAX_TOKENS = "4000";
+    process.env.AGENTFUND_AI_TIMEOUT_MS = "45000";
 
-    expect(aiMaxTokens()).toBe(4000);
-    expect(aiTimeoutMs()).toBe(30000);
+    expect(aiAnalysisMaxTokens()).toBe(1500);
+    expect(aiPromptMaxTokens()).toBe(4000);
+    expect(aiTimeoutMs()).toBe(45000);
+  });
+
+  it("never lets the deprecated AI_MAX_TOKENS raise the caps", () => {
+    // The old variable was set to 48000 to work around a reasoning model.
+    // Honouring it would restore one oversized cap for both stages and undo the
+    // split budgets, so it must be ignored even when the new ones are unset.
+    process.env.AI_MAX_TOKENS = "48000";
+
+    expect(aiAnalysisMaxTokens()).toBe(1800);
+    expect(aiPromptMaxTokens()).toBe(3500);
+    expect(legacyMaxTokensPresent()).toBe(true);
+  });
+
+  it("prefers the new caps when both old and new are set", () => {
+    process.env.AI_MAX_TOKENS = "48000";
+    process.env.AGENTFUND_AI_ANALYSIS_MAX_TOKENS = "1600";
+    process.env.AGENTFUND_AI_PROMPT_MAX_TOKENS = "3200";
+
+    expect(aiAnalysisMaxTokens()).toBe(1600);
+    expect(aiPromptMaxTokens()).toBe(3200);
   });
 
   it("ignores non-positive or non-numeric limits instead of sending NaN", () => {
-    process.env.AGENTFUND_AI_MAX_TOKENS = "0";
+    process.env.AGENTFUND_AI_ANALYSIS_MAX_TOKENS = "0";
     process.env.AGENTFUND_AI_TIMEOUT_MS = "not-a-number";
 
-    expect(aiMaxTokens()).toBe(8000);
-    expect(aiTimeoutMs()).toBe(120000);
+    expect(aiAnalysisMaxTokens()).toBe(1800);
+    expect(aiTimeoutMs()).toBe(90000);
   });
 
   it("reads values on every call so a change takes effect without a restart", () => {

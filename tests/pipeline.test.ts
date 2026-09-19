@@ -140,6 +140,9 @@ function stubProvider() {
   });
 }
 
+const LANDING_PAGE =
+  "Build a responsive SaaS landing page using Next.js, TypeScript and Tailwind. Include pricing, testimonials, FAQ, responsive navigation and a contact form.";
+
 beforeEach(() => {
   process.env.AGENTFUND_AI_API_KEY = "test-key";
   process.env.AGENTFUND_AI_BASE_URL = "https://example.test/v1";
@@ -150,8 +153,99 @@ beforeEach(() => {
   vi.stubGlobal("fetch", stubProvider());
 });
 
-const LANDING_PAGE =
-  "Build a responsive SaaS landing page using Next.js, TypeScript and Tailwind. Include pricing, testimonials, FAQ, responsive navigation and a contact form.";
+/**
+ * The point of the optimization: a completed task should cost exactly two LLM
+ * calls, one per stage. Anything above that means a call is being repeated or a
+ * stage is quietly re-running the model.
+ */
+describe("LLM call budget", () => {
+  it("makes exactly two calls for a completed task", async () => {
+    const fetchMock = stubProvider();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await buildPlan({
+      taskDescription: LANDING_PAGE,
+      modelId: "claude-sonnet",
+      optimization: "balanced",
+      budget: 20,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses one call for analysis and one for prompt generation", async () => {
+    const fetchMock = stubProvider();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await buildPlan({
+      taskDescription: LANDING_PAGE,
+      modelId: "claude-sonnet",
+      optimization: "balanced",
+      budget: 20,
+    });
+
+    const bodies = fetchMock.mock.calls.map((call) => String((call[1] as { body: string }).body));
+    // The analyser is the JSON request; the writer is the prompt request.
+    expect(bodies[0]).toContain("return ONLY valid JSON");
+    expect(bodies[1]).not.toContain("return ONLY valid JSON");
+  });
+
+  it("gives the analysis call its own small token cap", async () => {
+    const fetchMock = stubProvider();
+    vi.stubGlobal("fetch", fetchMock);
+    process.env.AGENTFUND_AI_ANALYSIS_MAX_TOKENS = "1800";
+    process.env.AGENTFUND_AI_PROMPT_MAX_TOKENS = "3500";
+
+    await buildPlan({
+      taskDescription: LANDING_PAGE,
+      modelId: "claude-sonnet",
+      optimization: "balanced",
+      budget: 20,
+    });
+
+    const bodies = fetchMock.mock.calls.map(
+      (call) => JSON.parse(String((call[1] as { body: string }).body)) as { max_tokens: number },
+    );
+    // Analysis is capped far below the prompt stage, and both are modest.
+    expect(bodies[0].max_tokens).toBe(1800);
+    expect(bodies[1].max_tokens).toBe(3500);
+  });
+
+  it("never lets the deprecated AI_MAX_TOKENS inflate either call", async () => {
+    const fetchMock = stubProvider();
+    vi.stubGlobal("fetch", fetchMock);
+    delete process.env.AGENTFUND_AI_ANALYSIS_MAX_TOKENS;
+    delete process.env.AGENTFUND_AI_PROMPT_MAX_TOKENS;
+    process.env.AI_MAX_TOKENS = "48000";
+
+    await buildPlan({
+      taskDescription: LANDING_PAGE,
+      modelId: "claude-sonnet",
+      optimization: "balanced",
+      budget: 20,
+    });
+
+    const bodies = fetchMock.mock.calls.map(
+      (call) => JSON.parse(String((call[1] as { body: string }).body)) as { max_tokens: number },
+    );
+    expect(bodies[0].max_tokens).toBe(1800);
+    expect(bodies[1].max_tokens).toBe(3500);
+  });
+
+  it("reports per-stage timings so a slow stage is identifiable", async () => {
+    vi.stubGlobal("fetch", stubProvider());
+
+    const plan = await buildPlan({
+      taskDescription: LANDING_PAGE,
+      modelId: "claude-sonnet",
+      optimization: "balanced",
+      budget: 20,
+    });
+
+    expect(plan.analysisDurationMs).toBeGreaterThanOrEqual(0);
+    expect(plan.promptDurationMs).toBeGreaterThanOrEqual(0);
+  });
+});
 
 describe("planning pipeline", () => {
   it("produces a complete plan for a medium task with auto model selection", async () => {

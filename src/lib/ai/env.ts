@@ -27,15 +27,26 @@ export const ENV = {
   API_KEY: "AGENTFUND_AI_API_KEY",
   BASE_URL: "AGENTFUND_AI_BASE_URL",
   MODEL: "AGENTFUND_AI_MODEL",
-  MAX_TOKENS: "AGENTFUND_AI_MAX_TOKENS",
+  ANALYSIS_MAX_TOKENS: "AGENTFUND_AI_ANALYSIS_MAX_TOKENS",
+  PROMPT_MAX_TOKENS: "AGENTFUND_AI_PROMPT_MAX_TOKENS",
   TIMEOUT_MS: "AGENTFUND_AI_TIMEOUT_MS",
   FALLBACK_MODEL: "AGENTFUND_AI_FALLBACK_MODEL",
   ALLOWED_ORIGINS: "ALLOWED_ORIGINS",
 } as const;
 
 /**
- * Pre-rename names, accepted only as a fallback so an existing deployment keeps
- * working while the dashboard is updated. The canonical names above always win.
+ * Pre-rename names.
+ *
+ * Accepted only where doing so cannot reintroduce a bad value:
+ *
+ *  - API_KEY / BASE_URL / MODEL are accepted as last-resort fallbacks, per
+ *    variable, so an existing deployment keeps working after the rename.
+ *  - AI_MAX_TOKENS is deliberately NOT accepted. It was set to 48000 to work
+ *    around a reasoning model that spent its whole budget thinking, and that
+ *    single oversized cap is exactly what made every call slow. Falling back to
+ *    it would silently undo the split budgets below, so the old variable is
+ *    ignored and reported instead.
+ *  - AI_TIMEOUT_MS is accepted, since a timeout is not a token budget.
  *
  * @deprecated Use the AGENTFUND_AI_* variables.
  */
@@ -43,7 +54,6 @@ const LEGACY: Record<string, string> = {
   [ENV.API_KEY]: "AI_API_KEY",
   [ENV.BASE_URL]: "AI_BASE_URL",
   [ENV.MODEL]: "AI_MODEL",
-  [ENV.MAX_TOKENS]: "AI_MAX_TOKENS",
   [ENV.TIMEOUT_MS]: "AI_TIMEOUT_MS",
 };
 
@@ -124,17 +134,29 @@ export function aiNumber(name: string, fallback: number, legacy?: string): numbe
 }
 
 /**
- * Output token cap. Kept modest by default: the analyzer and the prompt writer
- * both produce focused structured output, and a huge cap invites a reasoning
- * model to spend the entire budget thinking and return no content.
+ * Output cap for the task-analysis call.
+ *
+ * Small on purpose: the analyser returns one compact JSON object and nothing
+ * else. A large cap here was the single biggest avoidable cost in the old flow,
+ * because it let the model spend the budget on reasoning and prose instead of
+ * the handful of fields AgentFund actually consumes.
  */
-export function aiMaxTokens(): number {
-  return Math.round(aiNumber(ENV.MAX_TOKENS, 8000, LEGACY[ENV.MAX_TOKENS]));
+export function aiAnalysisMaxTokens(): number {
+  return Math.round(aiNumber(ENV.ANALYSIS_MAX_TOKENS, 1800));
+}
+
+/**
+ * Output cap for the prompt-writing call. Larger than the analysis cap because
+ * the deliverable is the prompt itself (roughly 500-900 words), but still
+ * bounded so the model cannot pad.
+ */
+export function aiPromptMaxTokens(): number {
+  return Math.round(aiNumber(ENV.PROMPT_MAX_TOKENS, 3500));
 }
 
 /** Per-attempt request budget. Every call is bounded; nothing waits forever. */
 export function aiTimeoutMs(): number {
-  return Math.round(aiNumber(ENV.TIMEOUT_MS, 120000, LEGACY[ENV.TIMEOUT_MS]));
+  return Math.round(aiNumber(ENV.TIMEOUT_MS, 90000, LEGACY[ENV.TIMEOUT_MS]));
 }
 
 /** True when key, base URL and model are all present. Never contacts the provider. */
@@ -161,13 +183,19 @@ export function missingConfig(): string[] {
  * purely advisory: it never changes which value is used.
  */
 export function usingLegacyEnvNames(): boolean {
-  return [
-    [ENV.API_KEY, LEGACY[ENV.API_KEY]],
-    [ENV.BASE_URL, LEGACY[ENV.BASE_URL]],
-    [ENV.MODEL, LEGACY[ENV.MODEL]],
-    [ENV.MAX_TOKENS, LEGACY[ENV.MAX_TOKENS]],
-    [ENV.TIMEOUT_MS, LEGACY[ENV.TIMEOUT_MS]],
-  ].some(([canonical, legacy]) => valueFromLegacyName(canonical, legacy));
+  return Object.entries(LEGACY).some(([canonical, legacy]) =>
+    valueFromLegacyName(canonical, legacy),
+  );
+}
+
+/**
+ * True when the deprecated AI_MAX_TOKENS is still set.
+ *
+ * It is ignored, but reported: an operator who set it expects it to matter, and
+ * silently honouring it would reintroduce one oversized cap for every call.
+ */
+export function legacyMaxTokensPresent(): boolean {
+  return isSet(process.env["AI_MAX_TOKENS"]);
 }
 
 /** True when this one value exists only under its legacy name. */

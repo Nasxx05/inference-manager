@@ -20,10 +20,11 @@ import { chat, listModels } from "./chatClient";
 import { AI_TEST_EXPECTED, AiError, toAiError } from "./errors";
 import {
   aiApiKey,
+  aiAnalysisMaxTokens,
   aiBaseUrl,
   aiFallbackModel,
-  aiMaxTokens,
   aiModel,
+  aiPromptMaxTokens,
   aiProviderConfigured,
   aiTimeoutMs,
   missingConfig,
@@ -40,6 +41,12 @@ export interface BackendHealth {
   maxTokens: number;
   timeoutMs: number;
   missing: string[];
+}
+
+/** The two output caps in force, so a slow call can be traced to its stage. */
+export interface TokenBudgets {
+  analysis: number;
+  prompt: number;
 }
 
 export type ModelCheck =
@@ -70,10 +77,15 @@ export function backendHealth(): BackendHealth {
     baseUrlPresent: Boolean(aiBaseUrl()),
     modelConfigured: Boolean(aiModel()),
     model: aiModel() ?? null,
-    maxTokens: aiMaxTokens(),
+    maxTokens: aiAnalysisMaxTokens(),
     timeoutMs: aiTimeoutMs(),
     missing: missingConfig(),
   };
+}
+
+/** The output caps currently configured, per stage. Never contacts the provider. */
+export function tokenBudgets(): TokenBudgets {
+  return { analysis: aiAnalysisMaxTokens(), prompt: aiPromptMaxTokens() };
 }
 
 /**
@@ -129,8 +141,12 @@ export async function simpleAiTest(): Promise<{
         },
         { role: "user", content: `Return exactly:\n${AI_TEST_EXPECTED}` },
       ],
-      maxTokens: Math.min(aiMaxTokens(), 64),
+      // Deliberately tiny: this is a connectivity probe, not a generation. It
+      // must never use the prompt budget, or a health check would cost as much
+      // as a real request and take as long.
+      maxTokens: 32,
       temperature: 0,
+      stage: "health-test",
     });
 
     // Trim and compare case-insensitively: a model that adds a trailing newline
@@ -192,7 +208,8 @@ export async function aiHealth(): Promise<AiHealth> {
     };
   }
 
-  // The echo test is the real proof: it exercises auth, routing and generation.
+  // The echo test is the real proof: it exercises auth, routing and generation
+  // with a 32-token cap, so it stays fast and cheap.
   const test = await simpleAiTest();
   base.simpleRequestSucceeded = test.ok;
   base.providerReachable = !test.error || test.error.code !== "AI_PROVIDER_UNREACHABLE" && test.error.code !== "AI_TIMEOUT";

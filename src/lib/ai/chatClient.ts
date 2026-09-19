@@ -13,12 +13,7 @@
  * else, so no other module can grow a dependency on a particular model.
  */
 
-import {
-  AiError,
-  classifyStatus,
-  newRequestId,
-  toAiError,
-} from "./errors";
+import { AiError, classifyStatus, newRequestId, toAiError } from "./errors";
 import { aiApiKey, aiBaseUrl, aiModel, aiTimeoutMs, missingConfig } from "./env";
 
 export interface ChatMessage {
@@ -26,10 +21,17 @@ export interface ChatMessage {
   content: string;
 }
 
+/** Which part of the flow a call belongs to. Logged, never sent to the provider. */
+export type AiStage =
+  | "task-analysis"
+  | "prompt-generation"
+  | "health-test"
+  | "model-list";
+
 export interface ChatRequest {
   messages: ChatMessage[];
-  /** Bound on output. Always sent, so no model can run unbounded. */
-  maxTokens?: number;
+  /** Output cap. Required, so no call can run unbounded. */
+  maxTokens: number;
   temperature?: number;
   /**
    * Ask for a JSON object when the caller needs structured output. Sent only
@@ -39,6 +41,10 @@ export interface ChatRequest {
   jsonMode?: boolean;
   /** Overrides the configured model. Used only by the model-availability probe. */
   model?: string;
+  /** Stage name for timing logs, so a slow half is identifiable. */
+  stage: AiStage;
+  /** Correlates every stage belonging to one user request. */
+  requestId?: string;
 }
 
 export interface ChatResult {
@@ -85,7 +91,7 @@ export function getCompatibleRequestOptions(model: string): Record<string, unkno
   // Reasoning models bill thinking tokens against the same output cap, so they
   // need headroom that a non-reasoning model does not. Without this they spend
   // the whole budget reasoning and return null content.
-  if (/(^|\/)(o\d|gpt-5|hy4|deepseek-r|qvq|qwq)/.test(id) || /reason|thinking/.test(id)) {
+  if (/(^|\/)(o\d|gpt-5|hy4|glm|deepseek-r|qvq|qwq)/.test(id) || /reason|thinking/.test(id)) {
     options.reasoning_effort = "low";
   }
   return options;
@@ -106,6 +112,7 @@ export function getModelCapabilities(model: string): {
 interface LogFields {
   requestId: string;
   timestamp: string;
+  stage: AiStage;
   endpoint: string;
   model: string;
   durationMs: number;
@@ -118,14 +125,19 @@ interface LogFields {
 /**
  * One structured line per call.
  *
- * Records what makes a Render log useful — id, time, endpoint, model, duration,
- * outcome — and deliberately nothing else: no key, no Authorization header, no
- * prompt body, no user content.
+ * The `stage` field is what makes a slow request diagnosable: it separates time
+ * spent in task-analysis from time spent in prompt-generation, so the logs say
+ * which half is slow rather than only reporting a total.
+ *
+ * Records what makes a Render log useful — id, time, stage, endpoint, model,
+ * duration, outcome — and deliberately nothing else: no key, no Authorization
+ * header, no prompt body, no user content.
  */
 function logCall(fields: LogFields): void {
   const line = [
     `ts=${fields.timestamp}`,
     `requestId=${fields.requestId}`,
+    `stage=${fields.stage}`,
     `endpoint=${fields.endpoint}`,
     `model=${fields.model}`,
     `durationMs=${fields.durationMs}`,
@@ -163,6 +175,9 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
   const useModel = request.model ?? model;
   const url = chatCompletionsUrl(baseUrl);
   const started = Date.now();
+  // One id for the whole logical call, including its retry, so a failure and
+  // the attempt that preceded it are correlatable in the logs.
+  const requestId = request.requestId ?? newRequestId();
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -193,10 +208,11 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
     const durationMs = Date.now() - started;
 
     if (!response.ok) {
-      const error = classifyStatus(response.status);
+      const error = classifyStatus(response.status, requestId);
       logCall({
-        requestId: error.requestId,
+        requestId,
         timestamp: new Date().toISOString(),
+        stage: request.stage,
         endpoint: url,
         model: useModel,
         durationMs,
@@ -219,14 +235,14 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
     const content = choice?.message?.content;
 
     if (!content) {
-      const error = new AiError(
-        "AI_INVALID_RESPONSE",
-        "The AI provider returned no content.",
-        { retryable: true },
-      );
+      const error = new AiError("AI_INVALID_RESPONSE", "The AI provider returned no content.", {
+        retryable: true,
+        requestId,
+      });
       logCall({
-        requestId: error.requestId,
+        requestId,
         timestamp: new Date().toISOString(),
+        stage: request.stage,
         endpoint: url,
         model: useModel,
         durationMs,
@@ -238,10 +254,10 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
       throw error;
     }
 
-    const requestId = newRequestId();
     logCall({
       requestId,
       timestamp: new Date().toISOString(),
+      stage: request.stage,
       endpoint: url,
       model: payload.model ?? useModel,
       durationMs,
@@ -260,10 +276,11 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
   } catch (error) {
     if (error instanceof AiError) throw error;
     // Abort means the deadline passed; anything else is a transport fault.
-    const ai = toAiError(error);
+    const ai = toAiError(error, requestId);
     logCall({
-      requestId: ai.requestId,
+      requestId,
       timestamp: new Date().toISOString(),
+      stage: request.stage,
       endpoint: url,
       model: useModel,
       durationMs: Date.now() - started,
@@ -282,13 +299,14 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
  *
  * A second attempt is made for timeouts, 429, 502/503/504 and temporary network
  * faults. A bad key, an unknown model or a malformed request fails immediately:
- * retrying can only delay the same answer. There is no unlimited retry loop.
+ * retrying can only delay the same answer. There is no unlimited retry loop,
+ * and a retry is never triggered by a failure that cannot plausibly improve.
  */
 export async function chat(request: ChatRequest): Promise<ChatResult> {
   try {
     return await attemptOnce(request, 1);
   } catch (error) {
-    const ai = toAiError(error);
+    const ai = toAiError(error, request.requestId);
     if (!ai.retryable) throw ai;
     await wait(1200);
     return await attemptOnce(request, 2);
@@ -311,7 +329,9 @@ export async function listModels(): Promise<
 
   const url = `${baseUrl.trim().replace(/\/+$/, "")}/models`;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), aiTimeoutMs());
+  // A model list is metadata, not generation: it should never be allowed to
+  // consume the full generation timeout and stall a health check.
+  const timer = setTimeout(() => controller.abort(), Math.min(aiTimeoutMs(), 10000));
 
   try {
     const response = await fetch(url, {

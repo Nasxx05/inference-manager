@@ -16,7 +16,7 @@
 
 import { chat } from "./chatClient";
 import { AiError, toAiError } from "./errors";
-import { aiMaxTokens, aiProviderConfigured, missingConfig } from "./env";
+import { aiPromptMaxTokens, aiProviderConfigured, missingConfig } from "./env";
 import type {
   ClarifyingAnswer,
   CostEstimate,
@@ -93,7 +93,8 @@ Quality bar:
 - Do not invent requirements, features, files, URLs, credentials or data the requester
   never gave you. Placeholder content is fine and should be labelled as placeholder.
 - Keep it tight and useful. Around 500-900 words. Never pad.
-- Stay under 6000 characters total.`;
+- Stay under 6000 characters total.
+- Do not explain what you are doing. Output the prompt and nothing else.`;
 
 export function promptProviderConfigured(): boolean {
   return aiProviderConfigured();
@@ -262,8 +263,11 @@ async function attempt(input: PromptDraftInput): Promise<Attempt> {
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: userMessage(input) },
       ],
-      maxTokens: aiMaxTokens(),
+      // Its own cap, separate from the analysis budget: writing the prompt is
+      // the deliverable, but it is still bounded so the model cannot pad.
+      maxTokens: aiPromptMaxTokens(),
       temperature: 0.2,
+      stage: "prompt-generation",
     });
   } catch (error) {
     // chat() already retried once for transient faults. Retrying here too would
@@ -304,10 +308,11 @@ async function attempt(input: PromptDraftInput): Promise<Attempt> {
 /**
  * Writes the prompt with the configured model.
  *
- * At most two provider round trips in total. `chat()` spends its single retry
- * on transport, timeout and transient-status failures; this spends one further
- * attempt only when the provider replied with content that failed validation.
- * The two never stack, so a failing provider is never hammered.
+ * At most two provider round trips in total, and never three: `chat()` spends
+ * its single retry on transport, timeout and transient-status failures, and
+ * this spends one further attempt only when the provider replied with content
+ * that failed validation. The two budgets are separate, so a transport retry
+ * and a validation retry cannot stack into a third expensive call.
  *
  * Throws `AiError` when no usable prompt can be produced: the caller reports a
  * real failure rather than returning a degraded prompt.
@@ -322,7 +327,8 @@ export async function generatePrompt(input: PromptDraftInput): Promise<PromptRes
 
   const first = await attempt(input);
   if (first.ok) return first.result;
-  // Transport-level failures were already retried once inside chat().
+  // Transport-level failures were already retried once inside chat(). Retrying
+  // them here would make an outage cost twice as much and take twice as long.
   if (!first.contentLevel) throw first.error;
 
   const second = await attempt(input);
