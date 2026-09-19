@@ -50,6 +50,13 @@ export interface CombinedInput {
   optimization: OptimizationPreference;
   budget: number;
   clarifyingAnswers: ClarifyingAnswer[];
+  /**
+   * The resolved scope the prompt must describe. The prompt is written once, so
+   * it must be written for the FINAL scope — otherwise the UI can show
+   * "optimized scope applied" while the prompt still describes the original,
+   * larger request.
+   */
+  resolvedScope?: { included: string[]; deferred: string[] };
 }
 
 export interface CombinedResult {
@@ -164,6 +171,9 @@ Prompt rules:
   confirmed answers. Confirm binding answers into REQUIREMENTS, not a separate list.
 - Address the executor directly and imperatively. Do not explain what you are doing.
 - Do not invent features, files, URLs, credentials or data the requester never gave.
+- If a RESOLVED SCOPE block is present, it is binding. Describe only what is in
+  scope; put every deferred item under OUT OF SCOPE. Never reintroduce deferred
+  work as an optional enhancement — that would contradict the plan the user sees.
 - Keep it tight and useful, around 500-900 words. Never pad.`;
 
 function modelNotes(model: ModelConfig): string {
@@ -205,13 +215,34 @@ function answerLines(answers: ClarifyingAnswer[]): string {
  * without improving the result.
  */
 function userMessage(input: CombinedInput): string {
-  const { taskDescription, targetModel, optimization, budget, clarifyingAnswers } = input;
-  return [
-    "TASK:",
-    taskDescription.trim(),
-    "",
-    "ANSWERS:",
-    answerLines(clarifyingAnswers),
+  const { taskDescription, targetModel, optimization, budget, clarifyingAnswers, resolvedScope } =
+    input;
+
+  const blocks = ["TASK:", taskDescription.trim(), "", "ANSWERS:", answerLines(clarifyingAnswers)];
+
+  /**
+   * The resolved scope is binding for the prompt.
+   *
+   * When scope optimization has been applied, deferred work must be absent from
+   * the prompt entirely — not merely mentioned as optional. A prompt still
+   * saying "implement Stripe payments" while the UI says payments are deferred
+   * is a contradiction the user would act on and overrun their budget.
+   */
+  if (resolvedScope) {
+    blocks.push(
+      "",
+      "RESOLVED SCOPE — the prompt must describe exactly this, and nothing more:",
+      "IN SCOPE:",
+      ...resolvedScope.included.map((item) => `- ${item}`),
+      "",
+      "EXPLICITLY DEFERRED — do not include, mention as optional, or hint at:",
+      ...resolvedScope.deferred.map((item) => `- ${item}`),
+      "",
+      "Write SCOPE from the IN SCOPE list and OUT OF SCOPE from the deferred list.",
+    );
+  }
+
+  blocks.push(
     "",
     "TARGET MODEL TO WRITE THE PROMPT FOR:",
     `${targetModel.displayName} (${targetModel.provider})`,
@@ -219,7 +250,9 @@ function userMessage(input: CombinedInput): string {
     "",
     `BUDGET: ${budget} CREDIT (planning figure only — do not compute costs).`,
     `OPTIMIZATION: ${optimization}`,
-  ].join("\n");
+  );
+
+  return blocks.join("\n");
 }
 
 function parseCombined(raw: unknown): {

@@ -28,8 +28,16 @@ import { AUTO_MODEL_ID, MODELS, findModelOrThrow } from "@/data/models";
 import { generatePlan } from "@/lib/ai/combined";
 import { aiCombinedEnabled } from "@/lib/ai/env";
 import { analyzeTask } from "@/lib/ai/provider";
+import { heuristicAnalyze } from "@/lib/ai/taskAnalyzer";
 import { generatePrompt } from "@/lib/ai/promptGenerator";
 import { answerScopeSignal, resolveAnswers, answersUsed } from "@/lib/clarifier";
+import {
+  WEIGHT_VALUE,
+  buildEnrichedTask,
+  describeEnrichedTask,
+  type EnrichedTask,
+  type ResolvedRequirement,
+} from "@/lib/clarifier/enrichedTask";
 import { allocatePhaseCosts, estimateCost, formatRange } from "@/lib/estimator/costEstimator";
 import { evaluateFeasibility, planReserve } from "@/lib/estimator/feasibilityEngine";
 import { resolveTaskEffort } from "@/lib/estimator/taskEffort";
@@ -133,6 +141,59 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
  * and local time are tracked separately, so a slow request can be attributed to
  * the provider rather than guessed at.
  */
+/**
+ * Estimates the scope locally from the enriched task and defers work until the
+ * budget is met. Used only to give the prompt writer the resolved scope in the
+ * same call; the plan's authoritative scope is still computed after analysis.
+ */
+function preResolveScope(input: {
+  enrichedTask: EnrichedTask;
+  budget: number;
+  optimization: OptimizationPreference;
+  modelId: string;
+}): { included: string[]; deferred: string[] } | null {
+  const { enrichedTask, budget, optimization, modelId } = input;
+
+  let model: ModelConfig;
+  try {
+    model = findModelOrThrow(modelId);
+  } catch {
+    return null;
+  }
+
+  const included: string[] = [];
+  const deferred: string[] = [];
+  const active = [...enrichedTask.resolvedRequirements];
+
+  const estimateFor = (requirements: ResolvedRequirement[]): number =>
+    estimateCost({
+      analysis: {
+        ...heuristicAnalyze(enrichedTask.originalTask),
+        effort: undefined,
+      },
+      model,
+      preference: optimization,
+      taskDescription: enrichedTask.originalTask,
+      answerMultiplier: 1 + requirements.length * 0.08,
+      addedRequirements: requirements.length,
+    }).recommendedMaximum;
+
+  // Defer the heaviest requirements first while the estimate exceeds budget.
+  for (let pass = 0; pass < 8 && estimateFor(active) > budget; pass += 1) {
+    if (active.length === 0) break;
+    const heaviest = active.reduce((worst, current) =>
+      WEIGHT_VALUE[current.weight] > WEIGHT_VALUE[worst.weight] ? current : worst,
+    );
+    active.splice(active.indexOf(heaviest), 1);
+    deferred.push(heaviest.name);
+  }
+
+  for (const requirement of active) included.push(requirement.name);
+  if (deferred.length === 0) return null;
+
+  return { included, deferred };
+}
+
 export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBuildResult> {
   const {
     taskDescription,
@@ -161,6 +222,41 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
    * rise. Computed once and passed to every cost call in this pipeline.
    */
   const answerSignal = answerScopeSignal(clarifyingAnswers);
+
+  /**
+   * The enriched task: one canonical representation of intent.
+   *
+   * Built once, before any LLM call, from the original wording plus the
+   * answers. Every later stage — analyzer, estimator, suitability, scope
+   * optimizer and prompt writer — reads from this, so they cannot disagree.
+   */
+  const enrichedTask = buildEnrichedTask({
+    taskDescription,
+    taskType: heuristicAnalyze(taskDescription).taskType,
+    answers: clarifyingAnswers,
+  });
+
+  /**
+   * Pre-call scope resolution.
+   *
+   * The prompt is written once, by the same call that produces the analysis. If
+   * the user has accepted an optimized scope, the writer must know about it
+   * up front — otherwise the prompt describes the original request while the UI
+   * shows a reduced one.
+   *
+   * This estimates from the enriched task's own resolved requirements (no LLM
+   * call), defers the heaviest non-essential ones while over budget, and feeds
+   * the result into the prompt. The authoritative post-analysis scope is still
+   * computed after the call; this one exists so the two cannot contradict.
+   */
+  const preResolvedScope = applyOptimizedScope
+    ? preResolveScope({
+        enrichedTask,
+        budget,
+        optimization,
+        modelId: modelId === AUTO_MODEL_ID ? "claude-sonnet" : modelId,
+      })
+    : null;
 
   const autoSelected = modelId === AUTO_MODEL_ID;
 
@@ -245,11 +341,19 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
       const target = autoSelected ? neutralTargetModel() : findModelOrThrow(modelId);
       try {
         const combined = await generatePlan({
-          taskDescription,
+          // The enriched description leads with the user's own words, then adds
+          // the resolved requirements the estimator also uses — so the
+          // analysis and the estimate are derived from the same input.
+          taskDescription: describeEnrichedTask(enrichedTask),
           targetModel: target,
           optimization,
           budget,
           clarifyingAnswers,
+          // When the user has accepted an optimized scope, the prompt must be
+          // written for that scope, not the original request.
+          resolvedScope: preResolvedScope
+            ? { included: preResolvedScope.included, deferred: preResolvedScope.deferred }
+            : undefined,
         });
         route = "combined";
         agentModel = combined.model;

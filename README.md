@@ -179,6 +179,17 @@ and no model-specific business logic anywhere in the planner.
 
 ---
 
+## Powered by Orbio
+
+Promgent's internal task-planning agent runs through the **Orbio inference
+gateway**. Promgent uses Orbio's model access to analyze tasks and compile
+prompts, while keeping execution under the user's control.
+
+**Promgent plans. The user executes.** No wallet is connected, and Promgent never
+runs the final prompt.
+
+---
+
 ## Architecture
 
 | Layer | Where | Responsibility |
@@ -298,6 +309,9 @@ To change the internal model, set `AGENTFUND_AI_MODEL` and restart. Nothing else
 - Model pricing and capability scores are **static configuration, not live data**, and capability
   scores are heuristics rather than benchmarks. The registry is structured so both can be replaced
   with live provider data.
+- The **Planning Budget** is a number the user enters. It is not an Orbio balance and is
+  not read from any wallet or billing system. CREDIT is Orbio's tokenized inference
+  unit; Promgent uses it as the planning primitive for estimates, not as a payment rail.
 - Estimates are planning ranges. Actual external cost depends on the model, token usage,
   iterations, tools and execution environment.
 - No wallet, no Orbio account connection, no prompt execution, no agent marketplace.

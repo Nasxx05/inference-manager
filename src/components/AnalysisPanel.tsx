@@ -4,6 +4,7 @@ import { AlertTriangle, Check, Minus } from "lucide-react";
 import { TIER_LABEL, getModel } from "@/data/models";
 import { explainCost, formatCredit, formatRange } from "@/lib/estimator/costEstimator";
 import { resolveTaskEffort } from "@/lib/estimator/taskEffort";
+import { buildEnrichedTask, majorWorkDrivers } from "@/lib/clarifier/enrichedTask";
 import type { PlanResult } from "@/types";
 import { Button, Card, Metric } from "./ui";
 
@@ -133,6 +134,19 @@ export function AnalysisPanel({
     resolveTaskEffort({ analysis: plan.analysis, taskDescription: plan.taskDescription });
   const drivers = explainCost(plan.analysis, effort);
 
+  /**
+   * Major work drivers: the resolved components and their weights.
+   *
+   * Derived from the same enriched task the estimator used, so this panel
+   * cannot name a driver the estimate ignored.
+   */
+  const enriched = buildEnrichedTask({
+    taskDescription: plan.taskDescription,
+    taskType: plan.analysis.taskType,
+    answers: plan.clarifyingAnswers ?? [],
+  });
+  const majorDrivers = majorWorkDrivers(enriched);
+
   return (
     <div className="flex flex-col gap-4">
       <Card title="Task Summary">
@@ -165,10 +179,33 @@ export function AnalysisPanel({
         </Card>
       ) : null}
 
+      {/* The actual components driving the cost, with their workload weights. */}
+      {majorDrivers.length > 0 ? (
+        <Card title="Major Work Drivers">
+          <ul className="flex flex-col gap-1.5">
+            {majorDrivers.map((driver) => (
+              <li
+                key={driver.name}
+                className="flex items-baseline justify-between gap-3 text-xs leading-relaxed"
+              >
+                <span>{driver.name}</span>
+                <span className="shrink-0 font-mono text-[11px] text-credit">
+                  {driver.weight.replace("-", " ")}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : null}
+
       <SuitabilityCard plan={plan} onSwitchModel={onSwitchModel} onKeepModel={onKeepModel} />
 
       <Card title="Budget">
-        <Metric label="Your budget" value={`${formatCredit(plan.budget)} CREDIT`} tone="credit" />
+        <Metric
+          label="Planning budget"
+          value={`${formatCredit(plan.budget)} CREDIT`}
+          tone="credit"
+        />
         {/* The floor: below this the core scope is unlikely to complete. */}
         <Metric
           label="Minimum viable"

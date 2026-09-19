@@ -116,7 +116,11 @@ export function TaskForm({
           </Select>
         </Field>
 
-        <Field label="Available CREDIT" htmlFor="budget">
+        <Field
+          label="Planning Budget"
+          hint="The inference budget you plan to spend. Not a wallet balance."
+          htmlFor="budget"
+        >
           <div className="relative">
             <input
               id="budget"
