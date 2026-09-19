@@ -31,6 +31,50 @@ select {
   font-family: inherit;
 }
 
+/* AgentFund generation mark.
+
+   Four small rounded elements moving vertically with a gentle stagger, so they
+   read as assembling and organising rather than as a spinner, a face or a
+   mascot. Built from plain spans and CSS only: no image asset, no new
+   dependency, and it scales from mobile to desktop without change.
+
+   The 1000ms loop sits inside the requested 800-1200ms range, and travel is
+   deliberately small so the motion stays subtle. */
+.af-mark {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  background: #176b52;
+  /* Staggered negative delays start each element mid-cycle so they are out of
+     phase from the very first frame, with no waiting for the loop to spread. */
+  animation: af-assemble 1000ms ease-in-out infinite;
+}
+
+.af-mark-2 {
+  animation-delay: -750ms;
+}
+
+.af-mark-3 {
+  animation-delay: -500ms;
+}
+
+.af-mark-4 {
+  animation-delay: -250ms;
+}
+
+@keyframes af-assemble {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  50% {
+    transform: translateY(-8px);
+    opacity: 1;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

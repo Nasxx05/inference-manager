@@ -13,6 +13,8 @@ import {
   ENV,
   aiAnalysisMaxTokens,
   aiBaseUrl,
+  aiCombinedEnabled,
+  aiCombinedMaxTokens,
   aiModel,
   aiPromptMaxTokens,
   aiProviderConfigured,
@@ -105,49 +107,65 @@ describe("env configuration", () => {
     expect(aiProviderConfigured()).toBe(true);
   });
 
-  it("gives each stage its own small default output cap", () => {
-    // Separate and modest: the analyser returns one compact JSON object and the
-    // writer returns a prompt of roughly 500-900 words. Neither needs 48000.
-    expect(aiAnalysisMaxTokens()).toBe(1800);
-    expect(aiPromptMaxTokens()).toBe(3500);
+  it("gives the combined path one modest default cap", () => {
+    // The normal path is a single call, so this governs latency. 4500, not
+    // 48000: the historical cap let a model spend the whole budget thinking.
+    expect(aiCombinedMaxTokens()).toBe(4500);
+    expect(aiCombinedEnabled()).toBe(true);
     expect(aiTimeoutMs()).toBe(90000);
   });
 
-  it("honours configured per-stage caps and timeout", () => {
+  it("gives the fallback stages their own smaller caps", () => {
+    expect(aiAnalysisMaxTokens()).toBe(1800);
+    expect(aiPromptMaxTokens()).toBe(3000);
+  });
+
+  it("honours configured caps and timeout", () => {
+    process.env.AGENTFUND_AI_MAX_TOKENS = "5000";
     process.env.AGENTFUND_AI_ANALYSIS_MAX_TOKENS = "1500";
     process.env.AGENTFUND_AI_PROMPT_MAX_TOKENS = "4000";
     process.env.AGENTFUND_AI_TIMEOUT_MS = "45000";
 
+    expect(aiCombinedMaxTokens()).toBe(5000);
     expect(aiAnalysisMaxTokens()).toBe(1500);
     expect(aiPromptMaxTokens()).toBe(4000);
     expect(aiTimeoutMs()).toBe(45000);
   });
 
-  it("never lets the deprecated AI_MAX_TOKENS raise the caps", () => {
-    // The old variable was set to 48000 to work around a reasoning model.
-    // Honouring it would restore one oversized cap for both stages and undo the
-    // split budgets, so it must be ignored even when the new ones are unset.
+  it("never lets the deprecated AI_MAX_TOKENS raise any cap", () => {
+    // The old variable was 48000 to work around a reasoning model. Honouring it
+    // would restore one oversized cap for every call, so it must be ignored.
     process.env.AI_MAX_TOKENS = "48000";
 
+    expect(aiCombinedMaxTokens()).toBe(4500);
     expect(aiAnalysisMaxTokens()).toBe(1800);
-    expect(aiPromptMaxTokens()).toBe(3500);
+    expect(aiPromptMaxTokens()).toBe(3000);
     expect(legacyMaxTokensPresent()).toBe(true);
   });
 
   it("prefers the new caps when both old and new are set", () => {
     process.env.AI_MAX_TOKENS = "48000";
+    process.env.AGENTFUND_AI_MAX_TOKENS = "4200";
     process.env.AGENTFUND_AI_ANALYSIS_MAX_TOKENS = "1600";
     process.env.AGENTFUND_AI_PROMPT_MAX_TOKENS = "3200";
 
+    expect(aiCombinedMaxTokens()).toBe(4200);
     expect(aiAnalysisMaxTokens()).toBe(1600);
     expect(aiPromptMaxTokens()).toBe(3200);
   });
 
+  it("can force the two-call path and report it", () => {
+    process.env.AGENTFUND_AI_COMBINED = "0";
+    expect(aiCombinedEnabled()).toBe(false);
+    process.env.AGENTFUND_AI_COMBINED = "1";
+    expect(aiCombinedEnabled()).toBe(true);
+  });
+
   it("ignores non-positive or non-numeric limits instead of sending NaN", () => {
-    process.env.AGENTFUND_AI_ANALYSIS_MAX_TOKENS = "0";
+    process.env.AGENTFUND_AI_MAX_TOKENS = "0";
     process.env.AGENTFUND_AI_TIMEOUT_MS = "not-a-number";
 
-    expect(aiAnalysisMaxTokens()).toBe(1800);
+    expect(aiCombinedMaxTokens()).toBe(4500);
     expect(aiTimeoutMs()).toBe(90000);
   });
 

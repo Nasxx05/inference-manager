@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { AUTO_MODEL_ID } from "@/data/models";
 import { endpoint } from "@/lib/backend";
@@ -19,6 +19,7 @@ import { HistoryPanel } from "./HistoryPanel";
 import { PromptEditor } from "./PromptEditor";
 import { TaskForm, type TaskFormValues } from "./TaskForm";
 import { Button } from "./ui";
+import { GeneratingScreen } from "./GeneratingScreen";
 
 const INITIAL_VALUES: TaskFormValues = {
   taskDescription: "",
@@ -27,24 +28,32 @@ const INITIAL_VALUES: TaskFormValues = {
   budget: "10",
 };
 
-const LOADING_STEPS = [
-  "Understanding task...",
-  "Estimating scope...",
-  "Checking budget...",
-  "Selecting model...",
-  "Writing your prompt...",
-];
-
-// The prompt-writing model reasons before it writes, so this step is slow.
-const LOADING_STEP_MS = 2600;
+/**
+ * Explicit UI states.
+ *
+ * "cancelled" is deliberately distinct from "idle": both show the form, but
+ * cancelling is the user's own action, so it must not be reported as an error
+ * and must not leave the Analyze button disabled.
+ */
+type RunState = "idle" | "analyzing" | "success" | "error" | "cancelled";
 
 export function Workspace() {
   const [values, setValues] = useState<TaskFormValues>(INITIAL_VALUES);
   const [plan, setPlan] = useState<PlanResult | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [state, setState] = useState<RunState>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [step, setStep] = useState(0);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+
+  /**
+   * The in-flight request.
+   *
+   * Serves two purposes: Cancel can genuinely abort the request rather than
+   * merely hiding the animation while an expensive LLM call continues, and its
+   * presence is the duplicate-submission guard.
+   */
+  const inFlight = useRef<AbortController | null>(null);
+
+  const loading = state === "analyzing";
 
   const [questions, setQuestions] = useState<ClarifyingQuestion[] | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
@@ -55,12 +64,16 @@ export function Workspace() {
   }, []);
 
   useEffect(() => {
-    if (!loading) return;
-    const timer = window.setInterval(() => {
-      setStep((s) => (s + 1) % LOADING_STEPS.length);
-    }, LOADING_STEP_MS);
-    return () => window.clearInterval(timer);
-  }, [loading]);
+    // Abort only on real unmount. A cancellation clears the ref itself.
+    return () => inFlight.current?.abort();
+  }, []);
+
+  const cancelGeneration = useCallback(() => {
+    inFlight.current?.abort();
+    inFlight.current = null;
+    setState("cancelled");
+    setError(null);
+  }, []);
 
   const validate = useCallback((): string | null => {
     if (!values.taskDescription.trim()) {
@@ -86,21 +99,31 @@ export function Workspace() {
 
       if (!merged.taskDescription.trim()) {
         setError("Describe what you want to accomplish before continuing.");
+        setState("error");
         return;
       }
       if (!Number.isFinite(budget) || budget <= 0) {
         setError("Enter a valid CREDIT amount greater than zero.");
+        setState("error");
         return;
       }
 
+      // Duplicate-submission guard. The button is disabled too, but this
+      // protects the state itself, so a double click or a rapid Enter can never
+      // start two expensive LLM calls.
+      if (inFlight.current) return;
+
       setError(null);
-      setLoading(true);
-      setStep(0);
+      setState("analyzing");
+
+      const controller = new AbortController();
+      inFlight.current = controller;
 
       try {
         const response = await fetch(endpoint("/api/plan"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
           body: JSON.stringify({
             taskDescription: merged.taskDescription,
             modelId: merged.modelId,
@@ -121,14 +144,17 @@ export function Workspace() {
         const plan = payload.success ? payload.data : undefined;
         if (!response.ok || !plan) {
           // The backend returns a specific, human-readable message for every
-          // failure mode. Only fall back to a generic line if it is absent.
+          // failure mode (timeout, rate limit, unusable response). Only fall
+          // back to a generic line if it is absent.
           setError(
-            payload.error?.message ?? "We couldn't analyze this task. Please try again.",
+            payload.error?.message ?? "We couldn't generate your prompt. Please try again.",
           );
+          setState("error");
           return;
         }
 
         setPlan(plan);
+        setState("success");
         setValues((v) => ({ ...v, optimization: merged.optimization }));
         setQuestions(null);
         setAnswers({});
@@ -145,10 +171,15 @@ export function Workspace() {
           timestamp: plan.createdAt,
         };
         setHistory(saveEntry(entry));
-      } catch {
-        setError("We couldn't analyze this task. Please try again.");
+      } catch (caught) {
+        // An abort is the user's own action, not a failure.
+        if (caught instanceof DOMException && caught.name === "AbortError") return;
+        setError("We couldn't generate your prompt. Please try again.");
+        setState("error");
       } finally {
-        setLoading(false);
+        inFlight.current = null;
+        // Never overwrite a cancellation with a derived state.
+        setState((current) => (current === "cancelled" ? current : "idle"));
       }
     },
     [values],
@@ -158,11 +189,12 @@ export function Workspace() {
     const validationError = validate();
     if (validationError) {
       setError(validationError);
+      setState("error");
       return;
     }
 
     setError(null);
-    setLoading(true);
+    setState("idle");
 
     try {
       const response = await fetch(endpoint("/api/clarify"), {
@@ -178,9 +210,8 @@ export function Workspace() {
 
       const questions = payload.success ? payload.data?.questions : undefined;
       if (!response.ok || !questions || questions.length === 0) {
-        // No usable questions: fall straight through to planning. A provider
-        // failure here is not fatal on its own, since planning will surface the
-        // real error if the model is genuinely unreachable.
+        // No usable questions: fall straight through to planning. Clarify is a
+        // local computation, so planning surfaces any real model error.
         void analyze();
         return;
       }
@@ -191,8 +222,6 @@ export function Workspace() {
     } catch {
       // Never block on the clarifying step.
       void analyze();
-    } finally {
-      setLoading(false);
     }
   }
 
@@ -203,6 +232,7 @@ export function Workspace() {
   function handleNewTask() {
     setPlan(null);
     setError(null);
+    setState("idle");
     setQuestions(null);
     setAnswers({});
     setClarifying(false);
@@ -253,6 +283,7 @@ export function Workspace() {
                 setQuestions(null);
                 setAnswers({});
                 setError(null);
+                setState("idle");
               }}
               onSubmit={() =>
                 void analyze({
@@ -285,9 +316,18 @@ export function Workspace() {
                   error={error}
                 />
                 {loading ? (
-                  <p aria-live="polite" className="mt-4 text-center text-xs text-muted">
-                    {LOADING_STEPS[step]}
-                  </p>
+                  <GeneratingScreen
+                    taskDescription={values.taskDescription}
+                    onCancel={cancelGeneration}
+                  />
+                ) : null}
+                {state === "error" && error ? (
+                  <div role="alert" className="mt-4 text-center">
+                    <p className="text-sm font-medium text-danger">
+                      We couldn't generate your prompt.
+                    </p>
+                    <p className="mt-1 text-sm text-muted">{error}</p>
+                  </div>
                 ) : null}
               </div>
             </div>
@@ -321,14 +361,18 @@ export function Workspace() {
             </div>
 
             {loading ? (
-              <p aria-live="polite" className="mt-4 text-center text-xs text-muted">
-                {LOADING_STEPS[step]}
-              </p>
+              <GeneratingScreen
+                taskDescription={plan.taskDescription}
+                onCancel={cancelGeneration}
+              />
             ) : null}
-            {error ? (
-              <p role="alert" className="mt-4 text-center text-sm text-danger">
-                {error}
-              </p>
+            {state === "error" && error ? (
+              <div role="alert" className="mt-4 text-center">
+                <p className="text-sm font-medium text-danger">
+                  We couldn't generate your prompt.
+                </p>
+                <p className="mt-1 text-sm text-muted">{error}</p>
+              </div>
             ) : null}
           </div>
         )}

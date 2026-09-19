@@ -9,16 +9,19 @@
  * use. Configure on Render:
  *
  *   AGENTFUND_AI_BASE_URL, AGENTFUND_AI_API_KEY, AGENTFUND_AI_MODEL
- *   (optional: AGENTFUND_AI_ANALYSIS_MAX_TOKENS, AGENTFUND_AI_PROMPT_MAX_TOKENS,
- *              AGENTFUND_AI_TIMEOUT_MS, AGENTFUND_AI_FALLBACK_MODEL,
+ *   (optional: AGENTFUND_AI_MAX_TOKENS, AGENTFUND_AI_ANALYSIS_MAX_TOKENS,
+ *              AGENTFUND_AI_PROMPT_MAX_TOKENS, AGENTFUND_AI_TIMEOUT_MS,
+ *              AGENTFUND_AI_COMBINED, AGENTFUND_AI_FALLBACK_MODEL,
  *              ALLOWED_ORIGINS)
  *
  * Changing AGENTFUND_AI_MODEL is enough to switch the internal model.
  *
- * LLM call budget for a completed task: exactly two.
+ * LLM call budget for a completed task: ONE.
  *
  *   1. /api/clarify  local classification only — no LLM call
- *   2. /api/plan     one analysis call, then one prompt-writing call
+ *   2. /api/plan     one combined call returning analysis AND prompt,
+ *                    falling back to two calls only if the model cannot
+ *                    produce both halves together.
  *
  * Cost, feasibility, scope optimization and model recommendation are all local
  * calculations, so they cost no LLM time at all.
@@ -30,15 +33,16 @@ import { loadLocalEnv } from "./loadEnv";
 import { AiError, newRequestId, toAiError } from "@/lib/ai/errors";
 import {
   ENV,
+  aiCombinedMaxTokens,
   aiModel,
+  aiProviderConfigured,
   legacyMaxTokensPresent,
   usingLegacyEnvNames,
 } from "@/lib/ai/env";
+import { logTiming } from "@/lib/ai/chatClient";
 import { aiHealth, backendHealth, simpleAiTest, tokenBudgets } from "@/lib/ai/health";
-import { analyzeTask } from "@/lib/ai/provider";
-import { aiProviderConfigured } from "@/lib/ai/env";
 import { heuristicAnalyze } from "@/lib/ai/taskAnalyzer";
-import { buildPlan } from "@/lib/planner";
+import { buildPlanWithMetrics } from "@/lib/planner";
 import { selectQuestions } from "@/lib/clarifier";
 import { parseBudget, parseOptimization } from "@/lib/validation/schemas";
 import type { ClarifyingQuestion, OptimizationPreference, TaskType } from "@/types";
@@ -99,12 +103,12 @@ app.use(express.json({ limit: "1mb" }));
  * One line per stage, plus a total.
  *
  * The point is to make it obvious where time goes: `clarify` is local and
- * should be ~0ms, while `task-analysis` and `prompt-generation` are the two
- * LLM stages. If the total is dominated by one of them, the log says which.
+ * should be ~0ms, and the LLM work is either one combined stage or the two
+ * fallback stages. If the total is dominated by one of them, the log says which.
  */
 function logStage(
   requestId: string,
-  stage: "clarify" | "task-analysis" | "prompt-generation" | "total",
+  stage: "clarify" | "combined-analysis-and-prompt" | "task-analysis" | "prompt-generation" | "total",
   durationMs: number,
   success: boolean,
   detail = "",
@@ -127,7 +131,7 @@ function logStage(
 app.get("/health", (_request, response) => {
   response.json({
     success: true,
-    data: { ...backendHealth(), budgets: tokenBudgets() },
+    data: { ...backendHealth(), budgets: { ...tokenBudgets(), combined: aiCombinedMaxTokens() } },
   });
 });
 
@@ -301,8 +305,7 @@ function validatePlanInput(payload: Record<string, unknown>):
  *
  * Classification is local and deterministic. The only thing this step needs is
  * a task type good enough to pick a relevant question set; the full AI analysis
- * happens once in /api/plan, after the user answers or skips. Removing the
- * call here takes a completed task from three LLM calls to two.
+ * happens once in /api/plan, after the user answers or skips.
  */
 app.post("/api/clarify", async (request, response) => {
   const started = Date.now();
@@ -348,8 +351,9 @@ app.post("/api/clarify", async (request, response) => {
 });
 
 /**
- * Builds the full plan. Normally exactly two LLM calls: one task analysis,
- * then one prompt generation. Everything between them is local.
+ * Builds the full plan. Normally ONE LLM call returning the analysis and the
+ * prompt together, with an automatic two-call fallback. Everything after the
+ * call is local.
  */
 app.post("/api/plan", async (request, response) => {
   const totalStarted = Date.now();
@@ -365,11 +369,8 @@ app.post("/api/plan", async (request, response) => {
     });
   }
 
-  let analysisMs = 0;
-  let promptMs = 0;
-
   try {
-    const plan = await buildPlan({
+    const built = await buildPlanWithMetrics({
       taskDescription: input.taskDescription,
       modelId: String(payload.modelId ?? "").trim() || "auto",
       optimization: input.optimization,
@@ -379,28 +380,54 @@ app.post("/api/plan", async (request, response) => {
       clarifyingResponses: parseClarifyingResponses(payload.clarifyingResponses),
     });
 
-    // Attribute the elapsed time to the two LLM stages using the durations the
-    // planner already measured, so the log says which half was slow.
-    analysisMs = plan.analysisDurationMs ?? 0;
-    promptMs = plan.promptDurationMs ?? 0;
-    logStage(requestId, "task-analysis", analysisMs, true);
-    logStage(requestId, "prompt-generation", promptMs, true);
+    const totalMs = Date.now() - totalStarted;
+    const stage =
+      built.route === "combined" ? "combined-analysis-and-prompt" : "task-analysis";
+
+    // One latency line with every field needed to locate a slowdown: LLM time,
+    // provider time, parse time and local time are all separated.
+    logTiming({
+      requestId: built.requestId ?? requestId,
+      stage,
+      model: built.plan.agentModel ?? aiModel() ?? "unknown",
+      totalDurationMs: totalMs,
+      llmDurationMs: built.llmDurationMs,
+      providerDurationMs: built.providerDurationMs,
+      responseParseDurationMs: built.parseDurationMs,
+      localCalculationDurationMs: built.localDurationMs,
+      success: true,
+      retryCount: built.retryCount,
+    });
+
+    logStage(requestId, stage, built.llmDurationMs, true, `calls=${built.llmCalls}`);
+    if (built.route === "two-call") {
+      logStage(requestId, "prompt-generation", 0, true, "included-in-two-call");
+    }
     logStage(
       requestId,
       "total",
-      Date.now() - totalStarted,
+      totalMs,
       true,
-      `local=${Math.max(0, Date.now() - totalStarted - analysisMs - promptMs)}ms`,
+      `calls=${built.llmCalls} local=${built.localDurationMs}ms parse=${built.parseDurationMs}ms`,
     );
-    return response.json({ success: true, data: plan });
+    return response.json({ success: true, data: built.plan });
   } catch (error) {
     const ai = toAiError(error, requestId);
-    // The analysis stage ran and failed before prompt generation started, so
-    // any failure that reached here without a prompt duration belongs to it.
-    const failedStage: "task-analysis" | "prompt-generation" =
-      promptMs > 0 || ai.code === "AI_VALIDATION_FAILED" ? "prompt-generation" : "task-analysis";
-    logStage(requestId, failedStage, Date.now() - totalStarted, false, `code=${ai.code}`);
-    logStage(requestId, "total", Date.now() - totalStarted, false, `code=${ai.code}`);
+    const totalMs = Date.now() - totalStarted;
+    logTiming({
+      requestId,
+      stage: "combined-analysis-and-prompt",
+      model: aiModel() ?? "unknown",
+      totalDurationMs: totalMs,
+      llmDurationMs: 0,
+      responseParseDurationMs: 0,
+      localCalculationDurationMs: 0,
+      success: false,
+      retryCount: 0,
+      errorCode: ai.code,
+    });
+    logStage(requestId, "combined-analysis-and-prompt", totalMs, false, `code=${ai.code}`);
+    logStage(requestId, "total", totalMs, false, `code=${ai.code}`);
 
     const status =
       ai.code === "AI_TIMEOUT" ||
@@ -430,7 +457,8 @@ app.listen(PORT, () => {
   console.log(`Provider configured: ${health.providerConfigured ? "yes" : "no"}`);
   console.log(`Model: ${health.model ?? "(unset)"}`);
   console.log(
-    `Budgets: analysis=${budgets.analysis} prompt=${budgets.prompt} timeoutMs=${health.timeoutMs}`,
+    `Budgets: combined=${aiCombinedMaxTokens()} analysis=${budgets.analysis} ` +
+      `prompt=${budgets.prompt} timeoutMs=${health.timeoutMs}`,
   );
   console.log(
     envFilesLoaded.length
@@ -449,7 +477,7 @@ app.listen(PORT, () => {
     // Ignored on purpose: honouring it would restore one oversized cap for both
     // stages and undo the split budgets that keep calls fast.
     console.warn(
-      `AI_MAX_TOKENS is set but ignored. Use ${ENV.ANALYSIS_MAX_TOKENS} and ${ENV.PROMPT_MAX_TOKENS} instead.`,
+      `AI_MAX_TOKENS is set but ignored. Use ${ENV.MAX_TOKENS} for the combined call, or ${ENV.ANALYSIS_MAX_TOKENS}/${ENV.PROMPT_MAX_TOKENS} for the fallback.`,
     );
   }
   if (isProduction && !allowList) {

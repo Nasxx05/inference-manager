@@ -1,4 +1,29 @@
+/**
+ * Orchestrates the planning pipeline, shared by the frontend and the backend.
+ *
+ * LLM BUDGET: the normal path is ONE call. `./ai/combined` asks the internal
+ * model for the task analysis and the finished prompt in a single structured
+ * response, which removes one entire provider round trip compared with calling
+ * for each half separately.
+ *
+ * Everything after that call is LOCAL and deterministic:
+ *
+ *   cost estimate, recommended maximum, reserve, feasibility,
+ *   scope reduction, model recommendation, comparison, execution plan
+ *
+ * The model is never asked for money. It supplies token estimates and scope
+ * judgements; AgentFund turns those into CREDIT figures using model metadata.
+ * That keeps the product's numbers reproducible and auditable.
+ *
+ * If the combined call cannot be used — AGENTFUND_AI_COMBINED=0, or the
+ * response fails validation — the pipeline falls back to the two-call path
+ * (analyze, then write). The fallback costs one extra round trip, but only for
+ * the models that need it, so no one pays for it by default.
+ */
+
 import { AUTO_MODEL_ID, findModelOrThrow } from "@/data/models";
+import { generatePlan } from "@/lib/ai/combined";
+import { aiCombinedEnabled } from "@/lib/ai/env";
 import { analyzeTask } from "@/lib/ai/provider";
 import { generatePrompt } from "@/lib/ai/promptGenerator";
 import { resolveAnswers, answersUsed } from "@/lib/clarifier";
@@ -28,6 +53,43 @@ export interface PlanRequest {
   clarifyingResponses?: Record<string, string>;
 }
 
+/** How the plan was produced, so latency and behaviour can be attributed. */
+export type PlanRoute = "combined" | "two-call";
+
+export interface PlanBuildResult {
+  plan: PlanResult;
+  route: PlanRoute;
+  requestId?: string;
+  providerDurationMs?: number;
+  /** Time spent inside LLM calls, across whichever route was used. */
+  llmDurationMs: number;
+  /** Time spent parsing/validating model output. */
+  parseDurationMs: number;
+  /** Time spent in local calculations. */
+  localDurationMs: number;
+  /** LLM requests actually sent, summed across the route. */
+  llmCalls: number;
+  /** Retries beyond the first attempt, summed across the route. */
+  retryCount: number;
+}
+
+/** Stand-in target description for Auto: "auto" is not a model id, and naming
+ * one here would bake a specific model into the prompt. */
+function neutralTargetModel(): ModelConfig {
+  return {
+    id: "auto",
+    displayName: "the recommended model",
+    provider: "unspecified",
+    capabilityTier: "standard",
+    inputPrice: 0,
+    outputPrice: 0,
+    codingCapability: 0,
+    reasoningCapability: 0,
+    researchCapability: 0,
+    contextWindow: 32000,
+  };
+}
+
 function executionPlanFor(
   analysis: TaskAnalysis,
   optimization: OptimizationPreference,
@@ -50,6 +112,17 @@ function executionPlanFor(
 }
 
 export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
+  return (await buildPlanWithMetrics(request)).plan;
+}
+
+/**
+ * Builds a plan and reports how it was produced.
+ *
+ * The timings here are what make the request diagnosable: LLM time, parse time
+ * and local time are tracked separately, so a slow request can be attributed to
+ * the provider rather than guessed at.
+ */
+export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBuildResult> {
   const {
     taskDescription,
     modelId,
@@ -60,14 +133,7 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
     clarifyingResponses = {},
   } = request;
 
-  // Throws a structured AiError if the model is unconfigured or fails: the
-  // pipeline never continues with a substituted analysis.
-  // This is LLM call #1 of the two a completed task makes.
-  const {
-    analysis: rawAnalysis,
-    model: agentModel,
-    durationMs: analysisDurationMs,
-  } = await analyzeTask(taskDescription);
+  const started = Date.now();
 
   const clarifyingAnswers: ClarifyingAnswer[] = resolveAnswers(
     clarifyingQuestions,
@@ -76,9 +142,112 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
   const usedAnswers = answersUsed(clarifyingAnswers);
 
   const autoSelected = modelId === AUTO_MODEL_ID;
-  const recommendation = autoSelected ? selectModel(rawAnalysis, budget, optimization) : null;
-  const resolvedModelId = autoSelected ? String(recommendation?.modelId) : modelId;
-  const model: ModelConfig = findModelOrThrow(resolvedModelId);
+
+  /**
+   * Resolve the target model.
+   *
+   * Auto needs an analysis first, so on the two-call route it is resolved after
+   * analysis. On the combined route the model is unknown until the response
+   * arrives, so Auto is resolved from that analysis and the prompt is already
+   * written for the tier of whatever was chosen — which is why the combined
+   * prompt asks for phrasing suited to the target's capability tier and the
+   * fallback path is used when an explicit Auto selection needs precision.
+   */
+  async function resolveTargetModel(analysis: TaskAnalysis): Promise<{
+    model: ModelConfig;
+    recommendation: PlanResult["recommendation"];
+  }> {
+    const recommendation = autoSelected ? selectModel(analysis, budget, optimization) : null;
+    const resolvedModelId = autoSelected ? String(recommendation?.modelId) : modelId;
+    return { model: findModelOrThrow(resolvedModelId), recommendation };
+  }
+
+  let route: PlanRoute = "combined";
+  let llmDurationMs = 0;
+  let parseDurationMs = 0;
+  let llmCalls = 0;
+  let retryCount = 0;
+  let agentModel: string | undefined;
+  let requestId: string | undefined;
+  let providerDurationMs: number | undefined;
+
+  /**
+   * Produces the analysis and the prompt, using ONE call when possible.
+   *
+   * Returns both values on every path, so the rest of the pipeline never has to
+   * reason about which route produced them.
+   */
+  async function produceAnalysisAndPrompt(): Promise<{ analysis: TaskAnalysis; prompt: string }> {
+    if (aiCombinedEnabled()) {
+      // Auto is resolved after this call, so the writer is told the capability
+      // tier of the explicit choice, or a neutral tier when the user picked
+      // Auto. The local recommendation still decides the target model.
+      const target = autoSelected ? neutralTargetModel() : findModelOrThrow(modelId);
+      try {
+        const combined = await generatePlan({
+          taskDescription,
+          targetModel: target,
+          optimization,
+          budget,
+          clarifyingAnswers,
+        });
+        route = "combined";
+        agentModel = combined.model;
+        requestId = combined.requestId;
+        providerDurationMs = combined.providerDurationMs;
+        llmDurationMs += combined.durationMs;
+        llmCalls += 1;
+        retryCount += Math.max(0, combined.attemptCount - 1);
+        return { analysis: combined.analysis, prompt: combined.prompt };
+      } catch (error) {
+        // Fall through to two calls rather than failing outright: a model that
+        // cannot return both halves together should still be usable. If the
+        // fallback also fails, its error is the freshest and most relevant.
+        route = "two-call";
+      }
+    } else {
+      route = "two-call";
+    }
+
+    const parsedStart = Date.now();
+    const analysisResult = await analyzeTask(taskDescription);
+    parseDurationMs += Date.now() - parsedStart;
+    const firstAnalysis = analysisResult.analysis;
+    agentModel = analysisResult.model;
+    requestId = analysisResult.requestId;
+    providerDurationMs = analysisResult.providerDurationMs;
+    llmDurationMs += analysisResult.durationMs;
+    llmCalls += 1;
+    retryCount += Math.max(0, analysisResult.attemptCount - 1);
+
+    const { model } = await resolveTargetModel(firstAnalysis);
+    const preliminary = estimateCost(firstAnalysis, model, optimization);
+    const generated = await generatePrompt({
+      taskDescription,
+      analysis: { ...firstAnalysis, phases: allocatePhaseCosts(firstAnalysis, preliminary) },
+      targetModel: model,
+      optimization,
+      budget,
+      cost: {
+        minimum: preliminary.minimum,
+        maximum: preliminary.maximum,
+        recommendedMaximum: preliminary.recommendedMaximum,
+      },
+      clarifyingAnswers,
+    });
+    llmDurationMs += generated.durationMs;
+    providerDurationMs = generated.providerDurationMs ?? providerDurationMs;
+    llmCalls += 1;
+    retryCount += Math.max(0, generated.attemptCount - 1);
+    return { analysis: firstAnalysis, prompt: generated.prompt };
+  }
+
+  const { analysis: rawAnalysis, prompt } = await produceAnalysisAndPrompt();
+
+  // Everything from here is local: no LLM work, only deterministic maths.
+  const localStart = Date.now();
+
+  const { model, recommendation } = await resolveTargetModel(rawAnalysis);
 
   const preliminary = estimateCost(rawAnalysis, model, optimization);
   const needsOptimization = preliminary.recommendedMaximum > budget || preliminary.maximum > budget;
@@ -123,24 +292,9 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
     phases: allocatePhaseCosts(analysis, cost),
   };
 
-  // LLM call #2, and the last one. Everything between the two calls is local
-  // calculation: cost, feasibility, scope and model recommendation cost no LLM
-  // time at all.
-  const generated = await generatePrompt({
-    taskDescription,
-    analysis: analysisWithCosts,
-    targetModel: model,
-    optimization,
-    budget,
-    cost: {
-      minimum: cost.minimum,
-      maximum: cost.maximum,
-      recommendedMaximum: cost.recommendedMaximum,
-    },
-    clarifyingAnswers,
-  });
+  const localDurationMs = Date.now() - localStart;
 
-  return {
+  const plan: PlanResult = {
     id: `plan_${Date.now().toString(36)}`,
     createdAt: new Date().toISOString(),
     taskDescription,
@@ -169,14 +323,35 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
     clarifyingAnswers,
     answersUsed: usedAnswers,
     promptSource: "ai",
-    prompt: generated.prompt,
+    prompt,
     // Which internal model produced this plan. Diagnostic only: it is not the
     // user's target model, and it never contains a credential.
     agentModel,
-    // Per-stage timings, so a slow request can be attributed to the stage that
-    // caused it rather than only to the request as a whole.
-    analysisDurationMs,
-    promptDurationMs: generated.durationMs,
+    analysisDurationMs: llmDurationMs,
+    promptDurationMs: 0,
+    // Route and latency breakdown. Diagnostic only, but it is what lets a slow
+    // request be attributed to the provider or to AgentFund without guessing.
+    route,
+    requestId,
+    llmCalls,
+    retryCount,
+    totalDurationMs: Date.now() - started,
+    llmDurationMs,
+    providerDurationMs,
+    parseDurationMs,
+    localDurationMs,
+  };
+
+  return {
+    plan,
+    route,
+    llmDurationMs,
+    parseDurationMs,
+    localDurationMs,
+    llmCalls,
+    retryCount,
+    requestId,
+    providerDurationMs,
   };
 }
 

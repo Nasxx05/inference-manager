@@ -225,7 +225,7 @@ describe("generatePrompt", () => {
     await generatePrompt(input());
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    expect(body.max_tokens).toBe(3500);
+    expect(body.max_tokens).toBe(3000);
   });
 
   it("never raises the cap because of the deprecated AI_MAX_TOKENS", async () => {
@@ -237,7 +237,7 @@ describe("generatePrompt", () => {
     await generatePrompt(input());
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    expect(body.max_tokens).toBe(3500);
+    expect(body.max_tokens).toBe(3000);
   });
 
   it("tells the writer which model the prompt is for", async () => {

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AUTO_MODEL_ID } from "@/data/models";
-import { buildPlan } from "@/lib/planner";
+import { buildPlan, buildPlanWithMetrics } from "@/lib/planner";
 
 /**
  * The prompt is written by the internal model, so these tests run the whole
@@ -101,10 +101,31 @@ const STUB_LARGE_ANALYSIS = JSON.stringify({
   scopeAdjustments: ["Ship the core purchase path first"],
 });
 
-/** Serves the large analysis when the task clearly exceeds a small budget. */
+/** Serves the large analysis, via either route, so scope logic is exercised. */
 function stubProviderLarge() {
   return vi.fn().mockImplementation(async (_url: string, init?: { body?: string }) => {
     const body = String(init?.body ?? "");
+    const isCombined = body.includes("taskAnalysis") && body.includes("generatedPrompt");
+    if (isCombined) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              finish_reason: "stop",
+              message: {
+                content: JSON.stringify({
+                  taskAnalysis: JSON.parse(STUB_LARGE_ANALYSIS),
+                  generatedPrompt: STUB_PROMPT,
+                  promptSummary: "A prompt for the ecommerce platform.",
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    }
     const isAnalysis = body.includes("return ONLY valid JSON");
     return {
       ok: true,
@@ -121,12 +142,33 @@ function stubProviderLarge() {
   });
 }
 
+/**
+ * The combined stub: ONE call returns the analysis and the prompt together.
+ * This is what the normal path now sends, so it is what most tests exercise.
+ */
+function combinedBody(): string {
+  return JSON.stringify({
+    taskAnalysis: JSON.parse(STUB_ANALYSIS),
+    generatedPrompt: STUB_PROMPT,
+    promptSummary: "A prompt for building the landing page.",
+  });
+}
+
 function stubProvider() {
   // Dispatch on what the request asks for rather than on a call counter:
-  // several tests call buildPlan in this file, and each buildPlan makes two
-  // calls (analysis, then writing), so a counter would drift between tests.
+  // the combined path sends one call, the fallback sends two, and a counter
+  // would drift between tests that use different routes.
   return vi.fn().mockImplementation(async (_url: string, init?: { body?: string }) => {
     const body = String(init?.body ?? "");
+    if (body.includes("taskAnalysis") && body.includes("generatedPrompt")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ finish_reason: "stop", message: { content: combinedBody() } }],
+        }),
+      };
+    }
     const isAnalysis = body.includes("return ONLY valid JSON");
     return {
       ok: true,
@@ -150,6 +192,7 @@ beforeEach(() => {
   // Keep the retry path fast. These are read per call, so lowering the
   // per-attempt timeout does not weaken what the test asserts.
   process.env.AGENTFUND_AI_TIMEOUT_MS = "50";
+  delete process.env.AGENTFUND_AI_COMBINED;
   vi.stubGlobal("fetch", stubProvider());
 });
 
@@ -159,91 +202,166 @@ beforeEach(() => {
  * stage is quietly re-running the model.
  */
 describe("LLM call budget", () => {
-  it("makes exactly two calls for a completed task", async () => {
+  it("makes exactly ONE call for a completed task", async () => {
     const fetchMock = stubProvider();
     vi.stubGlobal("fetch", fetchMock);
 
-    await buildPlan({
+    const built = await buildPlanWithMetrics({
       taskDescription: LANDING_PAGE,
       modelId: "claude-sonnet",
       optimization: "balanced",
       budget: 20,
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(built.route).toBe("combined");
+    expect(built.llmCalls).toBe(1);
   });
 
-  it("uses one call for analysis and one for prompt generation", async () => {
+  it("asks for the analysis and the prompt in the same request", async () => {
     const fetchMock = stubProvider();
     vi.stubGlobal("fetch", fetchMock);
 
-    await buildPlan({
+    await buildPlanWithMetrics({
       taskDescription: LANDING_PAGE,
       modelId: "claude-sonnet",
       optimization: "balanced",
       budget: 20,
     });
 
-    const bodies = fetchMock.mock.calls.map((call) => String((call[1] as { body: string }).body));
-    // The analyser is the JSON request; the writer is the prompt request.
-    expect(bodies[0]).toContain("return ONLY valid JSON");
-    expect(bodies[1]).not.toContain("return ONLY valid JSON");
+    const body = String((fetchMock.mock.calls[0][1] as { body: string }).body);
+    expect(body).toContain("taskAnalysis");
+    expect(body).toContain("generatedPrompt");
   });
 
-  it("gives the analysis call its own small token cap", async () => {
+  it("never asks the model for money", async () => {
     const fetchMock = stubProvider();
     vi.stubGlobal("fetch", fetchMock);
-    process.env.AGENTFUND_AI_ANALYSIS_MAX_TOKENS = "1800";
-    process.env.AGENTFUND_AI_PROMPT_MAX_TOKENS = "3500";
 
-    await buildPlan({
+    await buildPlanWithMetrics({
       taskDescription: LANDING_PAGE,
       modelId: "claude-sonnet",
       optimization: "balanced",
       budget: 20,
     });
 
-    const bodies = fetchMock.mock.calls.map(
-      (call) => JSON.parse(String((call[1] as { body: string }).body)) as { max_tokens: number },
-    );
-    // Analysis is capped far below the prompt stage, and both are modest.
-    expect(bodies[0].max_tokens).toBe(1800);
-    expect(bodies[1].max_tokens).toBe(3500);
+    const body = String((fetchMock.mock.calls[0][1] as { body: string }).body);
+    // Cost, reserve and feasibility are local calculations; the model must not
+    // be asked to produce them.
+    expect(body).not.toContain("recommendedMaximum");
+    expect(body).not.toContain("reserve");
+    expect(body).toContain("do not compute costs");
   });
 
-  it("never lets the deprecated AI_MAX_TOKENS inflate either call", async () => {
+  it("uses the combined output cap", async () => {
     const fetchMock = stubProvider();
     vi.stubGlobal("fetch", fetchMock);
-    delete process.env.AGENTFUND_AI_ANALYSIS_MAX_TOKENS;
-    delete process.env.AGENTFUND_AI_PROMPT_MAX_TOKENS;
+    process.env.AGENTFUND_AI_MAX_TOKENS = "4500";
+
+    await buildPlanWithMetrics({
+      taskDescription: LANDING_PAGE,
+      modelId: "claude-sonnet",
+      optimization: "balanced",
+      budget: 20,
+    });
+
+    const parsed = JSON.parse(
+      String((fetchMock.mock.calls[0][1] as { body: string }).body),
+    ) as { max_tokens: number };
+    expect(parsed.max_tokens).toBe(4500);
+  });
+
+  it("defaults the combined cap to 4500 and ignores AI_MAX_TOKENS=48000", async () => {
+    const fetchMock = stubProvider();
+    vi.stubGlobal("fetch", fetchMock);
+    delete process.env.AGENTFUND_AI_MAX_TOKENS;
     process.env.AI_MAX_TOKENS = "48000";
 
-    await buildPlan({
+    await buildPlanWithMetrics({
       taskDescription: LANDING_PAGE,
       modelId: "claude-sonnet",
       optimization: "balanced",
       budget: 20,
     });
 
-    const bodies = fetchMock.mock.calls.map(
-      (call) => JSON.parse(String((call[1] as { body: string }).body)) as { max_tokens: number },
-    );
-    expect(bodies[0].max_tokens).toBe(1800);
-    expect(bodies[1].max_tokens).toBe(3500);
+    const parsed = JSON.parse(
+      String((fetchMock.mock.calls[0][1] as { body: string }).body),
+    ) as { max_tokens: number };
+    expect(parsed.max_tokens).toBe(4500);
   });
 
-  it("reports per-stage timings so a slow stage is identifiable", async () => {
-    vi.stubGlobal("fetch", stubProvider());
+  it("falls back to two calls when the combined response is unusable", async () => {
+    // The combined call returns prose, so validation must fail and the pipeline
+    // must still succeed via analyze-then-write.
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: { body?: string }) => {
+      const body = String(init?.body ?? "");
+      const isCombined = body.includes("taskAnalysis") && body.includes("generatedPrompt");
+      if (isCombined) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            choices: [{ finish_reason: "stop", message: { content: "not json at all" } }],
+          }),
+        };
+      }
+      const isAnalysis = body.includes("return ONLY valid JSON");
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            { finish_reason: "stop", message: { content: isAnalysis ? STUB_ANALYSIS : STUB_PROMPT } },
+          ],
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
-    const plan = await buildPlan({
+    const built = await buildPlanWithMetrics({
       taskDescription: LANDING_PAGE,
       modelId: "claude-sonnet",
       optimization: "balanced",
       budget: 20,
     });
 
-    expect(plan.analysisDurationMs).toBeGreaterThanOrEqual(0);
-    expect(plan.promptDurationMs).toBeGreaterThanOrEqual(0);
+    expect(built.route).toBe("two-call");
+    expect(built.llmCalls).toBe(2);
+    expect(built.plan.prompt).toContain("ROLE");
+  });
+
+  it("uses the two-call path when AGENTFUND_AI_COMBINED=0", async () => {
+    const fetchMock = stubProvider();
+    vi.stubGlobal("fetch", fetchMock);
+    process.env.AGENTFUND_AI_COMBINED = "0";
+
+    const built = await buildPlanWithMetrics({
+      taskDescription: LANDING_PAGE,
+      modelId: "claude-sonnet",
+      optimization: "balanced",
+      budget: 20,
+    });
+
+    expect(built.route).toBe("two-call");
+    expect(built.llmCalls).toBe(2);
+  });
+
+  it("reports latency fields so a slow request can be attributed", async () => {
+    vi.stubGlobal("fetch", stubProvider());
+
+    const built = await buildPlanWithMetrics({
+      taskDescription: LANDING_PAGE,
+      modelId: "claude-sonnet",
+      optimization: "balanced",
+      budget: 20,
+    });
+
+    expect(built.llmDurationMs).toBeGreaterThanOrEqual(0);
+    expect(built.localDurationMs).toBeGreaterThanOrEqual(0);
+    expect(built.parseDurationMs).toBeGreaterThanOrEqual(0);
+    expect(built.retryCount).toBe(0);
+    expect(built.plan.route).toBe("combined");
+    expect(built.plan.totalDurationMs).toBeGreaterThanOrEqual(0);
   });
 });
 

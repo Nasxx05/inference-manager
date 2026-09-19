@@ -169,12 +169,35 @@ export interface PlanResult {
   /**
    * Time spent in each LLM stage, in milliseconds.
    *
-   * The two LLM calls are the only meaningful contributors to latency, so
+   * The LLM calls are the only meaningful contributors to latency, so
    * reporting them separately makes a slow request diagnosable: the log and the
-   * response both say whether the delay was analysis or prompt generation.
+   * response both say whether the delay was in the model or in AgentFund.
    */
   analysisDurationMs?: number;
   promptDurationMs?: number;
+
+  /**
+   * How the plan was produced: "combined" (one LLM call, the normal path) or
+   * "two-call" (the fallback for models that cannot return both halves
+   * together). Diagnostic only.
+   */
+  route?: "combined" | "two-call";
+  /** Provider request id, correlating this plan with the server logs. */
+  requestId?: string;
+  /** LLM requests actually sent for this plan. */
+  llmCalls?: number;
+  /** Retries beyond the first attempt, across the whole plan. */
+  retryCount?: number;
+  /** End-to-end time for this plan, in milliseconds. */
+  totalDurationMs?: number;
+  /** Time spent inside LLM calls. */
+  llmDurationMs?: number;
+  /** Provider-reported generation time, when available. */
+  providerDurationMs?: number;
+  /** Time spent parsing and validating model output. */
+  parseDurationMs?: number;
+  /** Time spent in local deterministic calculations. */
+  localDurationMs?: number;
 }
 
 export interface HistoryEntry {

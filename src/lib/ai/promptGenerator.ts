@@ -17,6 +17,7 @@
 import { chat } from "./chatClient";
 import { AiError, toAiError } from "./errors";
 import { aiPromptMaxTokens, aiProviderConfigured, missingConfig } from "./env";
+import { acceptablePrompt, missingPromptConcepts, stripFences, trimToStart } from "./prompt";
 import type {
   ClarifyingAnswer,
   CostEstimate,
@@ -41,6 +42,8 @@ export interface PromptResult {
   model: string;
   requestId: string;
   durationMs: number;
+  providerDurationMs?: number;
+  attemptCount: number;
 }
 
 const SECTIONS = [
@@ -174,73 +177,12 @@ function userMessage(input: PromptDraftInput): string {
   ].join("\n");
 }
 
-function stripFences(text: string): string {
-  return text
-    .trim()
-    .replace(/^```(?:markdown|md|text|prompt)?\s*/i, "")
-    .replace(/```\s*$/, "")
-    .trim();
-}
-
 /** A real prompt always clears this; anything shorter is a fragment. */
 export const MIN_PROMPT_CHARS = 400;
 
-/**
- * Upper bound on a usable prompt. Generous on purpose: a long-but-valid prompt
- * should not be discarded, but a runaway response is not a prompt.
- */
-export const MAX_PROMPT_CHARS = 40000;
-
-/**
- * Section concepts that must be present.
- *
- * Checked case-insensitively and allowing internal whitespace differences:
- * "Outof Scope" or "OUT OF SCOPE" both pass. A minor formatting difference must
- * not reject a valid prompt, but the required concepts must all exist.
- */
-export const REQUIRED_CONCEPTS = [
-  "role",
-  "objective",
-  "context",
-  "requirements",
-  "scope",
-  "outofscope",
-  "priorities",
-  "executionstrategy",
-  "constraints",
-  // Required in its own right, not merely as part of "constraints": the budget
-  // is the point of AgentFund, and a prompt that never states it is not an
-  // AgentFund prompt.
-  "budgetconstraint",
-  "validation",
-  "revisionpolicy",
-  "stoppingconditions",
-  "outputformat",
-] as const;
-
-/** Collapses case and spacing so header formatting can vary. */
-export function sectionKey(text: string): string {
-  return text.toLowerCase().replace(/[\s_-]+/g, "");
-}
-
-/** Keeps the model from returning an essay or a fragment. */
-export function acceptablePrompt(prompt: string): boolean {
-  if (!prompt || prompt.length < MIN_PROMPT_CHARS || prompt.length > MAX_PROMPT_CHARS) {
-    return false;
-  }
-  const normalized = sectionKey(prompt);
-  if (!REQUIRED_CONCEPTS.every((concept) => normalized.includes(concept))) return false;
-  // Must start at the first section rather than with conversational preamble.
-  const head = prompt.trimStart();
-  return head.startsWith("ROLE") || /^#{0,6}\s*ROLE\b/.test(head);
-}
-
-/** Trims anything before the ROLE header instead of discarding the response. */
-function trimToStart(prompt: string): string {
-  const index = prompt.search(/^#{0,6}\s*ROLE\b/m);
-  if (index <= 0) return prompt.trimStart();
-  return prompt.slice(index).trimStart();
-}
+// Re-exported from ./prompt so the combined path and this fallback validate a
+// prompt identically. One definition, not two that can drift apart.
+export { acceptablePrompt, REQUIRED_CONCEPTS, MAX_PROMPT_CHARS, sectionKey } from "./prompt";
 
 type Attempt =
   | { ok: true; result: PromptResult }
@@ -291,12 +233,15 @@ async function attempt(input: PromptDraftInput): Promise<Attempt> {
 
   const prompt = trimToStart(stripFences(result.content));
   if (!acceptablePrompt(prompt)) {
+    const missing = missingPromptConcepts(prompt);
     return {
       ok: false,
       contentLevel: true,
       error: new AiError(
         "AI_VALIDATION_FAILED",
-        "The prompt model returned something that is not a usable AgentFund prompt.",
+        missing.length
+          ? `The prompt is missing required sections: ${missing.join(", ")}.`
+          : "The prompt model returned something that is not a usable AgentFund prompt.",
         { retryable: true, requestId: result.requestId },
       ),
     };

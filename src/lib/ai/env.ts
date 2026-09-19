@@ -27,9 +27,11 @@ export const ENV = {
   API_KEY: "AGENTFUND_AI_API_KEY",
   BASE_URL: "AGENTFUND_AI_BASE_URL",
   MODEL: "AGENTFUND_AI_MODEL",
+  MAX_TOKENS: "AGENTFUND_AI_MAX_TOKENS",
   ANALYSIS_MAX_TOKENS: "AGENTFUND_AI_ANALYSIS_MAX_TOKENS",
   PROMPT_MAX_TOKENS: "AGENTFUND_AI_PROMPT_MAX_TOKENS",
   TIMEOUT_MS: "AGENTFUND_AI_TIMEOUT_MS",
+  COMBINED: "AGENTFUND_AI_COMBINED",
   FALLBACK_MODEL: "AGENTFUND_AI_FALLBACK_MODEL",
   ALLOWED_ORIGINS: "ALLOWED_ORIGINS",
 } as const;
@@ -134,24 +136,48 @@ export function aiNumber(name: string, fallback: number, legacy?: string): numbe
 }
 
 /**
- * Output cap for the task-analysis call.
+ * Output cap for the COMBINED call, which returns the task analysis and the
+ * finished prompt in one response. This is the normal path, so this is the
+ * number that governs latency for most requests.
  *
- * Small on purpose: the analyser returns one compact JSON object and nothing
- * else. A large cap here was the single biggest avoidable cost in the old flow,
- * because it let the model spend the budget on reasoning and prose instead of
- * the handful of fields AgentFund actually consumes.
+ * 4500 is enough for a compact JSON analysis plus a genuinely detailed prompt
+ * without leaving room for the model to pad. Not 48000: that historical cap let
+ * a model spend the whole budget on reasoning and come back with nothing.
+ */
+export function aiCombinedMaxTokens(): number {
+  return Math.round(aiNumber(ENV.MAX_TOKENS, 4500));
+}
+
+/**
+ * Output cap for the task-analysis call, used only on the two-call fallback
+ * path. Small on purpose: the analyser returns one compact JSON object and
+ * nothing else.
  */
 export function aiAnalysisMaxTokens(): number {
   return Math.round(aiNumber(ENV.ANALYSIS_MAX_TOKENS, 1800));
 }
 
 /**
- * Output cap for the prompt-writing call. Larger than the analysis cap because
- * the deliverable is the prompt itself (roughly 500-900 words), but still
- * bounded so the model cannot pad.
+ * Output cap for the prompt-writing call, used only on the two-call fallback
+ * path. The deliverable is the prompt itself (roughly 500-900 words), so this
+ * is larger than the analysis cap but still bounded so the model cannot pad.
  */
 export function aiPromptMaxTokens(): number {
-  return Math.round(aiNumber(ENV.PROMPT_MAX_TOKENS, 3500));
+  return Math.round(aiNumber(ENV.PROMPT_MAX_TOKENS, 3000));
+}
+
+/**
+ * Whether to use the combined single-call path.
+ *
+ * One call is the default because it halves provider round trips. Set to "0" to
+ * force the two-call path for a model that cannot reliably return analysis and
+ * prompt together; the fallback also engages automatically when a combined
+ * response fails validation.
+ */
+export function aiCombinedEnabled(): boolean {
+  const raw = readEnv(ENV.COMBINED);
+  if (raw === undefined) return true;
+  return !["0", "false", "off", "no"].includes(raw.toLowerCase());
 }
 
 /** Per-attempt request budget. Every call is bounded; nothing waits forever. */
@@ -193,6 +219,7 @@ export function usingLegacyEnvNames(): boolean {
  *
  * It is ignored, but reported: an operator who set it expects it to matter, and
  * silently honouring it would reintroduce one oversized cap for every call.
+ * AGENTFUND_AI_MAX_TOKENS is a different variable and is read normally.
  */
 export function legacyMaxTokensPresent(): boolean {
   return isSet(process.env["AI_MAX_TOKENS"]);

@@ -23,6 +23,7 @@ export interface ChatMessage {
 
 /** Which part of the flow a call belongs to. Logged, never sent to the provider. */
 export type AiStage =
+  | "combined-analysis-and-prompt"
   | "task-analysis"
   | "prompt-generation"
   | "health-test"
@@ -53,6 +54,10 @@ export interface ChatResult {
   model: string;
   requestId: string;
   durationMs: number;
+  /** Provider-reported generation time, when the provider supplies it. */
+  providerDurationMs?: number;
+  /** How many times the request was actually sent: 1, or 2 after one retry. */
+  attemptCount: number;
 }
 
 const CHAT_PATH = "/chat/completions";
@@ -230,7 +235,13 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
         finish_reason?: string | null;
         message?: { content?: string | null };
       }>;
+      /** Present on some OpenAI-compatible providers. Reporting only. */
+      timings?: Record<string, number>;
     };
+    const providerDurationMs =
+      typeof payload.timings?.["total_seconds"] === "number"
+        ? Math.round(payload.timings["total_seconds"] * 1000)
+        : undefined;
     const choice = payload.choices?.[0];
     const content = choice?.message?.content;
 
@@ -272,6 +283,8 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
       model: payload.model ?? useModel,
       requestId,
       durationMs,
+      providerDurationMs,
+      attemptCount: attempt,
     };
   } catch (error) {
     if (error instanceof AiError) throw error;
@@ -352,6 +365,43 @@ export async function listModels(): Promise<
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Records one latency line per planning request.
+ *
+ * Split into LLM, parse and local time deliberately: a slow request is only
+ * fixable once it is clear whether the time went to the provider, to parsing
+ * the response, or to AgentFund's own calculations.
+ */
+export function logTiming(fields: {
+  requestId: string;
+  stage: AiStage;
+  model: string;
+  totalDurationMs: number;
+  llmDurationMs: number;
+  providerDurationMs?: number;
+  responseParseDurationMs: number;
+  localCalculationDurationMs: number;
+  success: boolean;
+  retryCount: number;
+  errorCode?: string;
+}): void {
+  const line = [
+    `ts=${new Date().toISOString()}`,
+    `requestId=${fields.requestId}`,
+    `stage=${fields.stage}`,
+    `model=${fields.model}`,
+    `totalDurationMs=${fields.totalDurationMs}`,
+    `llmDurationMs=${fields.llmDurationMs}`,
+    `providerDurationMs=${fields.providerDurationMs ?? "-"}`,
+    `parseDurationMs=${fields.responseParseDurationMs}`,
+    `localDurationMs=${fields.localCalculationDurationMs}`,
+    `success=${fields.success}`,
+    `retryCount=${fields.retryCount}`,
+    `errorCode=${fields.errorCode ?? "-"}`,
+  ].join(" ");
+  console.log(`[timing] ${line}`);
 }
 
 function wait(ms: number): Promise<void> {

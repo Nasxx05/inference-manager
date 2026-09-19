@@ -18,6 +18,7 @@
 import { chat } from "./chatClient";
 import { AiError, toAiError } from "./errors";
 import { aiAnalysisMaxTokens, aiModel, aiProviderConfigured, missingConfig } from "./env";
+import { extractJson } from "./json";
 import { heuristicAnalyze } from "./taskAnalyzer";
 import { AnalysisValidationError, validateAnalysis } from "@/lib/validation/schemas";
 import type { TaskAnalysis } from "@/types";
@@ -29,6 +30,8 @@ export interface AnalysisResult {
   model: string;
   requestId: string;
   durationMs: number;
+  providerDurationMs?: number;
+  attemptCount: number;
 }
 
 const SYSTEM_PROMPT = `You are the planning engine inside AgentFund, a budget-aware AI task planner.
@@ -58,27 +61,15 @@ Rules:
 - costWeight values across phases should sum to about 1.0.
 - Be conservative and realistic. Do not inflate or deflate estimates.`;
 
-/** Pulls a JSON object out of a response that may be fenced or prefixed. */
-export function extractJson(text: string): unknown {
-  const trimmed = text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    const start = trimmed.indexOf("{");
-    const end = trimmed.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(trimmed.slice(start, end + 1));
-      } catch {
-        return null;
-      }
-    }
-    return null;
-  }
-}
+/** Re-exported from ./json so every structured path parses identically. */
+export { extractJson } from "./json";
 
 /**
- * Analyzes a task with the configured model.
+ * Analyzes a task with the configured model. FALLBACK PATH only.
+ *
+ * The normal route is `./combined.ts`, which gets the analysis and the prompt
+ * in one request. This is used when the combined call cannot be used: either
+ * AGENTFUND_AI_COMBINED=0, or the combined response failed validation.
  *
  * Throws `AiError` on any failure. One retry happens inside `chat()` for
  * transient faults, and at most one further attempt here if the response
@@ -140,6 +131,8 @@ export async function analyzeTask(taskDescription: string): Promise<AnalysisResu
           model: result.model,
           requestId: result.requestId,
           durationMs: result.durationMs,
+          providerDurationMs: result.providerDurationMs,
+          attemptCount: result.attemptCount,
         };
       } catch (error) {
         if (error instanceof AnalysisValidationError) {
