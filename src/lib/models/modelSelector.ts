@@ -10,18 +10,17 @@ import type {
 /**
  * Pick the cheapest VIABLE model for this task, budget and preference.
  * Never the cheapest outright: capability must clear the task's threshold.
+ *
+ * `taskDescription` is the ORIGINAL request, threaded through rather than
+ * derived from `analysis.summary`, so pricing reflects the real workload.
  */
 export function selectModel(
   analysis: TaskAnalysis,
   budget: number,
   preference: OptimizationPreference,
+  taskDescription: string,
 ): ModelRecommendation {
   const threshold = VIABILITY_THRESHOLD[analysis.complexity] ?? 62;
-
-  // The task description drives the effort model, so it must reach the
-  // estimator: without it every model is priced off a generic baseline and the
-  // preference comparison stops being meaningful.
-  const taskDescription = analysis.summary ?? "";
 
   const candidates = MODELS.map((model) => {
     const capability = capabilityScoreFor(model, analysis.taskType);
@@ -142,9 +141,10 @@ export function buildComparison(
   analysis: TaskAnalysis,
   preference: OptimizationPreference,
   recommendation: ModelRecommendation | null,
+  taskDescription: string,
 ): ModelComparisonRow[] {
   const rows = MODELS.map((model) => {
-    const estimate = estimateCost(analysis, model, preference);
+    const estimate = estimateCost({ analysis, model, preference, taskDescription });
     return {
       modelId: model.id,
       displayName: model.displayName,

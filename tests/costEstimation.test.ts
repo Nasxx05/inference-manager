@@ -105,14 +105,14 @@ describe("cost estimation", () => {
 
   it("prefers cheaper strategies under minimize-cost", () => {
     const model = findModelOrThrow("claude-sonnet");
-    const cheap = estimateCost(analysis, model, "minimize-cost");
-    const quality = estimateCost(analysis, model, "maximum-quality");
+    const cheap = estimateCost({ analysis, model, preference: "minimize-cost", taskDescription: TASK });
+    const quality = estimateCost({ analysis, model, preference: "maximum-quality", taskDescription: TASK });
     expect(cheap.recommendedMaximum).toBeLessThan(quality.recommendedMaximum);
   });
 
   it("allocates phase costs that sum to the total range", () => {
     const model = findModelOrThrow("claude-sonnet");
-    const estimate = estimateCost(analysis, model, "balanced");
+    const estimate = estimateCost({ analysis, model, preference: "balanced", taskDescription: TASK });
     const phases = allocatePhaseCosts(analysis, estimate);
 
     expect(phases.length).toBe(analysis.phases.length);

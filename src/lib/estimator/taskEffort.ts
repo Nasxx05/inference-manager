@@ -97,6 +97,13 @@ function phaseEffortWeight(name: string, declared: number): number {
 export interface EffortInput {
   analysis: TaskAnalysis;
   taskDescription: string;
+  /**
+   * How the user's clarifying answers change the work, applied on top of the
+   * derived effort. A confirmed "authentication: yes, multi-user: yes" must
+   * measurably increase the estimate, not only colour the prompt.
+   */
+  answerMultiplier?: number;
+  addedRequirements?: number;
 }
 
 /**
@@ -106,7 +113,12 @@ export interface EffortInput {
  * which is large in one dimension (say, huge context but tiny implementation)
  * does not get priced as if it were large in all of them.
  */
-export function deriveTaskEffort({ analysis, taskDescription }: EffortInput): TaskEffort {
+export function deriveTaskEffort({
+  analysis,
+  taskDescription,
+  answerMultiplier = 1,
+  addedRequirements = 0,
+}: EffortInput): TaskEffort {
   const phases = analysis.phases ?? [];
   const complexity = analysis.complexity ?? "medium";
 
@@ -222,17 +234,25 @@ export function deriveTaskEffort({ analysis, taskDescription }: EffortInput): Ta
     effortScore: score,
   });
 
+  /**
+   * Apply the clarifying-answer signal. Confirmed components are real work, so
+   * the score, requirement count and implementation size all rise together.
+   */
+  const adjustedScore = Math.round(clamp(score * answerMultiplier, 0, 100));
+  const adjustedRequirements = clamp(requirementCount + addedRequirements, 1, 60);
+  const adjustedCritical = Math.max(1, Math.round(adjustedRequirements * 0.7));
+
   return {
-    level: effortLevelFromScore(score),
-    score,
-    requirementCount,
-    criticalRequirementCount,
-    optionalRequirementCount,
+    level: effortLevelFromScore(adjustedScore),
+    score: adjustedScore,
+    requirementCount: adjustedRequirements,
+    criticalRequirementCount: adjustedCritical,
+    optionalRequirementCount: Math.max(0, adjustedRequirements - adjustedCritical),
     estimatedIterations: iterations,
-    implementationSize: Math.round(implementationSize),
+    implementationSize: Math.round(clamp(implementationSize * answerMultiplier, 0, 100)),
     contextOverhead: Math.round(contextOverhead),
-    toolOverhead: Math.round(toolOverhead),
-    revisionLoad: Math.round(revisionLoad),
+    toolOverhead: Math.round(clamp(toolOverhead * answerMultiplier, 0, 100)),
+    revisionLoad: Math.round(clamp(revisionLoad * answerMultiplier, 0, 100)),
   };
 }
 
@@ -291,13 +311,16 @@ export function resolveTaskEffort(input: EffortInput): TaskEffort {
     Number.isFinite(iterations.min) &&
     Number.isFinite(iterations.max);
 
-  const score = clamp01to100(supplied.score, derived.score);
+  // The LLM scored the task before the user answered, so the confirmed scope
+  // is layered on top of its score rather than replacing it.
+  const score = clamp01to100(supplied.score * (input.answerMultiplier ?? 1), derived.score);
 
   return {
     level: effortLevelFromScore(score),
     score,
     requirementCount: clamp(
-      Math.round(Number(supplied.requirementCount) || derived.requirementCount),
+      Math.round(Number(supplied.requirementCount) || derived.requirementCount) +
+        (input.addedRequirements ?? 0),
       1,
       60,
     ),
@@ -317,9 +340,18 @@ export function resolveTaskEffort(input: EffortInput): TaskEffort {
           max: clamp(Math.round(iterations.max), 2, 30),
         }
       : derived.estimatedIterations,
-    implementationSize: clamp01to100(supplied.implementationSize, derived.implementationSize),
+    implementationSize: clamp01to100(
+      supplied.implementationSize * (input.answerMultiplier ?? 1),
+      derived.implementationSize,
+    ),
     contextOverhead: clamp01to100(supplied.contextOverhead, derived.contextOverhead),
-    toolOverhead: clamp01to100(supplied.toolOverhead, derived.toolOverhead),
-    revisionLoad: clamp01to100(supplied.revisionLoad, derived.revisionLoad),
+    toolOverhead: clamp01to100(
+      supplied.toolOverhead * (input.answerMultiplier ?? 1),
+      derived.toolOverhead,
+    ),
+    revisionLoad: clamp01to100(
+      supplied.revisionLoad * (input.answerMultiplier ?? 1),
+      derived.revisionLoad,
+    ),
   };
 }

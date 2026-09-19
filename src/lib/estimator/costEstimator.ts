@@ -58,6 +58,8 @@ export function getEstimatorConfig(preference: OptimizationPreference): Estimato
 
 function round(value: number, decimals = 2): number {
   const f = 10 ** decimals;
+  // Guard against NaN propagating into the returned estimate.
+  if (!Number.isFinite(value)) return 0;
   return Math.round(value * f) / f;
 }
 
@@ -98,21 +100,38 @@ export interface EstimateInput {
   model: ModelConfig;
   preference: OptimizationPreference;
   taskDescription: string;
+  /**
+   * Clarifying-answer signal. Answers describe confirmed components, so they
+   * must move the estimate — otherwise asking them would be pointless.
+   */
+  answerMultiplier?: number;
+  addedRequirements?: number;
   configOverride?: Partial<EstimatorConfig>;
 }
 
+/**
+ * `taskDescription` must be the ORIGINAL user request, never the LLM summary.
+ *
+ * The estimator counts requirements and gauges scope from the user's own words.
+ * A one-sentence summary discards exactly the detail that separates a small
+ * task from a large one, so passing it here would silently undo the workload
+ * model. It is required, not optional, so a missing task is a type error rather
+ * than a quietly wrong estimate.
+ */
 export function estimateCost(input: EstimateInput): CostEstimate;
-/** Backwards-compatible overload used across the codebase. */
+/** Convenience overload for callers that already hold a task string. */
 export function estimateCost(
   analysis: TaskAnalysis,
   model: ModelConfig,
   preference: OptimizationPreference,
+  taskDescription: string,
   configOverride?: Partial<EstimatorConfig>,
 ): CostEstimate;
 export function estimateCost(
   analysisOrInput: TaskAnalysis | EstimateInput,
   modelArg?: ModelConfig,
   preferenceArg?: OptimizationPreference,
+  taskDescriptionArg?: string | Partial<EstimatorConfig>,
   configOverride?: Partial<EstimatorConfig>,
 ): CostEstimate {
   const input: EstimateInput =
@@ -122,27 +141,50 @@ export function estimateCost(
           analysis: analysisOrInput as TaskAnalysis,
           model: modelArg as ModelConfig,
           preference: preferenceArg as OptimizationPreference,
-          taskDescription: (analysisOrInput as TaskAnalysis).summary ?? "",
-          configOverride,
+          taskDescription: typeof taskDescriptionArg === "string" ? taskDescriptionArg : "",
+          configOverride:
+            configOverride ??
+            (typeof taskDescriptionArg === "object" ? taskDescriptionArg : undefined),
         };
 
   const { analysis, model, preference, taskDescription } = input;
   const config: EstimatorConfig = { ...getEstimatorConfig(preference), ...(input.configOverride ?? {}) };
 
-  const effort = resolveTaskEffort({ analysis, taskDescription });
+  const effort = resolveTaskEffort({
+    analysis,
+    taskDescription,
+    answerMultiplier: input.answerMultiplier,
+    addedRequirements: input.addedRequirements,
+  });
 
   // Per-phase tokens, summed so the phase breakdown and the total agree.
   const phaseTokens = estimatePhaseTokens(analysis, effort);
+
+  /**
+   * Sanitise the token totals.
+   *
+   * A malformed or hostile analysis can carry NaN or Infinity here, and a single
+   * NaN silently poisons every downstream figure — the range, the minimum
+   * viable, the reserve — producing a result that looks plausible but is
+   * meaningless. Guarding once at the boundary keeps the rest of the arithmetic
+   * honest without sprinkling checks through it.
+   */
+  const safe = (value: number, fallback: number) =>
+    Number.isFinite(value) && value > 0 ? value : fallback;
+
   const totals =
     Object.keys(phaseTokens).length > 0
       ? sumPhaseTokens(phaseTokens)
       : {
-          input: Math.max(200, analysis.estimatedInputTokens),
-          output: Math.max(100, analysis.estimatedOutputTokens),
+          input: safe(analysis.estimatedInputTokens, 4_000),
+          output: safe(analysis.estimatedOutputTokens, 1_500),
         };
 
-  const inputCost = (totals.input / 1_000_000) * model.inputPrice;
-  const outputCost = (totals.output / 1_000_000) * model.outputPrice;
+  const totalsInput = safe(totals.input, 4_000);
+  const totalsOutput = safe(totals.output, 1_500);
+
+  const inputCost = (totalsInput / 1_000_000) * model.inputPrice;
+  const outputCost = (totalsOutput / 1_000_000) * model.outputPrice;
   const baseExecutionCost = inputCost + outputCost;
 
   // Iteration: each extra pass re-supplies context and rewrites part of the
@@ -150,7 +192,7 @@ export function estimateCost(
   const iteration = buildIterationModel(effort, preference);
   let iterationCost = 0;
   for (let pass = 1; pass < iteration.passes; pass += 1) {
-    const t = iterationTokens(totals, pass);
+    const t = iterationTokens({ input: totalsInput, output: totalsOutput }, pass);
     iterationCost += (t.input / 1_000_000) * model.inputPrice + (t.output / 1_000_000) * model.outputPrice;
   }
 
@@ -170,9 +212,10 @@ export function estimateCost(
   // Wide range when confidence is low: say less, but say it honestly.
   const spread = config.rangeSpread * (confidence === "low" ? 1.4 : confidence === "high" ? 0.85 : 1);
 
-  const minimum = Math.max(0.05, center * (1 - spread));
-  const maximum = center * (1 + spread);
-  const recommendedMaximum = center * (1 + config.safetyFactor);
+  const baseline = center > 0 && Number.isFinite(center) ? center : 0.1;
+  const minimum = Math.max(0.05, baseline * (1 - spread));
+  const maximum = baseline * (1 + spread);
+  const recommendedMaximum = baseline * (1 + config.safetyFactor);
 
   /**
    * Minimum viable budget: the floor for the core scope to have a realistic
@@ -180,6 +223,7 @@ export function estimateCost(
    * which completion becomes unreliable, and it is an estimate, not a promise.
    */
   const minimumViable = Math.max(0.05, minimum * config.minimumViableFactor);
+
 
   return {
     inputCost: round(inputCost, 3),
@@ -200,6 +244,7 @@ export function estimateCost(
     effort,
   };
 }
+
 
 /**
  * Distributes the total across phases so the UI can show where cost goes.
@@ -234,6 +279,8 @@ export function allocatePhaseCosts(
 }
 
 export function formatCredit(value: number): string {
+  // Never render "NaN CREDIT": a planning figure that cannot be trusted should
+  // read as zero rather than as a broken number.
   if (!Number.isFinite(value)) return "0";
   if (value >= 100) return String(Math.round(value));
   if (value >= 10) return String(Math.round(value * 10) / 10);

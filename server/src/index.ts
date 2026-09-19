@@ -96,6 +96,106 @@ app.use(
 app.use(express.json({ limit: "1mb" }));
 
 /* -------------------------------------------------------------------------- */
+/* Abuse protection                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Why this exists: the internal model is paid for by the builder's provider
+ * key. Every request here costs real money, so an open endpoint is not just a
+ * performance concern — it is a direct drain on that balance. These limits
+ * bound what any single client can spend.
+ */
+
+const RATE_LIMIT_WINDOW_MS = 60_000;
+/** Planning requests allowed per IP per window. */
+const RATE_LIMIT_PLAN = Number(process.env.RATE_LIMIT_PLAN_PER_MINUTE ?? 8);
+/** Planning requests allowed per IP per hour — the real cost ceiling. */
+const RATE_LIMIT_PLAN_HOUR = Number(process.env.RATE_LIMIT_PLAN_PER_HOUR ?? 40);
+/** Clarify is local and cheap, so it gets a much looser budget. */
+const RATE_LIMIT_CLARIFY = Number(process.env.RATE_LIMIT_CLARIFY_PER_MINUTE ?? 60);
+
+/**
+ * Hard ceiling on simultaneous planning requests.
+ *
+ * Each one holds an upstream LLM call open, so unbounded concurrency turns a
+ * small burst into a large bill and can exhaust the provider's own limits.
+ */
+const MAX_CONCURRENT_PLANS = Number(process.env.MAX_CONCURRENT_PLANS ?? 6);
+let inFlightPlans = 0;
+
+interface Bucket {
+  count: number;
+  resetAt: number;
+}
+
+const buckets = new Map<string, Bucket>();
+
+/** Client IP, honouring the proxy Render and Vercel sit behind. */
+function clientIp(request: express.Request): string {
+  const forwarded = request.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0]!.trim();
+  }
+  return request.ip ?? "unknown";
+}
+
+/**
+ * Fixed-window counter. Cheap and bounded: entries are pruned on access, and a
+ * global sweep keeps the map from growing without limit.
+ */
+function consume(key: string, limit: number, windowMs: number): { ok: boolean; retryAfter: number } {
+  if (!Number.isFinite(limit) || limit <= 0) return { ok: true, retryAfter: 0 };
+  const now = Date.now();
+  const bucket = buckets.get(key);
+
+  if (!bucket || bucket.resetAt <= now) {
+    buckets.set(key, { count: 1, resetAt: now + windowMs });
+    return { ok: true, retryAfter: 0 };
+  }
+
+  if (bucket.count >= limit) {
+    return { ok: false, retryAfter: Math.ceil((bucket.resetAt - now) / 1000) };
+  }
+
+  bucket.count += 1;
+  return { ok: true, retryAfter: 0 };
+}
+
+// Prevent unbounded growth from one-off IPs.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of buckets) {
+    if (bucket.resetAt <= now) buckets.delete(key);
+  }
+}, RATE_LIMIT_WINDOW_MS).unref();
+
+/** Rate-limit middleware factory. */
+function rateLimit(limit: number, windowMs: number, label: string) {
+  return (request: express.Request, response: express.Response, next: express.NextFunction) => {
+    const ip = clientIp(request);
+    const result = consume(`${label}:${ip}`, limit, windowMs);
+    if (result.ok) return next();
+
+    response.setHeader("Retry-After", String(result.retryAfter));
+    console.warn(
+      `[rate-limit] ts=${new Date().toISOString()} ip=${ip} rule=${label} ` +
+        `retryAfterSec=${result.retryAfter}`,
+    );
+    return response.status(429).json({
+      success: false,
+      error: {
+        code: "RATE_LIMITED",
+        message: "Too many requests. Please wait a moment and try again.",
+      },
+    });
+  };
+}
+
+const planMinuteLimit = rateLimit(RATE_LIMIT_PLAN, RATE_LIMIT_WINDOW_MS, "plan:min");
+const planHourLimit = rateLimit(RATE_LIMIT_PLAN_HOUR, 3_600_000, "plan:hour");
+const clarifyLimit = rateLimit(RATE_LIMIT_CLARIFY, RATE_LIMIT_WINDOW_MS, "clarify");
+
+/* -------------------------------------------------------------------------- */
 /* Timing                                                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -307,7 +407,7 @@ function validatePlanInput(payload: Record<string, unknown>):
  * a task type good enough to pick a relevant question set; the full AI analysis
  * happens once in /api/plan, after the user answers or skips.
  */
-app.post("/api/clarify", async (request, response) => {
+app.post("/api/clarify", clarifyLimit, async (request, response) => {
   const started = Date.now();
   const requestId = newRequestId();
   const payload = (request.body ?? {}) as Record<string, unknown>;
@@ -355,7 +455,7 @@ app.post("/api/clarify", async (request, response) => {
  * prompt together, with an automatic two-call fallback. Everything after the
  * call is local.
  */
-app.post("/api/plan", async (request, response) => {
+app.post("/api/plan", planMinuteLimit, planHourLimit, async (request, response) => {
   const totalStarted = Date.now();
   const requestId = newRequestId();
   const payload = (request.body ?? {}) as Record<string, unknown>;
@@ -369,6 +469,24 @@ app.post("/api/plan", async (request, response) => {
     });
   }
 
+  // Concurrency ceiling. Each planning request holds a paid upstream call open,
+  // so this is the last line of defence against a burst draining the balance.
+  if (inFlightPlans >= MAX_CONCURRENT_PLANS) {
+    console.warn(
+      `[concurrency] ts=${new Date().toISOString()} requestId=${requestId} ` +
+        `inFlight=${inFlightPlans} limit=${MAX_CONCURRENT_PLANS}`,
+    );
+    return response.status(503).json({
+      success: false,
+      error: {
+        code: "RATE_LIMITED",
+        message: "Promgent is busy. Please wait a moment and try again.",
+        requestId,
+      },
+    });
+  }
+
+  inFlightPlans += 1;
   try {
     const built = await buildPlanWithMetrics({
       taskDescription: input.taskDescription,
@@ -440,6 +558,9 @@ app.post("/api/plan", async (request, response) => {
       `[api] requestId=${ai.requestId} code=${ai.code} status=${ai.status ?? "-"} message=${ai.message}`,
     );
     return response.status(status).json({ ...body, error: { ...body.error, requestId } });
+  } finally {
+    // Always release, or one failure would permanently consume a slot.
+    inFlightPlans -= 1;
   }
 });
 
@@ -480,6 +601,10 @@ app.listen(PORT, () => {
       `AI_MAX_TOKENS is set but ignored. Use ${ENV.MAX_TOKENS} for the combined call, or ${ENV.ANALYSIS_MAX_TOKENS}/${ENV.PROMPT_MAX_TOKENS} for the fallback.`,
     );
   }
+  console.log(
+    `Abuse limits: plan=${RATE_LIMIT_PLAN}/min ${RATE_LIMIT_PLAN_HOUR}/hour ` +
+      `clarify=${RATE_LIMIT_CLARIFY}/min concurrent=${MAX_CONCURRENT_PLANS}`,
+  );
   if (isProduction && !allowList) {
     console.warn(
       "ALLOWED_ORIGINS is not set: this API accepts requests from any origin. Set it to your Vercel URL.",

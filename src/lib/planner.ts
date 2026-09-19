@@ -29,7 +29,7 @@ import { generatePlan } from "@/lib/ai/combined";
 import { aiCombinedEnabled } from "@/lib/ai/env";
 import { analyzeTask } from "@/lib/ai/provider";
 import { generatePrompt } from "@/lib/ai/promptGenerator";
-import { resolveAnswers, answersUsed } from "@/lib/clarifier";
+import { answerScopeSignal, resolveAnswers, answersUsed } from "@/lib/clarifier";
 import { allocatePhaseCosts, estimateCost, formatRange } from "@/lib/estimator/costEstimator";
 import { evaluateFeasibility, planReserve } from "@/lib/estimator/feasibilityEngine";
 import { resolveTaskEffort } from "@/lib/estimator/taskEffort";
@@ -153,6 +153,15 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
   );
   const usedAnswers = answersUsed(clarifyingAnswers);
 
+  /**
+   * How the answers change the workload.
+   *
+   * Answers are not just prompt colour: confirming authentication, multi-user
+   * support or production deployment adds real components, so the estimate must
+   * rise. Computed once and passed to every cost call in this pipeline.
+   */
+  const answerSignal = answerScopeSignal(clarifyingAnswers);
+
   const autoSelected = modelId === AUTO_MODEL_ID;
 
   /**
@@ -178,7 +187,12 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     let resolvedModelId = modelId;
 
     if (autoSelected) {
-      const effort = resolveTaskEffort({ analysis, taskDescription });
+      const effort = resolveTaskEffort({
+        analysis,
+        taskDescription,
+        answerMultiplier: answerSignal.effortMultiplier,
+        addedRequirements: answerSignal.addedRequirements,
+      });
       const profile =
         analysis.requirementProfile ??
         deriveRequirementProfile({
@@ -197,7 +211,7 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
           reasons: ["Cheapest model that meets this task's capability requirements."],
         };
       } else {
-        const fallback = selectModel(analysis, budget, optimization);
+        const fallback = selectModel(analysis, budget, optimization, taskDescription);
         if (fallback) {
           resolvedModelId = String(fallback.modelId);
           recommendation = fallback;
@@ -272,6 +286,8 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
       model,
       preference: optimization,
       taskDescription,
+      answerMultiplier: answerSignal.effortMultiplier,
+      addedRequirements: answerSignal.addedRequirements,
     });
     const generated = await generatePrompt({
       taskDescription,
@@ -313,18 +329,63 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
   let scopeApplied = false;
 
   if (needsOptimization) {
-    const candidate = optimizeScope(rawAnalysis, budget);
+    /**
+     * Iterative optimization: propose, re-estimate, repeat.
+     *
+     * Removing a fixed fraction of optional work does not reliably land inside
+     * the budget — it can leave the task far over, or cut far more than needed.
+     * Each pass re-estimates and stops as soon as the budget is actually met,
+     * so the returned scope is one that has been verified to fit.
+     */
+    let candidate = optimizeScope(rawAnalysis, budget);
+    let current = estimateCost({
+      analysis: applyScopeReduction(rawAnalysis, candidate, taskDescription),
+      model,
+      preference: optimization,
+      taskDescription,
+      answerMultiplier: answerSignal.effortMultiplier,
+      addedRequirements: answerSignal.addedRequirements,
+    });
+
+    for (let pass = 0; pass < 4 && current.recommendedMaximum > budget; pass += 1) {
+      const next = optimizeScope(
+        applyScopeReduction(rawAnalysis, candidate, taskDescription),
+        budget,
+      );
+      // Stop when nothing further can be deferred: claiming another pass would
+      // produce a "reduced" scope that costs the same.
+      if (next.deferred.length <= candidate.deferred.length) break;
+      candidate = {
+        ...next,
+        deferred: [...next.deferred, ...candidate.deferred.filter((d) => !next.deferred.includes(d))],
+      };
+      current = estimateCost({
+        analysis: applyScopeReduction(rawAnalysis, candidate, taskDescription),
+        model,
+        preference: optimization,
+        taskDescription,
+        answerMultiplier: answerSignal.effortMultiplier,
+      });
+    }
+
     optimizedScope = candidate;
     if (applyOptimizedScope) {
-      analysis = applyScopeReduction(rawAnalysis, candidate);
+      analysis = applyScopeReduction(rawAnalysis, candidate, taskDescription);
       scopeApplied = true;
     }
   }
 
-  const cost = estimateCost({ analysis, model, preference: optimization, taskDescription });
+  const cost = estimateCost({
+    analysis,
+    model,
+    preference: optimization,
+    taskDescription,
+    answerMultiplier: answerSignal.effortMultiplier,
+    addedRequirements: answerSignal.addedRequirements,
+  });
   const optimizedEstimate = optimizedScope
     ? estimateCost({
-        analysis: applyScopeReduction(rawAnalysis, optimizedScope),
+        analysis: applyScopeReduction(rawAnalysis, optimizedScope, taskDescription),
         model,
         preference: optimization,
         taskDescription,
@@ -378,6 +439,7 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
         model: suggested,
         preference: optimization,
         taskDescription,
+        answerMultiplier: answerSignal.effortMultiplier,
       });
       suitability.suggestedDelta = Math.round((suggestedCost.maximum - cost.maximum) * 100) / 100;
     } catch {
@@ -412,6 +474,8 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
         estimated: cost.maximum,
         reasons: [],
       },
+      // The ORIGINAL request, not the summary: pricing must reflect the real scope.
+      taskDescription,
     ),
     executionPlan: executionPlanFor(analysisWithCosts, optimization),
     clarifyingAnswers,

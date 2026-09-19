@@ -4,9 +4,10 @@ import { estimateCost } from "@/lib/estimator/costEstimator";
 import { findModelOrThrow } from "@/data/models";
 import { applyScopeReduction, optimizeScope } from "@/lib/scopeOptimizer/scopeOptimizer";
 
-const bigTask = heuristicAnalyze(
-  "Build a complete ecommerce platform with authentication, real payment processing, admin dashboard, order management and analytics.",
-);
+const BIG_TASK =
+  "Build a complete ecommerce platform with authentication, real payment processing, admin dashboard, order management and analytics.";
+
+const bigTask = heuristicAnalyze(BIG_TASK);
 
 describe("scope optimizer", () => {
   it("produces included, deferred and simplified lists for a large task with a small budget", () => {
@@ -26,11 +27,67 @@ describe("scope optimizer", () => {
 
   it("reduces the estimated cost when the optimized scope is applied", () => {
     const model = findModelOrThrow("claude-sonnet");
-    const before = estimateCost(bigTask, model, "balanced");
+    const before = estimateCost({
+      analysis: bigTask,
+      model,
+      preference: "balanced",
+      taskDescription: BIG_TASK,
+    });
     const scope = optimizeScope(bigTask, 5);
-    const after = estimateCost(applyScopeReduction(bigTask, scope), model, "balanced");
+    const after = estimateCost({
+      analysis: applyScopeReduction(bigTask, scope, BIG_TASK),
+      model,
+      preference: "balanced",
+      taskDescription: BIG_TASK,
+    });
 
     expect(after.maximum).toBeLessThan(before.maximum);
+    // The reduction must be real, not rounding.
+    expect(after.maximum).toBeLessThan(before.maximum * 0.95);
+  });
+
+  /**
+   * The optimizer must work toward the budget, not just cut a fixed fraction.
+   *
+   * Repeated passes each re-estimate and defer more only while it helps, so a
+   * scope is returned only when it has actually been verified to fit.
+   */
+  it("iteratively converges toward the target budget when reduction can help", () => {
+    const model = findModelOrThrow("claude-sonnet");
+    const budget = 200;
+
+    let scope = optimizeScope(bigTask, budget);
+    let estimate = estimateCost({
+      analysis: applyScopeReduction(bigTask, scope, BIG_TASK),
+      model,
+      preference: "balanced",
+      taskDescription: BIG_TASK,
+    });
+    const start = estimate.maximum;
+
+    for (let pass = 0; pass < 4 && estimate.recommendedMaximum > budget; pass += 1) {
+      const next = optimizeScope(
+        applyScopeReduction(bigTask, scope, BIG_TASK),
+        budget,
+      );
+      if (next.deferred.length <= scope.deferred.length) break;
+      scope = {
+        ...next,
+        deferred: [...next.deferred, ...scope.deferred.filter((d) => !next.deferred.includes(d))],
+      };
+      estimate = estimateCost({
+        analysis: applyScopeReduction(bigTask, scope, BIG_TASK),
+        model,
+        preference: "balanced",
+        taskDescription: BIG_TASK,
+      });
+    }
+
+    // Either it now fits, or it genuinely cannot be reduced further.
+    const exhausted = scope.deferred.length >= bigTask.phases.length;
+    expect(estimate.recommendedMaximum <= budget || exhausted).toBe(true);
+    // Never INCREASE the estimate while trying to reduce it.
+    expect(estimate.maximum).toBeLessThanOrEqual(start);
   });
 
   it("keeps essential phases in the included scope", () => {

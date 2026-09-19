@@ -72,7 +72,19 @@ function dedupe(values: string[]): string[] {
   return out;
 }
 
-export function applyScopeReduction(analysis: TaskAnalysis, scope: OptimizedScope): TaskAnalysis {
+/**
+ * Applies a scope reduction.
+ *
+ * `taskDescription` is the ORIGINAL request, passed in by the caller. It must
+ * not be reconstructed from `analysis.summary`: the summary is a one-sentence
+ * compression, and the effort model needs the user's full wording to gauge what
+ * remains after deferrals.
+ */
+export function applyScopeReduction(
+  analysis: TaskAnalysis,
+  scope: OptimizedScope,
+  taskDescription: string,
+): TaskAnalysis {
   const deferredNames = new Set(scope.deferred.map((d) => d.split("-")[0].trim().toLowerCase()));
   const keptPhases = (analysis.phases ?? []).filter(
     (p) => !deferredNames.has(p.name.trim().toLowerCase()),
@@ -102,7 +114,7 @@ export function applyScopeReduction(analysis: TaskAnalysis, scope: OptimizedScop
    * "reduced" scope costing exactly the same as the original.
    */
   const baseEffort =
-    analysis.effort ?? resolveTaskEffort({ analysis, taskDescription: analysis.summary ?? "" });
+    analysis.effort ?? resolveTaskEffort({ analysis, taskDescription });
 
   const shrink = (value: number, factor: number) => Math.max(0, Math.round(value * factor));
 

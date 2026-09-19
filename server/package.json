@@ -1,8 +1,8 @@
 {
-  "name": "agentfund-backend",
+  "name": "promgent-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "AgentFund backend: task analysis and prompt generation. Holds the LLM credentials and does the slow work.",
+  "description": "Promgent backend: task analysis and prompt generation. Holds the LLM credentials and does the slow work.",
   "main": "dist/server/src/index.js",
   "type": "module",
   "scripts": {
