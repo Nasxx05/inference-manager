@@ -1,4 +1,5 @@
 import { heuristicAnalyze } from "./taskAnalyzer";
+import { aiApiKey, aiBaseUrl, aiModel, aiProviderConfigured } from "./env";
 import { AnalysisValidationError, validateAnalysis } from "@/lib/validation/schemas";
 import type { TaskAnalysis } from "@/types";
 
@@ -37,7 +38,7 @@ Rules:
 - Be conservative and realistic. Do not inflate or deflate estimates.`;
 
 function providerConfigured(): boolean {
-  return Boolean(process.env.AI_API_KEY && process.env.AI_BASE_URL);
+  return aiProviderConfigured();
 }
 
 function extractJson(text: string): unknown {
@@ -59,14 +60,16 @@ function extractJson(text: string): unknown {
 }
 
 async function callProvider(taskDescription: string): Promise<unknown> {
-  const baseUrl = String(process.env.AI_BASE_URL).replace(/\/$/, "");
-  const model = process.env.AI_MODEL || "gpt-4o-mini";
+  const baseUrl = aiBaseUrl();
+  const model = aiModel();
+  const apiKey = aiApiKey();
+  if (!apiKey) throw new Error("No AI API key is configured");
 
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.AI_API_KEY}`,
+      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
       model,

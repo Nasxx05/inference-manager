@@ -5,6 +5,7 @@ import type {
   OptimizationPreference,
   TaskAnalysis,
 } from "@/types";
+import { aiApiKey, aiBaseUrl, aiModel, aiNumber, aiProviderConfigured } from "./env";
 
 /**
  * AgentFund's INTERNAL prompt-writing model. It takes everything collected
@@ -97,7 +98,7 @@ export class PromptGenerationError extends Error {
 }
 
 export function promptProviderConfigured(): boolean {
-  return Boolean(process.env.AI_API_KEY && process.env.AI_BASE_URL);
+  return aiProviderConfigured();
 }
 
 /**
@@ -111,7 +112,7 @@ export function promptProviderConfigured(): boolean {
  * `content` comes back null, so the default leaves a wide margin.
  */
 function maxTokens(): number {
-  return Number(process.env.AI_MAX_TOKENS ?? 48000);
+  return aiNumber("AI_MAX_TOKENS", 48000);
 }
 
 /**
@@ -120,7 +121,7 @@ function maxTokens(): number {
  * the caller, not by retrying forever.
  */
 function timeoutMs(): number {
-  return Number(process.env.AI_TIMEOUT_MS ?? 240000);
+  return aiNumber("AI_TIMEOUT_MS", 240000);
 }
 
 function modelNotes(model: ModelConfig): string {
@@ -231,8 +232,16 @@ function trimToStart(prompt: string): string {
 }
 
 async function attempt(input: PromptDraftInput): Promise<string> {
-  const baseUrl = String(process.env.AI_BASE_URL).replace(/\/$/, "");
-  const model = process.env.AI_MODEL || "gpt-4o-mini";
+  const baseUrl = aiBaseUrl();
+  const model = aiModel();
+  const apiKey = aiApiKey();
+
+  // Preflight: a blank or whitespace-only key would otherwise be sent as
+  // "Bearer " and come back as a 401, which reads like a bad key when the real
+  // problem is that the key was never set (or was set to empty on the host).
+  if (!apiKey) {
+    throw new PromptGenerationError("No prompt-model API key is configured", false, 401);
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs());
@@ -242,7 +251,7 @@ async function attempt(input: PromptDraftInput): Promise<string> {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.AI_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
         model,
