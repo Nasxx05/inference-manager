@@ -48,6 +48,12 @@ npm run dev
 
 Open http://localhost:3000.
 
+Locally the backend reads `AI_*` from the root `.env.local` on startup (a plain
+Node process does not do this by itself). Values already present in the real
+environment are never overwritten, so the same code is driven by the Render
+dashboard in production and by `.env.local` on your machine. The startup log
+prints `Env files loaded: ...` (or `none`) so you can see which one is in play.
+
 ```bash
 npm test           # 109 tests
 npm run build
@@ -91,7 +97,10 @@ slow request and no platform timeout applies.
 
 Check it with `/health` once deployed — it reports whether the provider is
 configured, without contacting the provider itself, so a provider outage never
-makes Render think the instance is unhealthy.
+makes Render think the instance is unhealthy. `providerConfigured:false` with
+`apiKeyPresent:false` means the variable did not reach the process: check for a
+typo in the name, a value that is empty or has a trailing newline, and that you
+saved the change and let the service redeploy.
 
 ### Frontend on Vercel
 

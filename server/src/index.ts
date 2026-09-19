@@ -11,6 +11,7 @@
 
 import cors from "cors";
 import express from "express";
+import { loadLocalEnv } from "./loadEnv";
 import { selectQuestions } from "@/lib/clarifier";
 import { analyzeTask } from "@/lib/ai/provider";
 import { PromptGenerationError } from "@/lib/ai/promptGenerator";
@@ -18,6 +19,11 @@ import { aiApiKey, aiBaseUrl, aiModel, aiProviderConfigured } from "@/lib/ai/env
 import { buildPlan } from "@/lib/planner";
 import { parseBudget, parseOptimization } from "@/lib/validation/schemas";
 import type { ClarifyingQuestion, OptimizationPreference, TaskType } from "@/types";
+
+// Must run before any env value is read below, and before PORT or the CORS
+// allow-list are captured. On the host this is a no-op: the variables already
+// exist, and the loader never overwrites them.
+const envFilesLoaded = loadLocalEnv();
 
 const app = express();
 
@@ -245,4 +251,11 @@ app.listen(PORT, () => {
   console.log(`Provider configured: ${aiProviderConfigured() ? "yes" : "no"}`);
   console.log(`API key present: ${aiApiKey() ? "yes" : "no"}`);
   console.log(`Model: ${aiModel()}`);
+  // Says where configuration came from. Empty on the host, where the variables
+  // are already set, which makes it clear a local file is not in play.
+  console.log(
+    envFilesLoaded.length
+      ? `Env files loaded: ${envFilesLoaded.join(", ")}`
+      : "Env files loaded: none (using host environment)",
+  );
 });
