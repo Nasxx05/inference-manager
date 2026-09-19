@@ -1,4 +1,14 @@
-import type { Complexity, TaskAnalysis, TaskPhase, TaskType } from "@/types";
+import type {
+  Complexity,
+  Confidence,
+  EffortLevel,
+  PhaseTokens,
+  TaskAnalysis,
+  TaskEffort,
+  TaskPhase,
+  TaskRequirementProfile,
+  TaskType,
+} from "@/types";
 
 export const TASK_TYPES: TaskType[] = [
   "coding",
@@ -13,6 +23,10 @@ export const TASK_TYPES: TaskType[] = [
 ];
 
 export const COMPLEXITIES: Complexity[] = ["low", "medium", "high", "very-high"];
+
+export const EFFORT_LEVELS: EffortLevel[] = ["low", "medium", "high", "very-high", "extreme"];
+
+export const CONFIDENCES: Confidence[] = ["low", "medium", "high"];
 
 const PRIORITIES: TaskPhase["priority"][] = ["essential", "recommended", "optional"];
 
@@ -40,6 +54,105 @@ function asNumber(value: unknown, fallback: number): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * Normalises the effort block.
+ *
+ * Returns undefined when the model supplied nothing usable, so the estimator
+ * falls back to its own derivation. Never invents an effort score from a label:
+ * a wrong-but-precise-looking score would poison the cost estimate, whereas
+ * undefined simply means "derive it".
+ */
+function normalizeEffort(raw: unknown): TaskEffort | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as Record<string, unknown>;
+
+  const score = Number(value.effortScore ?? value.score);
+  const levelRaw = asString(value.effortLevel ?? value.level).toLowerCase() as EffortLevel;
+  const level = EFFORT_LEVELS.includes(levelRaw) ? levelRaw : undefined;
+
+  // Without a numeric score there is nothing trustworthy to use.
+  if (!Number.isFinite(score) && !level) return undefined;
+
+  const iterationsRaw = value.estimatedIterations;
+  let iterations: TaskEffort["estimatedIterations"] | undefined;
+  if (iterationsRaw && typeof iterationsRaw === "object") {
+    const it = iterationsRaw as Record<string, unknown>;
+    const min = Number(it.min);
+    const max = Number(it.max);
+    if (Number.isFinite(min) && Number.isFinite(max)) {
+      iterations = {
+        min: Math.round(clamp(min, 1, 20)),
+        max: Math.round(clamp(max, 2, 30)),
+      };
+    }
+  }
+
+  const numeric = (n: unknown, fallback: number) => {
+    const parsed = Number(n);
+    return Number.isFinite(parsed) ? clamp(Math.round(parsed), 0, 100) : fallback;
+  };
+
+  return {
+    // A supplied level is a label; when only the score is present, derive it.
+    level: level ?? "medium",
+    score: Number.isFinite(score) ? clamp(Math.round(score), 0, 100) : 50,
+    requirementCount: Math.max(1, Math.round(Number(value.requirementCount) || 1)),
+    criticalRequirementCount: Math.max(0, Math.round(Number(value.criticalRequirementCount) || 0)),
+    optionalRequirementCount: Math.max(0, Math.round(Number(value.optionalRequirementCount) || 0)),
+    estimatedIterations: iterations ?? { min: 2, max: 4 },
+    implementationSize: numeric(value.implementationSize, 50),
+    contextOverhead: numeric(value.contextOverhead, 40),
+    toolOverhead: numeric(value.toolOverhead, 30),
+    revisionLoad: numeric(value.revisionLoad, 45),
+  };
+}
+
+/** Normalises the task requirement profile, or undefined if unusable. */
+function normalizeRequirementProfile(raw: unknown): TaskRequirementProfile | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as Record<string, unknown>;
+  const num = (n: unknown) => {
+    const parsed = Number(n);
+    return Number.isFinite(parsed) ? clamp(Math.round(parsed), 0, 100) : undefined;
+  };
+
+  const coding = num(value.codingRequirement);
+  const reasoning = num(value.reasoningRequirement);
+  // Need at least the two primary dimensions to be worth using.
+  if (coding === undefined && reasoning === undefined) return undefined;
+
+  return {
+    codingRequirement: coding ?? reasoning ?? 50,
+    reasoningRequirement: reasoning ?? coding ?? 50,
+    researchRequirement: num(value.researchRequirement) ?? 40,
+    contextRequirement: num(value.contextRequirement) ?? 50,
+    structuredOutputRequirement: num(value.structuredOutputRequirement) ?? 50,
+  };
+}
+
+/** Per-phase token estimates, keyed by phase name. */
+function normalizePhaseTokens(raw: unknown): Record<string, PhaseTokens> | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as Record<string, unknown>;
+  const out: Record<string, PhaseTokens> = {};
+  let count = 0;
+
+  for (const [name, entry] of Object.entries(value)) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    const input = Number(e.input ?? e.inputTokens);
+    const output = Number(e.output ?? e.outputTokens);
+    if (!Number.isFinite(input) && !Number.isFinite(output)) continue;
+    out[name] = {
+      input: Math.max(200, Math.round(Number.isFinite(input) ? input : 1000)),
+      output: Math.max(100, Math.round(Number.isFinite(output) ? output : 500)),
+    };
+    count += 1;
+  }
+
+  return count > 0 ? out : undefined;
 }
 
 /**
@@ -92,6 +205,19 @@ export function validateAnalysis(raw: unknown, baseline: TaskAnalysis): TaskAnal
     scopeAdjustments: asStringArray(value.scopeAdjustments).length
       ? asStringArray(value.scopeAdjustments)
       : baseline.scopeAdjustments,
+    // Workload signals. Left undefined when absent so the estimator derives
+    // them rather than trusting a placeholder.
+    effort: normalizeEffort(value.effort ?? value.taskEffort),
+    requirementProfile: normalizeRequirementProfile(
+      value.requirementProfile ?? value.taskRequirementProfile,
+    ),
+    phaseTokens: normalizePhaseTokens(value.phaseTokens),
+    confidence: CONFIDENCES.includes(asString(value.confidence).toLowerCase() as Confidence)
+      ? (asString(value.confidence).toLowerCase() as Confidence)
+      : undefined,
+    costDrivers: asStringArray(value.costDrivers).length
+      ? asStringArray(value.costDrivers).slice(0, 6)
+      : undefined,
   };
 }
 

@@ -42,6 +42,62 @@ export interface TaskPhase {
   estimatedCost: [number, number];
 }
 
+/**
+ * How much work the task represents, on a 0-100 scale.
+ *
+ * The level is a label for people; the score is what the estimator actually
+ * uses. Both exist because two "high complexity" tasks can differ enormously
+ * in real workload, so a label alone cannot drive a cost.
+ */
+export type EffortLevel = "low" | "medium" | "high" | "very-high" | "extreme";
+
+export type Confidence = "low" | "medium" | "high";
+
+/**
+ * Task effort, produced by the analyser and consumed by the estimator.
+ *
+ * `implementationSize` and `contextOverhead` are separate because they scale
+ * cost differently: a large implementation costs output tokens, while heavy
+ * context costs input tokens, and a task can be high in one and low in the
+ * other (a long-document summary is high-context, low-implementation).
+ */
+export interface TaskEffort {
+  level: EffortLevel;
+  /** 0-100. */
+  score: number;
+  requirementCount: number;
+  criticalRequirementCount: number;
+  optionalRequirementCount: number;
+  estimatedIterations: { min: number; max: number };
+  /** 0-100: how much code/artifact is actually produced. */
+  implementationSize: number;
+  /** 0-100: how much context, research or document work is required. */
+  contextOverhead: number;
+  /** 0-100: how much tool/external-integration work is required. */
+  toolOverhead: number;
+  /** 0-100: expected debugging and revision load. */
+  revisionLoad: number;
+}
+
+/**
+ * What the task needs from a model, on the same 0-100 scales used by model
+ * capability metadata. Comparing like-for-like is what keeps suitability
+ * model-agnostic rather than a list of hard-coded model names.
+ */
+export interface TaskRequirementProfile {
+  codingRequirement: number;
+  reasoningRequirement: number;
+  researchRequirement: number;
+  contextRequirement: number;
+  structuredOutputRequirement: number;
+}
+
+/** Per-phase token estimates, so cost is built up rather than guessed once. */
+export interface PhaseTokens {
+  input: number;
+  output: number;
+}
+
 export interface TaskAnalysis {
   taskType: TaskType;
   summary: string;
@@ -54,6 +110,16 @@ export interface TaskAnalysis {
   phases: TaskPhase[];
   risks: string[];
   scopeAdjustments: string[];
+  /** Workload model. Optional so older/partial payloads still validate. */
+  effort?: TaskEffort;
+  /** Capability demands of the task, for the suitability engine. */
+  requirementProfile?: TaskRequirementProfile;
+  /** Per-phase token estimates keyed by phase name. */
+  phaseTokens?: Record<string, PhaseTokens>;
+  /** How well-specified the request is; low means the estimate is shaky. */
+  confidence?: Confidence;
+  /** Concrete reasons the estimate is what it is, shown to the user. */
+  costDrivers?: string[];
 }
 
 export interface CostEstimate {
@@ -62,11 +128,22 @@ export interface CostEstimate {
   baseExecutionCost: number;
   iterationCost: number;
   overheadCost: number;
+  contextOverheadCost: number;
+  toolOverheadCost: number;
+  revisionCost: number;
   minimum: number;
   maximum: number;
+  /**
+   * The approximate amount below which the core scope is unlikely to be
+   * completed reliably. Distinct from the recommended maximum: this is a floor,
+   * not a target, and it is an estimate, not a guarantee.
+   */
+  minimumViable: number;
   recommendedMaximum: number;
+  confidence: Confidence;
   safetyFactor: number;
   modelId: string;
+  effort?: TaskEffort;
 }
 
 export interface ReservePlan {
@@ -77,12 +154,43 @@ export interface ReservePlan {
   explanation: string;
 }
 
-export type FeasibilityStatus = "fits" | "fits-with-optimization" | "does-not-fit";
+/**
+ * Feasibility now distinguishes a tight-but-possible budget from one that is
+ * clearly insufficient, so the user gets an actionable answer rather than a
+ * single "over budget" verdict.
+ */
+export type FeasibilityStatus =
+  | "fits"
+  | "tight"
+  | "fits-with-optimization"
+  | "does-not-fit";
 
 export interface FeasibilityResult {
   status: FeasibilityStatus;
   headline: string;
   detail: string;
+}
+
+export type SuitabilityStatus = "suitable" | "acceptable" | "not-recommended";
+
+/**
+ * Model-task compatibility, deliberately independent from budget feasibility.
+ *
+ * "Can this model handle it?" and "can the user afford it?" are different
+ * questions; collapsing them hides the fix (stronger model vs. more budget).
+ */
+export interface ModelSuitability {
+  status: SuitabilityStatus;
+  /** Short human-readable summary for the UI. */
+  headline: string;
+  reasons: string[];
+  capabilityGaps: string[];
+  suggestedModelId?: string;
+  suggestedModelName?: string;
+  /** Extra CREDIT implied by switching to the suggestion, when computable. */
+  suggestedDelta?: number;
+  /** True when the user knowingly kept a model we advised against. */
+  overridden: boolean;
 }
 
 export interface OptimizedScope {
@@ -153,6 +261,7 @@ export interface PlanResult {
   scopeApplied: boolean;
   recommendation: ModelRecommendation | null;
   comparison: ModelComparisonRow[];
+  suitability: ModelSuitability | null;
   executionPlan: ExecutionPlan;
   clarifyingAnswers: ClarifyingAnswer[];
   /** True when at least one clarifying question was answered rather than skipped. */

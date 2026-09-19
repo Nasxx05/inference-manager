@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Plus } from "lucide-react";
+import { ArrowLeft, Plus } from "lucide-react";
 import { AUTO_MODEL_ID } from "@/data/models";
 import { endpoint } from "@/lib/backend";
 import { readHistory, saveEntry } from "@/lib/historyManager";
@@ -34,8 +34,17 @@ const INITIAL_VALUES: TaskFormValues = {
  * "cancelled" is deliberately distinct from "idle": both show the form, but
  * cancelling is the user's own action, so it must not be reported as an error
  * and must not leave the Analyze button disabled.
+ *
+ * "editing" means the user returned to the composer from a result. Inputs stay
+ * populated; the previous plan is retained but not shown as current.
  */
-type RunState = "idle" | "analyzing" | "success" | "error" | "cancelled";
+type RunState =
+  | "idle"
+  | "analyzing"
+  | "success"
+  | "error"
+  | "cancelled"
+  | "editing";
 
 export function Workspace() {
   const [values, setValues] = useState<TaskFormValues>(INITIAL_VALUES);
@@ -143,9 +152,6 @@ export function Workspace() {
 
         const plan = payload.success ? payload.data : undefined;
         if (!response.ok || !plan) {
-          // The backend returns a specific, human-readable message for every
-          // failure mode (timeout, rate limit, unusable response). Only fall
-          // back to a generic line if it is absent.
           setError(
             payload.error?.message ?? "We couldn't generate your prompt. Please try again.",
           );
@@ -179,7 +185,9 @@ export function Workspace() {
       } finally {
         inFlight.current = null;
         // Never overwrite a cancellation with a derived state.
-        setState((current) => (current === "cancelled" ? current : "idle"));
+        setState((current) =>
+          current === "cancelled" || current === "success" ? current : "idle",
+        );
       }
     },
     [values],
@@ -210,8 +218,7 @@ export function Workspace() {
 
       const questions = payload.success ? payload.data?.questions : undefined;
       if (!response.ok || !questions || questions.length === 0) {
-        // No usable questions: fall straight through to planning. Clarify is a
-        // local computation, so planning surfaces any real model error.
+        // No usable questions: go straight to planning.
         void analyze();
         return;
       }
@@ -229,6 +236,16 @@ export function Workspace() {
     void analyze({ optimization: preference });
   }
 
+  /**
+   * Returns to the composer without discarding anything: task, model, quality,
+   * budget and clarifying answers all stay populated, so the user can change
+   * one field and re-run instead of starting over.
+   */
+  function handleEditTask() {
+    setError(null);
+    setState("editing");
+  }
+
   function handleNewTask() {
     setPlan(null);
     setError(null);
@@ -239,6 +256,15 @@ export function Workspace() {
     setValues({ ...INITIAL_VALUES, modelId: values.modelId, budget: values.budget });
   }
 
+  const handleSelectHistory = useCallback((entry: HistoryEntry) => {
+    // Restore the prompt for a previous task without re-running the model.
+    navigator.clipboard?.writeText(entry.prompt).catch(() => undefined);
+  }, []);
+
+  const handlePromptChange = useCallback((prompt: string) => {
+    setPlan((current) => (current ? { ...current, prompt } : current));
+  }, []);
+
   const heading = useMemo(
     () =>
       plan
@@ -248,12 +274,27 @@ export function Workspace() {
   );
 
   const showClarifying = clarifying && questions !== null;
+  const editing = state === "editing";
 
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="border-b border-line bg-canvas">
+      <header className="sticky top-0 z-40 border-b border-line bg-canvas">
         <div className="mx-auto flex max-w-[1180px] items-center justify-between gap-4 px-5 py-3.5">
-          <span className="font-mono text-sm font-medium tracking-tight">Promgent</span>
+          <div className="flex items-center gap-3">
+            {/* Edit Task stays visible without scrolling, on mobile too. */}
+            {plan ? (
+              <button
+                type="button"
+                onClick={handleEditTask}
+                className="inline-flex items-center gap-1.5 rounded text-[13px] text-muted transition-colors hover:text-ink"
+              >
+                <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />
+                Edit Task
+              </button>
+            ) : null}
+            <span className="font-mono text-sm font-medium tracking-tight">Promgent</span>
+          </div>
+
           <div className="flex items-center gap-2">
             <HistoryPanel
               entries={history}
@@ -262,79 +303,82 @@ export function Workspace() {
               }}
             />
             {plan ? (
-              <Button variant="secondary" onClick={handleNewTask}>
-                <Plus aria-hidden="true" className="h-3.5 w-3.5" />
-                New Task
-              </Button>
+              <>
+                {/* Re-analyze runs the full pipeline again with edited values. */}
+                <Button variant="secondary" onClick={() => void handleSubmit()}>
+                  Re-analyze Task
+                </Button>
+                <Button variant="secondary" onClick={handleNewTask}>
+                  <Plus aria-hidden="true" className="h-3.5 w-3.5" />
+                  New Task
+                </Button>
+              </>
             ) : null}
           </div>
         </div>
       </header>
 
       <main className="mx-auto w-full max-w-[1180px] flex-1 px-5 py-8 sm:py-12">
-        {!plan ? (
-          showClarifying ? (
-            <ClarifyingQuestions
-              questions={questions}
-              answers={answers}
-              onChange={(id, value) => setAnswers((a) => ({ ...a, [id]: value }))}
-              onBack={() => {
-                setClarifying(false);
-                setQuestions(null);
-                setAnswers({});
-                setError(null);
-                setState("idle");
-              }}
-              onSubmit={() =>
-                void analyze({
-                  clarifyingQuestions: questions,
-                  clarifyingResponses: answers,
-                })
-              }
-              onSkip={() => void analyze({ clarifyingQuestions: questions })}
-              busy={loading}
-              error={error}
-            />
-          ) : (
-            <div className="animate-fade-up">
-              <div className="mx-auto max-w-[640px] text-center">
-                {/* Editorial serif on the primary heading: the type carries the
-                    personality, so weight stays light and spacing stays calm. */}
-                <h1 className="display text-[30px] leading-snug text-ink sm:text-[36px]">
-                  {heading}
-                </h1>
-                <p className="mx-auto mt-3 max-w-[520px] text-sm leading-relaxed text-muted">
-                  Describe what you want to build, choose your model and budget, and Promgent
-                  creates a realistic execution plan and optimized prompt for the task.
-                </p>
-              </div>
+        {state === "analyzing" ? (
+          <GeneratingScreen
+            taskDescription={values.taskDescription}
+            onCancel={cancelGeneration}
+          />
+        ) : showClarifying ? (
+          <ClarifyingQuestions
+            questions={questions}
+            answers={answers}
+            onChange={(id, value) => setAnswers((a) => ({ ...a, [id]: value }))}
+            onBack={() => {
+              setClarifying(false);
+              setQuestions(null);
+              setAnswers({});
+              setError(null);
+              setState("idle");
+            }}
+            onSubmit={() =>
+              void analyze({
+                clarifyingQuestions: questions,
+                clarifyingResponses: answers,
+              })
+            }
+            onSkip={() => void analyze({ clarifyingQuestions: questions })}
+            busy={loading}
+            error={error}
+          />
+        ) : editing ? (
+          /* Editing: the composer, with every previous value still populated. */
+          <div className="animate-fade-up">
+            <div className="mx-auto max-w-[640px] text-center">
+              <h1 className="display text-[30px] leading-snug text-ink sm:text-[36px]">
+                {heading}
+              </h1>
+              <p className="mx-auto mt-3 max-w-[520px] text-sm leading-relaxed text-muted">
+                Adjust any field and re-analyze. Your previous answers are preserved.
+              </p>
+            </div>
 
-              <div className="mx-auto mt-9 max-w-[820px] rounded border border-line bg-paper p-5 sm:p-7">
-                <TaskForm
-                  values={values}
-                  onChange={setValues}
-                  onSubmit={handleSubmit}
-                  loading={loading}
-                  error={error}
-                />
-                {loading ? (
-                  <GeneratingScreen
-                    taskDescription={values.taskDescription}
-                    onCancel={cancelGeneration}
-                  />
-                ) : null}
-                {state === "error" && error ? (
-                  <div role="alert" className="mt-4 text-center">
-                    <p className="text-sm font-medium text-danger">
-                      We couldn't generate your prompt.
-                    </p>
-                    <p className="mt-1 text-sm text-muted">{error}</p>
-                  </div>
+            <div className="mx-auto mt-9 max-w-[820px] rounded border border-line bg-paper p-5 sm:p-7">
+              <TaskForm
+                values={values}
+                onChange={setValues}
+                onSubmit={() => void handleSubmit()}
+                loading={loading}
+                error={error}
+              />
+              <div className="mt-6 flex flex-wrap gap-3">
+                <Button onClick={() => void handleSubmit()} disabled={loading}>
+                  Re-analyze Task
+                </Button>
+                {plan ? (
+                  <Button variant="secondary" onClick={() => setState("success")}>
+                    Back to results
+                  </Button>
                 ) : null}
               </div>
             </div>
-          )
-        ) : (
+          </div>
+        ) : plan ? (
           <div className="animate-fade-up">
             <div className="mb-6">
               <h1 className="display text-[24px] text-ink">Task analysis</h1>
@@ -354,6 +398,21 @@ export function Workspace() {
                   onKeepOriginalScope={() => {
                     setPlan((p) => (p ? { ...p, optimizedScope: null } : p));
                   }}
+                  onSwitchModel={() => {
+                    const suggested = plan.suitability?.suggestedModelId;
+                    if (!suggested) return;
+                    // Switch to the suggested model and re-run the analysis.
+                    setValues((v) => ({ ...v, modelId: suggested }));
+                    void analyze({ modelId: suggested });
+                  }}
+                  onKeepModel={() => {
+                    // Record the override so the UI can state the trade-off.
+                    setPlan((p) =>
+                      p && p.suitability
+                        ? { ...p, suitability: { ...p.suitability, overridden: true } }
+                        : p,
+                    );
+                  }}
                 />
               </div>
 
@@ -362,12 +421,6 @@ export function Workspace() {
               </div>
             </div>
 
-            {loading ? (
-              <GeneratingScreen
-                taskDescription={plan.taskDescription}
-                onCancel={cancelGeneration}
-              />
-            ) : null}
             {state === "error" && error ? (
               <div role="alert" className="mt-4 text-center">
                 <p className="text-sm font-medium text-danger">
@@ -376,6 +429,38 @@ export function Workspace() {
                 <p className="mt-1 text-sm text-muted">{error}</p>
               </div>
             ) : null}
+          </div>
+        ) : (
+          <div className="animate-fade-up">
+            <div className="mx-auto max-w-[640px] text-center">
+              {/* Editorial serif on the primary heading: the type carries the
+                  personality, so weight stays light and spacing stays calm. */}
+              <h1 className="display text-[30px] leading-snug text-ink sm:text-[36px]">
+                {heading}
+              </h1>
+              <p className="mx-auto mt-3 max-w-[520px] text-sm leading-relaxed text-muted">
+                Describe what you want to build, choose your model and budget, and Promgent
+                creates a realistic execution plan and optimized prompt for the task.
+              </p>
+            </div>
+
+            <div className="mx-auto mt-9 max-w-[820px] rounded border border-line bg-paper p-5 sm:p-7">
+              <TaskForm
+                values={values}
+                onChange={setValues}
+                onSubmit={handleSubmit}
+                loading={loading}
+                error={error}
+              />
+              {state === "error" && error ? (
+                <div role="alert" className="mt-4 text-center">
+                  <p className="text-sm font-medium text-danger">
+                    We couldn't generate your prompt.
+                  </p>
+                  <p className="mt-1 text-sm text-muted">{error}</p>
+                </div>
+              ) : null}
+            </div>
           </div>
         )}
       </main>

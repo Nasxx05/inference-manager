@@ -2,19 +2,102 @@
 
 import { AlertTriangle, Check, Minus } from "lucide-react";
 import { TIER_LABEL, getModel } from "@/data/models";
-import { formatCredit, formatRange } from "@/lib/estimator/costEstimator";
+import { explainCost, formatCredit, formatRange } from "@/lib/estimator/costEstimator";
+import { resolveTaskEffort } from "@/lib/estimator/taskEffort";
 import type { PlanResult } from "@/types";
 import { Button, Card, Metric } from "./ui";
+
+/**
+ * Model suitability, shown separately from budget feasibility.
+ *
+ * A weak model and a small budget are different problems with different fixes,
+ * so they are never merged into one verdict.
+ */
+function SuitabilityCard({
+  plan,
+  onSwitchModel,
+  onKeepModel,
+}: {
+  plan: PlanResult;
+  onSwitchModel: () => void;
+  onKeepModel: () => void;
+}) {
+  const suitability = plan.suitability;
+  if (!suitability) return null;
+
+  const tone =
+    suitability.status === "suitable"
+      ? "border-forest/30 bg-forest-light text-forest"
+      : suitability.status === "acceptable"
+        ? "border-credit/30 bg-credit-light text-credit"
+        : "border-danger-light bg-danger-light text-danger";
+
+  const Icon =
+    suitability.status === "suitable"
+      ? Check
+      : suitability.status === "acceptable"
+        ? Minus
+        : AlertTriangle;
+
+  return (
+    <Card title="Model Suitability">
+      <div className={`rounded border px-3 py-2.5 ${tone}`}>
+        <div className="flex items-center gap-2 text-sm font-medium">
+          <Icon aria-hidden="true" className="h-4 w-4 shrink-0" />
+          <span>{suitability.headline}</span>
+        </div>
+        {suitability.reasons.map((reason) => (
+          <p key={reason} className="mt-1.5 text-xs leading-relaxed opacity-90">
+            {reason}
+          </p>
+        ))}
+
+        {suitability.capabilityGaps.length ? (
+          <p className="mt-2 text-xs leading-relaxed opacity-90">
+            Gaps: {suitability.capabilityGaps.join(", ")}.
+          </p>
+        ) : null}
+
+        {suitability.suggestedModelName ? (
+          <div className="mt-3 border-t border-current/20 pt-2.5">
+            <p className="text-xs leading-relaxed opacity-90">
+              Suggested: <span className="font-mono">{suitability.suggestedModelName}</span>
+              {typeof suitability.suggestedDelta === "number"
+                ? ` · ${suitability.suggestedDelta >= 0 ? "+" : ""}${formatCredit(suitability.suggestedDelta)} CREDIT`
+                : ""}
+            </p>
+            <div className="mt-2.5 flex flex-wrap gap-2">
+              <Button variant="secondary" onClick={onSwitchModel}>
+                Switch Model
+              </Button>
+              <Button variant="ghost" onClick={onKeepModel}>
+                Keep My Model
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        {suitability.overridden ? (
+          <p className="mt-2.5 text-xs leading-relaxed opacity-90">
+            You kept this model. The estimate below assumes reduced reliability and greater
+            revision risk.
+          </p>
+        ) : null}
+      </div>
+    </Card>
+  );
+}
 
 function StatusBadge({ plan }: { plan: PlanResult }) {
   const { status, headline, detail } = plan.feasibility;
   const styles = {
     fits: "border-forest/30 bg-forest-light text-forest",
+    tight: "border-credit/30 bg-credit-light text-credit",
     "fits-with-optimization": "border-credit/30 bg-credit-light text-credit",
     "does-not-fit": "border-danger-light bg-danger-light text-danger",
   }[status];
 
-  const Icon = status === "fits" ? Check : status === "fits-with-optimization" ? Minus : AlertTriangle;
+  const Icon = status === "fits" ? Check : status === "does-not-fit" ? AlertTriangle : Minus;
 
   return (
     <div className={`rounded border px-3 py-2.5 ${styles}`}>
@@ -31,14 +114,24 @@ export function AnalysisPanel({
   plan,
   onUseOptimizedScope,
   onKeepOriginalScope,
+  onSwitchModel,
+  onKeepModel,
   busy,
 }: {
   plan: PlanResult;
   onUseOptimizedScope: () => void;
   onKeepOriginalScope: () => void;
+  onSwitchModel: () => void;
+  onKeepModel: () => void;
   busy: boolean;
 }) {
   const model = getModel(plan.modelId);
+
+  // Why the estimate is what it is, derived from real workload signals.
+  const effort =
+    plan.cost.effort ??
+    resolveTaskEffort({ analysis: plan.analysis, taskDescription: plan.taskDescription });
+  const drivers = explainCost(plan.analysis, effort);
 
   return (
     <div className="flex flex-col gap-4">
@@ -49,11 +142,39 @@ export function AnalysisPanel({
           <Metric label="Complexity" value={plan.analysis.complexity} mono={false} />
           <Metric label="Model" value={model?.displayName ?? plan.modelId} mono={false} />
           <Metric label="Iterations" value={plan.analysis.expectedIterations} />
+          {effort ? (
+            <>
+              <Metric label="Effort" value={effort.level.replace("-", " ")} mono={false} />
+              <Metric label="Requirements" value={effort.requirementCount} />
+            </>
+          ) : null}
+          <Metric label="Confidence" value={plan.cost.confidence} mono={false} />
         </div>
       </Card>
 
+      {/* WHY: makes a large estimate explainable rather than arbitrary. */}
+      {drivers.length ? (
+        <Card title="Why">
+          <ul className="flex flex-col gap-1">
+            {drivers.map((driver) => (
+              <li key={driver} className="text-xs leading-relaxed text-muted">
+                • {driver}
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : null}
+
+      <SuitabilityCard plan={plan} onSwitchModel={onSwitchModel} onKeepModel={onKeepModel} />
+
       <Card title="Budget">
         <Metric label="Your budget" value={`${formatCredit(plan.budget)} CREDIT`} tone="credit" />
+        {/* The floor: below this the core scope is unlikely to complete. */}
+        <Metric
+          label="Minimum viable"
+          value={`${formatCredit(plan.cost.minimumViable)} CREDIT`}
+          tone="credit"
+        />
         <Metric
           label="Estimated cost"
           value={`${formatRange(plan.cost.minimum, plan.cost.maximum)} CREDIT`}

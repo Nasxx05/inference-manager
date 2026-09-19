@@ -18,20 +18,33 @@ export function selectModel(
 ): ModelRecommendation {
   const threshold = VIABILITY_THRESHOLD[analysis.complexity] ?? 62;
 
+  // The task description drives the effort model, so it must reach the
+  // estimator: without it every model is priced off a generic baseline and the
+  // preference comparison stops being meaningful.
+  const taskDescription = analysis.summary ?? "";
+
   const candidates = MODELS.map((model) => {
     const capability = capabilityScoreFor(model, analysis.taskType);
-    const estimate = estimateCost(analysis, model, preference);
+    const estimate = estimateCost({
+      analysis,
+      model,
+      preference,
+      taskDescription,
+    });
     return { model, capability, estimate };
   }).filter((c) => c.capability >= threshold);
 
   const pool = candidates.length > 0 ? candidates : MODELS.map((model) => ({
     model,
     capability: capabilityScoreFor(model, "general"),
-    estimate: estimateCost(analysis, model, preference),
+    estimate: estimateCost({ analysis, model, preference, taskDescription }),
   }));
 
   const scored = pool.map((c) => {
-    const costScore = scoreCost(c.estimate.maximum, budget);
+    const costScore =
+      preference === "minimize-cost"
+        ? scoreCheapest(c.estimate.maximum, budget)
+        : scoreCost(c.estimate.maximum, budget);
     const qualityScore = c.capability / 100;
     const budgetLeft = (budget - c.estimate.recommendedMaximum) / Math.max(budget, 1);
     const weighted = weightPreference(costScore, qualityScore, budgetLeft, preference);
@@ -50,9 +63,14 @@ export function selectModel(
 }
 
 /**
- * Cost score peaks when a model uses the budget sensibly rather than being
- * merely cheap. Leaving the budget almost untouched signals an under-scoped
- * choice, so very low ratios score slightly below the ideal band.
+ * Cost score for balanced and maximum-quality: peaks when a model uses the
+ * budget sensibly rather than being merely cheap. Leaving the budget almost
+ * untouched signals an under-scoped choice, so very low ratios score slightly
+ * below the ideal band.
+ *
+ * The under-use penalty is deliberately mild (floor 0.85 rather than 0.55): it
+ * is a tiebreaker between models that both fit, not a reason to prefer an
+ * expensive model over a cheap one.
  */
 function scoreCost(maximum: number, budget: number): number {
   if (budget <= 0) return 0;
@@ -60,8 +78,22 @@ function scoreCost(maximum: number, budget: number): number {
   if (ratio >= 1) return 0;
   if (ratio >= 0.75) return 1 - (ratio - 0.75) / 0.75;
   if (ratio >= 0.45) return 1;
-  // Below 45% of budget: still viable, but scaled down for leaving value unused.
-  return 0.55 + (ratio / 0.45) * 0.45;
+  // Below 45% of budget: still viable, mildly discounted for unused headroom.
+  return 0.85 + (ratio / 0.45) * 0.15;
+}
+
+/**
+ * Cost score for minimize-cost: strictly rewards a lower absolute estimate.
+ *
+ * The "sensible budget use" curve above is wrong here — with a generous budget
+ * it makes a pricier model score better than a cheap one purely for consuming
+ * more of the budget. When the user asks to minimize cost, cheaper must win.
+ */
+function scoreCheapest(maximum: number, budget: number): number {
+  if (budget <= 0) return 0;
+  const ratio = maximum / budget;
+  if (ratio >= 1) return 0;
+  return 1 - ratio;
 }
 
 function weightPreference(

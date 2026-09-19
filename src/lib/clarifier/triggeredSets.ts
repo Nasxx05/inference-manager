@@ -14,6 +14,173 @@ export interface TriggeredSet {
  */
 export const TRIGGERED_SETS: TriggeredSet[] = [
   {
+    /**
+     * RAG / retrieval systems.
+     *
+     * These questions exist because each answer materially changes the
+     * workload: a local in-memory store and a hosted vector database differ by
+     * an order of magnitude in integration and revision effort, and evaluation
+     * is a whole extra phase. Asking is what stops "build a RAG agent" from
+     * being priced as if it were one small task.
+     */
+    id: "rag",
+    match:
+      /\b(rag|retrieval[- ]?augmented|embedding|embeddings|vector (db|database|store|storage|search)|semantic search|document (ingestion|processing|qa|question)|knowledge base|chunking|rerank|similarity search)\b/i,
+    questions: [
+      {
+        id: "rag_documents",
+        question: "What kind of documents will it process?",
+        hint: "Document type drives parsing, chunking and context size — a large cost factor.",
+        defaultValue: "Plain text and Markdown files, with PDFs handled as plain text.",
+        options: [
+          "Plain text and Markdown",
+          "PDFs with layout and tables",
+          "HTML pages or scraped web content",
+          "Code repositories",
+          "Mixed document types",
+        ],
+      },
+      {
+        id: "rag_vector_store",
+        question: "Which vector store should it use?",
+        hint: "A hosted service adds integration work; a local store keeps it self-contained.",
+        defaultValue: "A local in-memory vector store, so the project runs without external services.",
+        options: [
+          "Local in-memory store",
+          "Local persistent store (for example SQLite-backed)",
+          "Hosted vector database",
+          "Existing store I will configure myself",
+        ],
+        singleSelect: true,
+      },
+      {
+        id: "rag_evaluation",
+        question: "Do you need retrieval evaluation?",
+        hint: "Evaluation is a substantial extra phase, not a small addition.",
+        defaultValue: "A lightweight evaluation with a small set of representative questions.",
+        options: [
+          "No evaluation for now",
+          "Lightweight: a small set of test questions with spot checks",
+          "Full: a labelled dataset with retrieval quality metrics",
+        ],
+        singleSelect: true,
+      },
+      {
+        id: "rag_scope",
+        question: "Which parts are in scope?",
+        hint: "Each selected part is a real implementation phase.",
+        defaultValue:
+          "Document ingestion, chunking, embeddings, vector storage, retrieval and generation.",
+        options: [
+          "Document ingestion and chunking",
+          "Embeddings",
+          "Vector storage",
+          "Retrieval and context construction",
+          "Generation with citations",
+          "Authentication and multi-user support",
+          "Deployment guidance",
+        ],
+      },
+      {
+        id: "rag_backend",
+        question: "Do you already have a backend or should one be created?",
+        hint: "Creating a backend adds API, storage and deployment work.",
+        defaultValue: "Create a minimal backend for ingestion and querying.",
+        options: [
+          "Create a minimal backend",
+          "I already have a backend to integrate with",
+          "No backend — a local script or notebook is enough",
+        ],
+        singleSelect: true,
+      },
+    ],
+  },
+  {
+    /**
+     * SaaS platforms.
+     *
+     * A "complete SaaS" brief is underspecified by nature: the number of
+     * subsystems decides whether this is a small prototype or a large build.
+     * These questions surface which layers actually exist before estimating.
+     */
+    id: "saas",
+    match:
+      /\b(saas|multi[- ]?tenant|subscription|billing|admin (panel|dashboard)|user management|production[- ]ready|production[- ]quality|full[- ]stack platform|platform with)\b/i,
+    questions: [
+      {
+        id: "saas_type",
+        question: "What kind of SaaS is this?",
+        hint: "The domain decides which features are essential versus optional.",
+        defaultValue:
+          "A general-purpose web application with accounts and a main dashboard workspace.",
+        options: [
+          "Analytics or reporting tool",
+          "Project or task management tool",
+          "Content or publishing platform",
+          "Marketplace or booking platform",
+          "Internal business tool",
+        ],
+        singleSelect: true,
+      },
+      {
+        id: "saas_layers",
+        question: "Which layers must be included?",
+        hint: "Each layer is a substantial implementation area with its own revision cycles.",
+        defaultValue:
+          "Authentication, database, backend API, main dashboard UI and basic deployment.",
+        options: [
+          "Authentication",
+          "Database and data models",
+          "Backend API",
+          "Frontend dashboard UI",
+          "Payments and subscriptions",
+          "Admin dashboard",
+          "Analytics and reporting",
+          "Deployment and infrastructure",
+        ],
+      },
+      {
+        id: "saas_stack",
+        question: "Is there a required stack?",
+        hint: "A fixed stack narrows the work; an open choice adds a decision phase.",
+        defaultValue: "No fixed stack — choose a conventional, well-supported one.",
+        options: [
+          "No fixed stack, choose a conventional one",
+          "Next.js and TypeScript",
+          "React with a separate backend",
+          "Python backend",
+          "Something else I will specify",
+        ],
+        singleSelect: true,
+      },
+      {
+        id: "saas_payments",
+        question: "Are real payments required, or is a simulation enough?",
+        hint: "Real payment processing carries significant integration and testing work.",
+        defaultValue: "Simulated billing only — no real payment provider integration.",
+        options: [
+          "No billing for now",
+          "Simulated billing with mock data",
+          "Real payment provider integration",
+        ],
+        singleSelect: true,
+      },
+      {
+        id: "saas_fidelity",
+        question: "What level of fidelity do you need?",
+        hint: "Prototype versus production-ready is the single biggest driver of effort here.",
+        defaultValue:
+          "A working prototype with core flows, clean structure and minimal tests.",
+        options: [
+          "Prototype: core flows only",
+          "Functional: core flows plus tests and error handling",
+          "Production-ready: tests, monitoring, migrations and deployment",
+        ],
+        singleSelect: true,
+      },
+    ],
+  },
+  {
     id: "game",
     match:
       /\b(game|tic[- ]?tac[- ]?toe|noughts|chess|checkers|sudoku|snake|tetris|pong|puzzle|platformer|multiplayer|turn[- ]based|board game|card game|player vs)\b/i,

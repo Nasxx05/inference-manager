@@ -88,6 +88,28 @@ Return ONLY valid JSON, no fences, no commentary, in this exact shape:
     "phases": [{"name": "", "description": "", "priority": "essential|recommended|optional", "costWeight": 0.0}],
     "risks": ["..."],
     "scopeAdjustments": ["..."],
+    "effort": {
+      "effortLevel": "low|medium|high|very-high|extreme",
+      "effortScore": 0,
+      "requirementCount": 0,
+      "criticalRequirementCount": 0,
+      "optionalRequirementCount": 0,
+      "estimatedIterations": {"min": 0, "max": 0},
+      "implementationSize": 0,
+      "contextOverhead": 0,
+      "toolOverhead": 0,
+      "revisionLoad": 0
+    },
+    "requirementProfile": {
+      "codingRequirement": 0,
+      "reasoningRequirement": 0,
+      "researchRequirement": 0,
+      "contextRequirement": 0,
+      "structuredOutputRequirement": 0
+    },
+    "phaseTokens": {"<phase name>": {"input": 0, "output": 0}},
+    "confidence": "low|medium|high",
+    "costDrivers": ["..."],
     "scope": {
       "essential": ["..."],
       "optional": ["..."],
@@ -107,6 +129,27 @@ Analysis rules:
   for the task to be complete; "deferred" is what can wait; "reducible" is what can be
   simplified into a prototype.
 - Keep every analysis string short. Put the detail in generatedPrompt, not here.
+
+Workload rules (these drive the cost estimate, so be honest and specific):
+- effortScore is 0-100 for the TOTAL work implied. A one-page site is 10-25. A portfolio
+  site is 30-45. A RAG pipeline with ingestion, embeddings, retrieval and evaluation is
+  60-80. A full multi-layer SaaS platform is 80-100. Never compress a large system into
+  a small score.
+- requirementCount counts DISTINCT substantial requirements, not words. "auth, database,
+  API, payments, dashboard, analytics" is 6, not 1. A multi-feature system is a
+  collection of tasks, not one task.
+- estimatedIterations is the realistic plan→generate→test→debug→revise loop: 1-2 for
+  trivial work, 2-4 medium, 4-7 complex, 6-12 for very complex systems.
+- implementationSize: how much artifact is produced (0 = pure advice, 100 = large codebase).
+- contextOverhead: how much reading, research or document context is needed.
+- toolOverhead: external integrations, tooling, dependency and environment work.
+- revisionLoad: expected debugging, integration failures, tuning and repair.
+- requirementProfile scores what capability the task DEMANDS of a model (0-100), not what
+  any particular model has.
+- phaseTokens: per-phase input/output token estimates. Implementation phases are
+  output-heavy; research phases are input-heavy.
+- confidence: "low" when the brief is vague or huge, "high" when small and well-defined.
+- costDrivers: 2-5 short phrases explaining what makes this task expensive or cheap.
 
 Prompt rules:
 - generatedPrompt must start with the header ROLE and end after OUTPUT FORMAT.

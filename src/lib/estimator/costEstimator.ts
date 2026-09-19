@@ -1,21 +1,55 @@
-import type { CostEstimate, ModelConfig, OptimizationPreference, TaskAnalysis } from "@/types";
+/**
+ * Deterministic cost engine.
+ *
+ * Turns workload into CREDIT using model pricing. The LLM never produces the
+ * final number: it estimates the work (effort, phases, tokens), and this module
+ * does the arithmetic. That keeps estimates reproducible and auditable, and it
+ * means a model cannot simply invent a price.
+ *
+ * The pipeline:
+ *
+ *   task effort → per-phase tokens → iteration passes → repair reserve
+ *             → context/tool overhead → model pricing → cost range
+ *
+ * Deliberately absent: any complexity-to-credit table. Two "high complexity"
+ * tasks can differ enormously, so the estimate comes from measured
+ * characteristics, not a label.
+ */
+
+import type {
+  Confidence,
+  CostEstimate,
+  ModelConfig,
+  OptimizationPreference,
+  TaskAnalysis,
+  TaskEffort,
+} from "@/types";
+import { resolveTaskEffort } from "./taskEffort";
+import { estimatePhaseTokens, iterationTokens, sumPhaseTokens } from "./tokenEstimator";
+import { buildIterationModel, overheadFactor, repairReserveFactor } from "./iterationEstimator";
 
 export interface EstimatorConfig {
   safetyFactor: number;
-  overheadFactor: number;
   rangeSpread: number;
+  /** How far below the expected range the minimum viable budget sits. */
+  minimumViableFactor: number;
 }
 
 const BASE_CONFIG: EstimatorConfig = {
   safetyFactor: 0.2,
-  overheadFactor: 0.15,
-  rangeSpread: 0.12,
+  rangeSpread: 0.14,
+  minimumViableFactor: 0.85,
 };
 
+/**
+ * Quality preference affects real work, not just a safety margin: it changes
+ * how many passes are planned and how much validation happens (see
+ * iterationEstimator), and it widens or narrows the range accordingly.
+ */
 const PREFERENCE_TUNING: Record<OptimizationPreference, Partial<EstimatorConfig>> = {
-  "minimize-cost": { safetyFactor: 0.12, overheadFactor: 0.08, rangeSpread: 0.1 },
-  balanced: { safetyFactor: 0.2, overheadFactor: 0.15, rangeSpread: 0.12 },
-  "maximum-quality": { safetyFactor: 0.3, overheadFactor: 0.22, rangeSpread: 0.15 },
+  "minimize-cost": { safetyFactor: 0.12, rangeSpread: 0.12, minimumViableFactor: 0.88 },
+  balanced: { safetyFactor: 0.2, rangeSpread: 0.14, minimumViableFactor: 0.85 },
+  "maximum-quality": { safetyFactor: 0.3, rangeSpread: 0.18, minimumViableFactor: 0.82 },
 };
 
 export function getEstimatorConfig(preference: OptimizationPreference): EstimatorConfig {
@@ -27,54 +61,152 @@ function round(value: number, decimals = 2): number {
   return Math.round(value * f) / f;
 }
 
-function iterationCost(model: ModelConfig, analysis: TaskAnalysis, iterations: number): number {
-  if (iterations <= 1) return 0;
-  const extraPasses = iterations - 1;
-  const perPassInput = (analysis.estimatedInputTokens * 0.75) / 1_000_000;
-  const perPassOutput = (analysis.estimatedOutputTokens * 0.35) / 1_000_000;
-  const perPass = perPassInput * model.inputPrice + perPassOutput * model.outputPrice;
-  return perPass * extraPasses;
+/**
+ * Confidence in the estimate.
+ *
+ * Low confidence is honest for underspecified or huge tasks, and it widens the
+ * range rather than pretending to precision. Small, well-defined tasks earn
+ * high confidence.
+ */
+export function estimateConfidence(
+  analysis: TaskAnalysis,
+  effort: TaskEffort,
+  taskDescription: string,
+): Confidence {
+  const words = (taskDescription ?? "").trim().split(/\s+/).filter(Boolean).length;
+  const answeredContext = (analysis.risks?.length ?? 0) > 0;
+
+  let score = 2; // start at "medium"
+
+  // A brief too short to describe real work is underspecified.
+  if (words < 5) score -= 1;
+  // Huge effort implies more unknowns.
+  if (effort.score >= 80) score -= 1;
+  // Many requirements means more that could have been left unclear.
+  if (effort.requirementCount > 10) score -= 1;
+  // Well-described, bounded work earns confidence.
+  if (words >= 4 && words <= 120 && effort.score < 45) score += 1;
+  if (answeredContext && effort.score < 60) score += 0;
+
+  if (score >= 3) return "high";
+  if (score <= 1) return "low";
+  return "medium";
 }
 
+export interface EstimateInput {
+  analysis: TaskAnalysis;
+  model: ModelConfig;
+  preference: OptimizationPreference;
+  taskDescription: string;
+  configOverride?: Partial<EstimatorConfig>;
+}
+
+export function estimateCost(input: EstimateInput): CostEstimate;
+/** Backwards-compatible overload used across the codebase. */
 export function estimateCost(
   analysis: TaskAnalysis,
   model: ModelConfig,
   preference: OptimizationPreference,
   configOverride?: Partial<EstimatorConfig>,
+): CostEstimate;
+export function estimateCost(
+  analysisOrInput: TaskAnalysis | EstimateInput,
+  modelArg?: ModelConfig,
+  preferenceArg?: OptimizationPreference,
+  configOverride?: Partial<EstimatorConfig>,
 ): CostEstimate {
-  const config: EstimatorConfig = { ...getEstimatorConfig(preference), ...(configOverride ?? {}) };
+  const input: EstimateInput =
+    "analysis" in analysisOrInput && "model" in analysisOrInput
+      ? (analysisOrInput as EstimateInput)
+      : {
+          analysis: analysisOrInput as TaskAnalysis,
+          model: modelArg as ModelConfig,
+          preference: preferenceArg as OptimizationPreference,
+          taskDescription: (analysisOrInput as TaskAnalysis).summary ?? "",
+          configOverride,
+        };
 
-  const inputTokens = Math.max(0, analysis.estimatedInputTokens);
-  const outputTokens = Math.max(0, analysis.estimatedOutputTokens);
+  const { analysis, model, preference, taskDescription } = input;
+  const config: EstimatorConfig = { ...getEstimatorConfig(preference), ...(input.configOverride ?? {}) };
 
-  const inputCost = (inputTokens / 1_000_000) * model.inputPrice;
-  const outputCost = (outputTokens / 1_000_000) * model.outputPrice;
+  const effort = resolveTaskEffort({ analysis, taskDescription });
+
+  // Per-phase tokens, summed so the phase breakdown and the total agree.
+  const phaseTokens = estimatePhaseTokens(analysis, effort);
+  const totals =
+    Object.keys(phaseTokens).length > 0
+      ? sumPhaseTokens(phaseTokens)
+      : {
+          input: Math.max(200, analysis.estimatedInputTokens),
+          output: Math.max(100, analysis.estimatedOutputTokens),
+        };
+
+  const inputCost = (totals.input / 1_000_000) * model.inputPrice;
+  const outputCost = (totals.output / 1_000_000) * model.outputPrice;
   const baseExecutionCost = inputCost + outputCost;
 
-  const iterations = Math.max(1, analysis.expectedIterations || 1);
-  const iterCost = iterationCost(model, analysis, iterations);
-  const overheadCost = (baseExecutionCost + iterCost) * config.overheadFactor;
+  // Iteration: each extra pass re-supplies context and rewrites part of the
+  // output. Modelled explicitly rather than as a flat multiplier.
+  const iteration = buildIterationModel(effort, preference);
+  let iterationCost = 0;
+  for (let pass = 1; pass < iteration.passes; pass += 1) {
+    const t = iterationTokens(totals, pass);
+    iterationCost += (t.input / 1_000_000) * model.inputPrice + (t.output / 1_000_000) * model.outputPrice;
+  }
 
-  const center = baseExecutionCost + iterCost + overheadCost;
+  // Repair reserve: debugging, integration problems, retrieval tuning.
+  // Scales with revision load and quality preference — never zero.
+  const revisionCost = baseExecutionCost * repairReserveFactor(effort, preference);
 
-  const minimum = Math.max(0.01, center * (1 - config.rangeSpread));
-  const maximum = center * (1 + config.rangeSpread);
+  // Context and tool overhead: re-supplying large context, tool results, docs.
+  const overhead = overheadFactor(effort);
+  const contextOverheadCost = baseExecutionCost * overhead * 0.6;
+  const toolOverheadCost = baseExecutionCost * overhead * 0.4;
+  const overheadCost = contextOverheadCost + toolOverheadCost;
+
+  const center = baseExecutionCost + iterationCost + revisionCost + overheadCost;
+
+  const confidence = analysis.confidence ?? estimateConfidence(analysis, effort, taskDescription);
+  // Wide range when confidence is low: say less, but say it honestly.
+  const spread = config.rangeSpread * (confidence === "low" ? 1.4 : confidence === "high" ? 0.85 : 1);
+
+  const minimum = Math.max(0.05, center * (1 - spread));
+  const maximum = center * (1 + spread);
   const recommendedMaximum = center * (1 + config.safetyFactor);
+
+  /**
+   * Minimum viable budget: the floor for the core scope to have a realistic
+   * chance. Set below the expected low, not at it — this is the point below
+   * which completion becomes unreliable, and it is an estimate, not a promise.
+   */
+  const minimumViable = Math.max(0.05, minimum * config.minimumViableFactor);
 
   return {
     inputCost: round(inputCost, 3),
     outputCost: round(outputCost, 3),
     baseExecutionCost: round(baseExecutionCost, 3),
-    iterationCost: round(iterCost, 3),
+    iterationCost: round(iterationCost, 3),
     overheadCost: round(overheadCost, 3),
+    contextOverheadCost: round(contextOverheadCost, 3),
+    toolOverheadCost: round(toolOverheadCost, 3),
+    revisionCost: round(revisionCost, 3),
     minimum: round(minimum, 2),
     maximum: round(maximum, 2),
+    minimumViable: round(minimumViable, 2),
     recommendedMaximum: round(recommendedMaximum, 2),
+    confidence,
     safetyFactor: config.safetyFactor,
     modelId: model.id,
+    effort,
   };
 }
 
+/**
+ * Distributes the total across phases so the UI can show where cost goes.
+ *
+ * Iteration, revision and overhead are spread proportionally across phases
+ * rather than added to one line, so each phase reflects its true share.
+ */
 export function allocatePhaseCosts(
   analysis: TaskAnalysis,
   estimate: Pick<CostEstimate, "minimum" | "maximum">,
@@ -84,13 +216,13 @@ export function allocatePhaseCosts(
 
   const totalWeight = phases.reduce((sum, p) => sum + (p.costWeight > 0 ? p.costWeight : 0), 0);
   const safeWeights = totalWeight > 0 ? totalWeight : phases.length;
-  const span = estimate.maximum - estimate.minimum;
+  const span = Math.max(0, estimate.maximum - estimate.minimum);
 
   return phases.map((phase, index) => {
     const weight = phase.costWeight > 0 ? phase.costWeight : 1;
     const share = weight / safeWeights;
     const low = Math.max(0.01, Math.round(estimate.minimum * share * 100) / 100);
-    const high = Math.max(0.02, Math.round((estimate.minimum * share + span * share) * 100) / 100);
+    const high = Math.max(low + 0.01, Math.round((estimate.minimum * share + span * share) * 100) / 100);
     return {
       name: phase.name || `Phase ${index + 1}`,
       description: phase.description ?? "",
@@ -110,4 +242,40 @@ export function formatCredit(value: number): string {
 
 export function formatRange(min: number, max: number): string {
   return `${formatCredit(min)} – ${formatCredit(max)}`;
+}
+
+/**
+ * Human-readable reasons the estimate is what it is.
+ *
+ * Shown under the budget panel so a large number is explainable rather than
+ * arbitrary. Derived from the actual workload signals, never invented.
+ */
+export function explainCost(analysis: TaskAnalysis, effort: TaskEffort): string[] {
+  const drivers: string[] = [];
+
+  if (effort.requirementCount > 1) {
+    drivers.push(
+      `${effort.requirementCount} distinct requirement${effort.requirementCount === 1 ? "" : "s"} detected`,
+    );
+  }
+  if (effort.implementationSize >= 55) drivers.push("substantial implementation work");
+  if (effort.contextOverhead >= 55) drivers.push("large context and document handling");
+  if (effort.toolOverhead >= 40) drivers.push("tooling and external integration work");
+  if (effort.revisionLoad >= 50) drivers.push("expected debugging and revision cycles");
+
+  const phases = analysis.phases ?? [];
+  if (phases.length >= 6) drivers.push(`${phases.length} execution phases`);
+
+  const iterations = effort.estimatedIterations;
+  if (iterations.max >= 5) {
+    drivers.push(`${iterations.min}–${iterations.max} expected iterations`);
+  }
+
+  // Fall back to the analyser's own drivers if the workload signals are quiet,
+  // so there is always something meaningful to say.
+  if (drivers.length === 0) {
+    return analysis.costDrivers?.length ? analysis.costDrivers.slice(0, 5) : ["a small, well-defined task"];
+  }
+
+  return drivers.slice(0, 6);
 }

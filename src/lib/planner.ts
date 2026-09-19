@@ -8,12 +8,15 @@
  *
  * Everything after that call is LOCAL and deterministic:
  *
- *   cost estimate, recommended maximum, reserve, feasibility,
+ *   task effort, per-phase cost, minimum viable budget, confidence,
+ *   recommended maximum, reserve, feasibility, model suitability,
  *   scope reduction, model recommendation, comparison, execution plan
  *
- * The model is never asked for money. It supplies token estimates and scope
- * judgements; Promgent turns those into CREDIT figures using model metadata.
- * That keeps the product's numbers reproducible and auditable.
+ * The model is never asked for money. It supplies workload signals — effort,
+ * per-phase tokens, iteration ranges — and Promgent turns those into CREDIT
+ * figures using model pricing. That keeps the numbers reproducible, and it
+ * means a complex task cannot collapse into a single-digit estimate just
+ * because its complexity label is generic.
  *
  * If the combined call cannot be used — AGENTFUND_AI_COMBINED=0, or the
  * response fails validation — the pipeline falls back to the two-call path
@@ -21,7 +24,7 @@
  * the models that need it, so no one pays for it by default.
  */
 
-import { AUTO_MODEL_ID, findModelOrThrow } from "@/data/models";
+import { AUTO_MODEL_ID, MODELS, findModelOrThrow } from "@/data/models";
 import { generatePlan } from "@/lib/ai/combined";
 import { aiCombinedEnabled } from "@/lib/ai/env";
 import { analyzeTask } from "@/lib/ai/provider";
@@ -29,6 +32,9 @@ import { generatePrompt } from "@/lib/ai/promptGenerator";
 import { resolveAnswers, answersUsed } from "@/lib/clarifier";
 import { allocatePhaseCosts, estimateCost, formatRange } from "@/lib/estimator/costEstimator";
 import { evaluateFeasibility, planReserve } from "@/lib/estimator/feasibilityEngine";
+import { resolveTaskEffort } from "@/lib/estimator/taskEffort";
+import { evaluateSuitability, selectCapableModel } from "@/lib/models/suitability";
+import { deriveRequirementProfile } from "@/lib/models/capabilities";
 import { buildComparison, selectModel } from "@/lib/models/modelSelector";
 import { applyScopeReduction, optimizeScope } from "@/lib/scopeOptimizer/scopeOptimizer";
 import type {
@@ -51,6 +57,11 @@ export interface PlanRequest {
   clarifyingQuestions?: ClarifyingQuestion[];
   /** Raw user answers keyed by question id. Missing or blank means skipped. */
   clarifyingResponses?: Record<string, string>;
+  /**
+   * True when the user was warned their model is not recommended and chose to
+   * keep it anyway, so the UI can show the override honestly.
+   */
+  keepSelectedModel?: boolean;
 }
 
 /** How the plan was produced, so latency and behaviour can be attributed. */
@@ -131,6 +142,7 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     applyOptimizedScope = false,
     clarifyingQuestions = [],
     clarifyingResponses = {},
+    keepSelectedModel = false,
   } = request;
 
   const started = Date.now();
@@ -157,8 +169,42 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     model: ModelConfig;
     recommendation: PlanResult["recommendation"];
   }> {
-    const recommendation = autoSelected ? selectModel(analysis, budget, optimization) : null;
-    const resolvedModelId = autoSelected ? String(recommendation?.modelId) : modelId;
+    /**
+     * Auto mode picks the cheapest model that is sufficiently capable, using
+     * the capability profile rather than price alone. Price decides between
+     * models that both clear the bar.
+     */
+    let recommendation: PlanResult["recommendation"] = null;
+    let resolvedModelId = modelId;
+
+    if (autoSelected) {
+      const effort = resolveTaskEffort({ analysis, taskDescription });
+      const profile =
+        analysis.requirementProfile ??
+        deriveRequirementProfile({
+          taskType: analysis.taskType,
+          complexity: analysis.complexity,
+          effortScore: effort.score,
+        });
+
+      const capable = selectCapableModel(profile, MODELS, optimization);
+      if (capable) {
+        resolvedModelId = capable.id;
+        recommendation = {
+          modelId: capable.id,
+          displayName: capable.displayName,
+          estimated: 0,
+          reasons: ["Cheapest model that meets this task's capability requirements."],
+        };
+      } else {
+        const fallback = selectModel(analysis, budget, optimization);
+        if (fallback) {
+          resolvedModelId = String(fallback.modelId);
+          recommendation = fallback;
+        }
+      }
+    }
+
     return { model: findModelOrThrow(resolvedModelId), recommendation };
   }
 
@@ -221,7 +267,12 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     retryCount += Math.max(0, analysisResult.attemptCount - 1);
 
     const { model } = await resolveTargetModel(firstAnalysis);
-    const preliminary = estimateCost(firstAnalysis, model, optimization);
+    const preliminary = estimateCost({
+      analysis: firstAnalysis,
+      model,
+      preference: optimization,
+      taskDescription,
+    });
     const generated = await generatePrompt({
       taskDescription,
       analysis: { ...firstAnalysis, phases: allocatePhaseCosts(firstAnalysis, preliminary) },
@@ -249,7 +300,12 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
 
   const { model, recommendation } = await resolveTargetModel(rawAnalysis);
 
-  const preliminary = estimateCost(rawAnalysis, model, optimization);
+  const preliminary = estimateCost({
+    analysis: rawAnalysis,
+    model,
+    preference: optimization,
+    taskDescription,
+  });
   const needsOptimization = preliminary.recommendedMaximum > budget || preliminary.maximum > budget;
 
   let analysis = rawAnalysis;
@@ -265,15 +321,21 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     }
   }
 
-  const cost = estimateCost(analysis, model, optimization);
+  const cost = estimateCost({ analysis, model, preference: optimization, taskDescription });
   const optimizedEstimate = optimizedScope
-    ? estimateCost(applyScopeReduction(rawAnalysis, optimizedScope), model, optimization)
+    ? estimateCost({
+        analysis: applyScopeReduction(rawAnalysis, optimizedScope),
+        model,
+        preference: optimization,
+        taskDescription,
+      })
     : null;
 
   const feasibility = evaluateFeasibility({
     userBudget: budget,
     estimatedMinimum: cost.minimum,
     estimatedMaximum: cost.maximum,
+    minimumViable: cost.minimumViable,
     recommendedMaximum: cost.recommendedMaximum,
     optimized:
       scopeApplied && optimizedEstimate
@@ -292,6 +354,37 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     phases: allocatePhaseCosts(analysis, cost),
   };
 
+  /**
+   * Model suitability, computed independently from budget feasibility:
+   * "can this model do it" and "can the user afford it" are separate verdicts,
+   * so the UI can say whether to switch model, raise budget, or both.
+   */
+  const suitability = evaluateSuitability({
+    model,
+    analysis: analysisWithCosts,
+    taskDescription,
+    candidates: MODELS,
+    explicit: !autoSelected,
+    overridden: keepSelectedModel === true,
+    currentEstimate: cost.maximum,
+  });
+
+  // Cost delta for switching to the suggested model, when one exists.
+  if (suitability.suggestedModelId) {
+    try {
+      const suggested = findModelOrThrow(suitability.suggestedModelId);
+      const suggestedCost = estimateCost({
+        analysis,
+        model: suggested,
+        preference: optimization,
+        taskDescription,
+      });
+      suitability.suggestedDelta = Math.round((suggestedCost.maximum - cost.maximum) * 100) / 100;
+    } catch {
+      // An unknown suggestion must never break the plan.
+    }
+  }
+
   const localDurationMs = Date.now() - localStart;
 
   const plan: PlanResult = {
@@ -309,6 +402,7 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     optimizedScope,
     scopeApplied,
     recommendation,
+    suitability,
     comparison: buildComparison(
       rawAnalysis,
       optimization,

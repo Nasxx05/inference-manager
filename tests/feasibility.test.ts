@@ -10,17 +10,35 @@ describe("budget feasibility", () => {
       recommendedMaximum: 8,
     });
     expect(result.status).toBe("fits");
-    expect(result.headline).toBe("Fits your budget");
+    expect(result.headline).toContain("Fits your budget");
   });
 
-  it("reports fits-with-optimization when the upper end exceeds budget", () => {
+  /**
+   * "Tight" is new: the lower end fits and the budget is above the minimum
+   * viable floor, so the task is possible — but there is little room for
+   * surprise. That is a different situation from being genuinely short.
+   */
+  it("reports tight when the lower end fits but the upper end does not", () => {
     const result = evaluateFeasibility({
       userBudget: 10,
       estimatedMinimum: 9,
       estimatedMaximum: 12,
+      minimumViable: 8,
       recommendedMaximum: 13,
     });
-    expect(result.status).toBe("fits-with-optimization");
+    expect(result.status).toBe("tight");
+    expect(result.headline).toContain("budget is tight");
+  });
+
+  it("reports does-not-fit when the budget is below the minimum viable floor", () => {
+    const result = evaluateFeasibility({
+      userBudget: 10,
+      estimatedMinimum: 9,
+      estimatedMaximum: 12,
+      minimumViable: 14,
+      recommendedMaximum: 13,
+    });
+    expect(result.status).toBe("does-not-fit");
   });
 
   it("reports does-not-fit when even the minimum exceeds budget", () => {
@@ -31,7 +49,7 @@ describe("budget feasibility", () => {
       recommendedMaximum: 21,
     });
     expect(result.status).toBe("does-not-fit");
-    expect(result.headline).toBe("Does not fit your current budget");
+    expect(result.headline).toContain("too low for this scope");
   });
 
   it("reports fits-with-optimization when an optimized estimate fits", () => {
@@ -43,7 +61,7 @@ describe("budget feasibility", () => {
       optimized: { minimum: 8.4, maximum: 9.7, recommendedMaximum: 10 },
     });
     expect(result.status).toBe("fits-with-optimization");
-    expect(result.headline).toBe("Fits with reduced scope");
+    expect(result.headline).toContain("Fits with reduced scope");
   });
 
   it("reports does-not-fit when the optimized estimate still exceeds budget", () => {
