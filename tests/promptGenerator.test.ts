@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { findModelOrThrow } from "@/data/models";
 import { heuristicAnalyze } from "@/lib/ai/taskAnalyzer";
+import { AiError } from "@/lib/ai/errors";
 import {
   MAX_PROMPT_CHARS,
-  PromptGenerationError,
   acceptablePrompt,
   generatePrompt,
   promptProviderConfigured,
@@ -117,13 +117,13 @@ function validPrompt(): string {
 const ORIGINAL_ENV = { ...process.env };
 
 beforeEach(() => {
-  process.env.AI_API_KEY = "test-key";
-  process.env.AI_BASE_URL = "https://example.test/v1";
-  process.env.AI_MODEL = "test-model";
+  process.env.AGENTFUND_AI_API_KEY = "test-key";
+  process.env.AGENTFUND_AI_BASE_URL = "https://example.test/v1";
+  process.env.AGENTFUND_AI_MODEL = "test-model";
   // Small on purpose: these are read per call now, so the values below really
   // do take effect and the retry tests stay fast instead of waiting seconds.
-  process.env.AI_MAX_TOKENS = "32000";
-  process.env.AI_TIMEOUT_MS = "50";
+  process.env.AGENTFUND_AI_MAX_TOKENS = "32000";
+  process.env.AGENTFUND_AI_TIMEOUT_MS = "50";
 });
 
 afterEach(() => {
@@ -134,44 +134,83 @@ afterEach(() => {
 describe("generatePrompt", () => {
   it("reports whether the prompt-writing model is configured", () => {
     expect(promptProviderConfigured()).toBe(true);
-    delete process.env.AI_BASE_URL;
+    delete process.env.AGENTFUND_AI_BASE_URL;
     expect(promptProviderConfigured()).toBe(false);
   });
 
   it("throws when no prompt-writing model is configured, with no fallback", async () => {
-    delete process.env.AI_API_KEY;
+    delete process.env.AGENTFUND_AI_API_KEY;
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(generatePrompt(input())).rejects.toThrow(PromptGenerationError);
+    await expect(generatePrompt(input())).rejects.toThrow(AiError);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses the configured model rather than a hard-coded default", async () => {
+    const fetchMock = stubFetch({ content: validPrompt() });
+    vi.stubGlobal("fetch", fetchMock);
+    process.env.AGENTFUND_AI_MODEL = "another-vendor/some-model";
+
+    await generatePrompt(input());
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.model).toBe("another-vendor/some-model");
+  });
+
+  it("builds the chat endpoint once, without a duplicated path", async () => {
+    const fetchMock = stubFetch({ content: validPrompt() });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await generatePrompt(input());
+
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toBe("https://example.test/v1/chat/completions");
+    expect(url).not.toContain("chat/completions/chat/completions");
+  });
+
+  it("does not duplicate the path when the base URL already ends in it", async () => {
+    const fetchMock = stubFetch({ content: validPrompt() });
+    vi.stubGlobal("fetch", fetchMock);
+    process.env.AGENTFUND_AI_BASE_URL = "https://example.test/v1/chat/completions";
+
+    await generatePrompt(input());
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      "https://example.test/v1/chat/completions",
+    );
   });
 
   it("returns the model-written prompt on a good response", async () => {
     vi.stubGlobal("fetch", stubFetch({ content: validPrompt() }));
-    await expect(generatePrompt(input())).resolves.toBe(`${validPrompt()}\n`);
+    await expect(generatePrompt(input())).resolves.toMatchObject({
+      prompt: `${validPrompt()}\n`,
+    });
   });
 
   it("strips markdown code fences from the response", async () => {
     vi.stubGlobal("fetch", stubFetch({ content: "```markdown\n" + validPrompt() + "\n```" }));
-    await expect(generatePrompt(input())).resolves.toBe(`${validPrompt()}\n`);
+    await expect(generatePrompt(input())).resolves.toMatchObject({
+      prompt: `${validPrompt()}\n`,
+    });
   });
 
-  it("sends a high max_tokens so reasoning cannot starve the content", async () => {
+  it("sends a bounded max_tokens so no model can run unbounded", async () => {
     const fetchMock = stubFetch({ content: validPrompt() });
     vi.stubGlobal("fetch", fetchMock);
 
     await generatePrompt(input());
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    expect(body.max_tokens).toBeGreaterThanOrEqual(16000);
+    expect(body.max_tokens).toBeGreaterThan(0);
+    expect(body.max_tokens).toBeLessThanOrEqual(32000);
     expect(body.model).toBe("test-model");
   });
 
-  it("reads AI_MAX_TOKENS on each call instead of freezing it at startup", async () => {
+  it("reads AGENTFUND_AI_MAX_TOKENS on each call instead of freezing it at startup", async () => {
     const fetchMock = stubFetch({ content: validPrompt() });
     vi.stubGlobal("fetch", fetchMock);
-    process.env.AI_MAX_TOKENS = "21000";
+    process.env.AGENTFUND_AI_MAX_TOKENS = "21000";
 
     await generatePrompt(input());
 
@@ -179,15 +218,15 @@ describe("generatePrompt", () => {
     expect(body.max_tokens).toBe(21000);
   });
 
-  it("falls back to the safe default when AI_MAX_TOKENS is not set", async () => {
+  it("falls back to the documented default when AGENTFUND_AI_MAX_TOKENS is not set", async () => {
     const fetchMock = stubFetch({ content: validPrompt() });
     vi.stubGlobal("fetch", fetchMock);
-    delete process.env.AI_MAX_TOKENS;
+    delete process.env.AGENTFUND_AI_MAX_TOKENS;
 
     await generatePrompt(input());
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    expect(body.max_tokens).toBe(48000);
+    expect(body.max_tokens).toBe(8000);
   });
 
   it("tells the writer which model the prompt is for", async () => {
@@ -230,18 +269,20 @@ describe("generatePrompt", () => {
       });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(generatePrompt(input())).resolves.toBe(`${validPrompt()}\n`);
+    await expect(generatePrompt(input())).resolves.toMatchObject({
+      prompt: `${validPrompt()}\n`,
+    });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("throws when a reasoning model runs out of token budget on both attempts", async () => {
     vi.stubGlobal("fetch", stubFetch({ content: null, finish_reason: "length" }));
-    await expect(generatePrompt(input())).rejects.toThrow(PromptGenerationError);
+    await expect(generatePrompt(input())).rejects.toThrow(AiError);
   });
 
   it("throws when the provider errors", async () => {
     vi.stubGlobal("fetch", stubFetch({ ok: false, status: 500, content: validPrompt() }));
-    await expect(generatePrompt(input())).rejects.toThrow(PromptGenerationError);
+    await expect(generatePrompt(input())).rejects.toThrow(AiError);
   });
 
   it("retries a rate limit instead of treating it as a bad configuration", async () => {
@@ -259,7 +300,9 @@ describe("generatePrompt", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(generatePrompt(input())).resolves.toBe(`${validPrompt()}\n`);
+    await expect(generatePrompt(input())).resolves.toMatchObject({
+      prompt: `${validPrompt()}\n`,
+    });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -268,13 +311,22 @@ describe("generatePrompt", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(generatePrompt(input())).rejects.toMatchObject({
+      code: "AI_AUTH_FAILED",
       retryable: false,
       status: 401,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("marks an out-of-credit account as retryable but records the status", async () => {
+  it("reports an unknown model distinctly and does not retry it", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(generatePrompt(input())).rejects.toMatchObject({ code: "AI_MODEL_UNAVAILABLE" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("records the status on an out-of-credit account", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 402 });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -286,12 +338,14 @@ describe("generatePrompt", () => {
       "fetch",
       vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ choices: [] }) }),
     );
-    await expect(generatePrompt(input())).rejects.toThrow(PromptGenerationError);
+    await expect(generatePrompt(input())).rejects.toThrow(AiError);
   });
 
   it("throws when the network fails", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
-    await expect(generatePrompt(input())).rejects.toThrow(PromptGenerationError);
+    await expect(generatePrompt(input())).rejects.toMatchObject({
+      code: "AI_PROVIDER_UNREACHABLE",
+    });
   });
 
   it("throws when the model writes prose instead of the required structure", async () => {
@@ -305,7 +359,14 @@ describe("generatePrompt", () => {
           "throughout the entire project structure.",
       }),
     );
-    await expect(generatePrompt(input())).rejects.toThrow(PromptGenerationError);
+    await expect(generatePrompt(input())).rejects.toThrow(AiError);
+  });
+
+  it("attaches a requestId to every failure so logs can be correlated", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+    await expect(generatePrompt(input())).rejects.toMatchObject({
+      requestId: expect.stringMatching(/^req_[0-9a-f]+$/),
+    });
   });
 });
 

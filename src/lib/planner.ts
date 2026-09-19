@@ -60,7 +60,9 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
     clarifyingResponses = {},
   } = request;
 
-  const { analysis: rawAnalysis } = await analyzeTask(taskDescription);
+  // Throws a structured AiError if the model is unconfigured or fails: the
+  // pipeline never continues with a substituted analysis.
+  const { analysis: rawAnalysis, model: agentModel } = await analyzeTask(taskDescription);
 
   const clarifyingAnswers: ClarifyingAnswer[] = resolveAnswers(
     clarifyingQuestions,
@@ -118,7 +120,7 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
 
   // The internal model is the only thing that writes the prompt, shaped around
   // the model the user selected. It throws if no usable prompt comes back.
-  const prompt = await generatePrompt({
+  const generated = await generatePrompt({
     taskDescription,
     analysis: analysisWithCosts,
     targetModel: model,
@@ -161,7 +163,10 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
     clarifyingAnswers,
     answersUsed: usedAnswers,
     promptSource: "ai",
-    prompt,
+    prompt: generated.prompt,
+    // Which internal model produced this plan. Diagnostic only: it is not the
+    // user's target model, and it never contains a credential.
+    agentModel,
   };
 }
 

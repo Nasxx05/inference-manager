@@ -1,5 +1,14 @@
 /**
- * Environment access for the AI provider.
+ * Environment access for AgentFund's INTERNAL planning model.
+ *
+ * Two different models are involved in this system and they must never be
+ * confused:
+ *
+ *   AGENTFUND_AI_MODEL  the model that powers AgentFund itself (analysis,
+ *                       cost planning, prompt compilation). Server-side only.
+ *   user's target model  the model the user picked in the UI, which the
+ *                       generated prompt is written FOR. Never a secret, and
+ *                       never used to make AgentFund's own calls.
  *
  * Values set in a hosting dashboard frequently arrive with trailing whitespace
  * or a newline. An API key with a trailing newline is a different string to the
@@ -13,27 +22,93 @@
  * variables and have them actually take effect.
  */
 
+/** Canonical variable names. */
+export const ENV = {
+  API_KEY: "AGENTFUND_AI_API_KEY",
+  BASE_URL: "AGENTFUND_AI_BASE_URL",
+  MODEL: "AGENTFUND_AI_MODEL",
+  MAX_TOKENS: "AGENTFUND_AI_MAX_TOKENS",
+  TIMEOUT_MS: "AGENTFUND_AI_TIMEOUT_MS",
+  FALLBACK_MODEL: "AGENTFUND_AI_FALLBACK_MODEL",
+  ALLOWED_ORIGINS: "ALLOWED_ORIGINS",
+} as const;
+
+/**
+ * Pre-rename names, accepted only as a fallback so an existing deployment keeps
+ * working while the dashboard is updated. The canonical names above always win.
+ *
+ * @deprecated Use the AGENTFUND_AI_* variables.
+ */
+const LEGACY: Record<string, string> = {
+  [ENV.API_KEY]: "AI_API_KEY",
+  [ENV.BASE_URL]: "AI_BASE_URL",
+  [ENV.MODEL]: "AI_MODEL",
+  [ENV.MAX_TOKENS]: "AI_MAX_TOKENS",
+  [ENV.TIMEOUT_MS]: "AI_TIMEOUT_MS",
+};
+
 /** Trims an env var; a missing or all-whitespace value is treated as unset. */
-export function readEnv(name: string): string | undefined {
-  const raw = process.env[name];
-  if (raw === undefined || raw === null) return undefined;
-  const value = String(raw).trim();
-  return value.length ? value : undefined;
+export function readEnv(name: string, legacy?: string): string | undefined {
+  const value = firstDefined(name, legacy);
+  if (value === undefined || value === null) return undefined;
+  const trimmed = String(value).trim();
+  return trimmed.length ? trimmed : undefined;
 }
 
-/** Provider base URL with any trailing slashes removed. Empty when unset. */
+/**
+ * Resolves a value for one variable, preferring its canonical name.
+ *
+ * The decision is made per variable, deliberately. Coupling them (e.g. "ignore
+ * all legacy names once any canonical name exists") produces two different
+ * bugs: a deployment that sets the canonical key and URL but forgets
+ * AGENTFUND_AI_MODEL would silently inherit a stale AI_MODEL from an old
+ * dashboard entry, and a deployment that adopts only some variables would lose
+ * the rest. Per variable, the rule is simply: use the canonical value if it is
+ * set, otherwise fall back to the legacy one for that same setting.
+ */
+function firstDefined(name: string, legacy?: string): string | undefined {
+  const primary = process.env[name];
+  if (primary !== undefined && primary !== null && String(primary).trim()) {
+    return String(primary);
+  }
+  if (!legacy) return undefined;
+  const old = process.env[legacy];
+  return old === undefined || old === null ? undefined : String(old);
+}
+
+/**
+ * Provider API base with any trailing slashes removed. Empty when unset.
+ *
+ * This is the API *base*, never the final endpoint: the single place that
+ * appends `/chat/completions` is `chatCompletionsUrl()` in ./chatClient.
+ */
 export function aiBaseUrl(): string {
-  return (readEnv("AI_BASE_URL") ?? "").replace(/\/+$/, "");
+  return (readEnv(ENV.BASE_URL, LEGACY[ENV.BASE_URL]) ?? "").replace(/\/+$/, "");
 }
 
-/** The API key, or undefined when unset or blank. */
+/** The API key, or undefined when unset or blank. Never logged, never returned. */
 export function aiApiKey(): string | undefined {
-  return readEnv("AI_API_KEY");
+  return readEnv(ENV.API_KEY, LEGACY[ENV.API_KEY]);
 }
 
-/** Model id, falling back to a safe default. */
-export function aiModel(): string {
-  return readEnv("AI_MODEL") ?? "gpt-4o-mini";
+/**
+ * The configured model id, or undefined when unset.
+ *
+ * There is deliberately no hard-coded default: guessing a model name would
+ * make an unconfigured deployment look configured and fail deep inside the
+ * provider call. The caller treats "unset" as BACKEND_NOT_CONFIGURED.
+ */
+export function aiModel(): string | undefined {
+  return readEnv(ENV.MODEL, LEGACY[ENV.MODEL]);
+}
+
+/**
+ * Optional secondary model, used only when the primary is confirmed
+ * unavailable. It is never a silent substitution: every use is recorded in the
+ * result and the logs.
+ */
+export function aiFallbackModel(): string | undefined {
+  return readEnv(ENV.FALLBACK_MODEL);
 }
 
 /**
@@ -41,14 +116,66 @@ export function aiModel(): string {
  * number. Guards against NaN (which JSON.stringify turns into null and the
  * provider rejects) and against non-positive values.
  */
-export function aiNumber(name: string, fallback: number): number {
-  const raw = readEnv(name);
+export function aiNumber(name: string, fallback: number, legacy?: string): number {
+  const raw = readEnv(name, legacy);
   if (raw === undefined) return fallback;
   const value = Number(raw);
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-/** True when both a key and a base URL are present. Never contacts the provider. */
+/**
+ * Output token cap. Kept modest by default: the analyzer and the prompt writer
+ * both produce focused structured output, and a huge cap invites a reasoning
+ * model to spend the entire budget thinking and return no content.
+ */
+export function aiMaxTokens(): number {
+  return Math.round(aiNumber(ENV.MAX_TOKENS, 8000, LEGACY[ENV.MAX_TOKENS]));
+}
+
+/** Per-attempt request budget. Every call is bounded; nothing waits forever. */
+export function aiTimeoutMs(): number {
+  return Math.round(aiNumber(ENV.TIMEOUT_MS, 120000, LEGACY[ENV.TIMEOUT_MS]));
+}
+
+/** True when key, base URL and model are all present. Never contacts the provider. */
 export function aiProviderConfigured(): boolean {
-  return Boolean(aiApiKey() && aiBaseUrl());
+  return Boolean(aiApiKey() && aiBaseUrl() && aiModel());
+}
+
+/**
+ * Which of the required variables are missing. Used to turn "not configured"
+ * into a specific, actionable message instead of a generic failure.
+ */
+export function missingConfig(): string[] {
+  const missing: string[] = [];
+  if (!aiApiKey()) missing.push(ENV.API_KEY);
+  if (!aiBaseUrl()) missing.push(ENV.BASE_URL);
+  if (!aiModel()) missing.push(ENV.MODEL);
+  return missing;
+}
+
+/**
+ * True when any legacy AI_* name is still supplying a value.
+ *
+ * Reported at startup so a pending rename is visible rather than silent. It is
+ * purely advisory: it never changes which value is used.
+ */
+export function usingLegacyEnvNames(): boolean {
+  return [
+    [ENV.API_KEY, LEGACY[ENV.API_KEY]],
+    [ENV.BASE_URL, LEGACY[ENV.BASE_URL]],
+    [ENV.MODEL, LEGACY[ENV.MODEL]],
+    [ENV.MAX_TOKENS, LEGACY[ENV.MAX_TOKENS]],
+    [ENV.TIMEOUT_MS, LEGACY[ENV.TIMEOUT_MS]],
+  ].some(([canonical, legacy]) => valueFromLegacyName(canonical, legacy));
+}
+
+/** True when this one value exists only under its legacy name. */
+export function valueFromLegacyName(name: string, legacy?: string): boolean {
+  if (!legacy) return false;
+  return !isSet(process.env[name]) && isSet(process.env[legacy]);
+}
+
+function isSet(value: string | undefined): boolean {
+  return value !== undefined && value !== null && String(value).trim().length > 0;
 }

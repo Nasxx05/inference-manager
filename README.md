@@ -48,14 +48,15 @@ npm run dev
 
 Open http://localhost:3000.
 
-Locally the backend reads `AI_*` from the root `.env.local` on startup (a plain
-Node process does not do this by itself). Values already present in the real
-environment are never overwritten, so the same code is driven by the Render
-dashboard in production and by `.env.local` on your machine. The startup log
-prints `Env files loaded: ...` (or `none`) so you can see which one is in play.
+Locally the backend reads the `AGENTFUND_AI_*` values from the root `.env.local`
+on startup (a plain Node process does not do this by itself). Values already
+present in the real environment are never overwritten, so the same code is
+driven by the Render dashboard in production and by `.env.local` on your
+machine. The startup log prints `Env files loaded: ...` (or `none`) so you can
+see which one is in play.
 
 ```bash
-npm test           # 109 tests
+npm test           # 127 tests
 npm run build
 ```
 
@@ -69,7 +70,7 @@ a few minutes, and a serverless function would time out long before it finished.
 | Platform | Vercel | Render |
 | Code | repo root | `server/` |
 | Type | Next.js, fully static | Express web service |
-| Holds | no credentials | `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL` |
+| Holds | no credentials | `AGENTFUND_AI_API_KEY`, `AGENTFUND_AI_BASE_URL`, `AGENTFUND_AI_MODEL` |
 | Does | UI, cost math, model choice | task analysis, prompt writing |
 
 The browser calls the backend **directly**, so Vercel is never in the path of the
@@ -85,22 +86,77 @@ slow request and no platform timeout applies.
 
    | Name | Value |
    |---|---|
-   | `AI_BASE_URL` | provider base URL, e.g. `https://api.orbio.so/api/v1` |
-   | `AI_API_KEY` | key for the internal planner |
-   | `AI_MODEL` | model id, e.g. `tencent/hy4-preview` |
-   | `AI_MAX_TOKENS` | optional, defaults to `48000` |
-   | `AI_TIMEOUT_MS` | optional, per-attempt budget, defaults to `240000` |
+   | `AGENTFUND_AI_BASE_URL` | provider API base, e.g. `https://api.example.com/v1` |
+   | `AGENTFUND_AI_API_KEY` | key for AgentFund's internal model |
+   | `AGENTFUND_AI_MODEL` | model id, e.g. `tencent/hy4-preview` |
+   | `AGENTFUND_AI_MAX_TOKENS` | optional, defaults to `8000` |
+   | `AGENTFUND_AI_TIMEOUT_MS` | optional, per-attempt budget, defaults to `120000` |
+   | `AGENTFUND_AI_FALLBACK_MODEL` | optional, used only if the primary is unavailable |
    | `ALLOWED_ORIGINS` | optional, e.g. `https://your-app.vercel.app` |
 
-   `ALLOWED_ORIGINS` restricts which browsers may call the API. Leave it empty to
-   allow any origin.
+   `ALLOWED_ORIGINS` restricts which browsers may call the API. Leave it empty
+   to allow any origin — fine locally, but set it in production.
 
-Check it with `/health` once deployed — it reports whether the provider is
-configured, without contacting the provider itself, so a provider outage never
-makes Render think the instance is unhealthy. `providerConfigured:false` with
-`apiKeyPresent:false` means the variable did not reach the process: check for a
-typo in the name, a value that is empty or has a trailing newline, and that you
-saved the change and let the service redeploy.
+   The base URL is the API **base**, not the endpoint. The backend appends
+   `/chat/completions` itself, exactly once; do not include it here.
+
+   The old `AI_*` names still work if the `AGENTFUND_AI_*` ones are unset, but
+   a stale `AI_MODEL` never overrides `AGENTFUND_AI_MODEL`. Rename when you can:
+   the startup log warns while legacy names are in use.
+
+### The internal model is configurable
+
+`AGENTFUND_AI_MODEL` powers AgentFund itself: task analysis, cost planning,
+scope optimization and prompt compilation. It is completely separate from the
+**target model** the user picks in the UI — AgentFund can internally use one
+vendor's model while writing a prompt optimized for another.
+
+No model is hard-coded. Changing `AGENTFUND_AI_MODEL` alone switches the
+internal model; any model compatible with the configured OpenAI-style provider
+works. Where a model needs an optional parameter, it is supplied by
+`getCompatibleRequestOptions()` and nowhere else, so the rest of the system
+stays model-independent.
+
+### Checking the deployment
+
+Two separate probes, so a provider outage is never mistaken for a dead backend:
+
+```bash
+curl https://your-service.onrender.com/health      # the backend itself
+curl https://your-service.onrender.com/health/ai   # the provider connection
+curl https://your-service.onrender.com/health/ai/test  # trivial echo test
+```
+
+`/health` never contacts the provider, so Render will not kill a healthy
+instance during a provider outage. It reports `providerConfigured`,
+`apiKeyPresent` (presence only, never the value), `modelConfigured`, `model`,
+and a `missing` list naming exactly which variables are absent.
+
+`/health/ai` checks the connection end to end and returns:
+
+```json
+{
+  "status": "ok",
+  "providerConfigured": true,
+  "providerReachable": true,
+  "modelConfigured": true,
+  "modelAvailable": true,
+  "model": "configured-model-id"
+}
+```
+
+It verifies the configured model against the provider's model list rather than
+assuming it is valid, then sends a trivial request expecting the exact string
+`AGENTFUND_TEST_OK`. That echo test separates provider problems from
+prompt-generation problems: if it passes but `/api/plan` fails, the fault is in
+prompt generation, not the connection.
+
+Troubleshooting order: key present → base URL present → model present → model
+exists → provider reachable → test request succeeds. `modelAvailable:false`
+means the configured id is not in the provider's list. `providerConfigured:
+false` with a non-empty `missing` list means the variables never reached the
+process: check for a typo, an empty value, or a trailing newline, and redeploy
+after saving.
 
 ### Frontend on Vercel
 
@@ -126,8 +182,25 @@ Notes:
 - No database, auth, or external integrations are required to deploy.
 - Recent history is `localStorage`, so it is per-browser and not shared between visitors.
 - `.env.example` documents the variables; never commit a real `.env` (already gitignored).
+- In production the frontend fails clearly if `NEXT_PUBLIC_BACKEND_URL` is
+  missing rather than silently calling localhost.
 - On Render's free tier the instance sleeps when idle, so the first request after
   a pause can take an extra ~30s to wake it.
+
+### Verifying a deployment end to end
+
+Test in this order, so a failure points at the right layer:
+
+1. `GET /health` — backend is up and configured.
+2. `GET /health/ai` — model exists and the provider answers.
+3. `GET /health/ai/test` — the trivial echo returns `AGENTFUND_TEST_OK`.
+4. `POST /api/clarify` — task analysis.
+5. `POST /api/plan` — the full pipeline, including prompt generation.
+6. The Vercel frontend.
+
+To confirm the backend really is model-agnostic, set `AGENTFUND_AI_MODEL` to a
+different valid id and repeat steps 2, 3 and 5. No code change is involved: if
+the same build works, nothing is pinned to one vendor.
 
 ## The loop
 
@@ -153,7 +226,7 @@ COPY PROMPT
 
 ```
 server/                 BACKEND - Express on Render. Owns the AI credentials.
-  src/index.ts          /health, /api/clarify, /api/plan
+  src/index.ts          /health, /health/ai, /health/ai/test, /api/clarify, /api/plan
   scripts/              Post-build fix so the compiled ESM runs on plain Node
   Compiles the shared lib/ below together with its own entry point.
 
@@ -164,6 +237,13 @@ src/
   data/models.ts        Extensible model metadata (pricing, capabilities, context window)
   lib/
     ai/                 Internal model client: task analysis + prompt writing
+      env.ts            AGENTFUND_AI_* configuration, read per call, trimmed
+      errors.ts         Error codes, request ids, retry classification
+      chatClient.ts     Generic OpenAI-compatible adapter (the only HTTP caller)
+      health.ts         Provider diagnostics and the AGENTFUND_TEST_OK echo test
+      provider.ts       Task analysis, validated, never silently falls back
+      promptGenerator.ts Prompt compilation, validated, one controlled retry
+      taskAnalyzer.ts   Deterministic normalizer for fields the model omits
     backend.ts          Resolves the backend URL the browser calls
     clarifier/          Task-specific clarifying questions, defaults, answer resolution
     estimator/          Cost estimation and budget feasibility
@@ -212,31 +292,54 @@ REQUIREMENTS, ASSUMED DEFAULTS, STRUCTURE AND ARCHITECTURE, SCOPE, OUT OF SCOPE,
 EXECUTION STRATEGY, CONSTRAINTS, BUDGET CONSTRAINT, VALIDATION, REVISION POLICY, STOPPING
 CONDITIONS, OUTPUT FORMAT).
 
-The prompt is **always** model-written — there is no local compiler. A failed attempt is retried
-up to three times, and if it still fails the request returns an error rather than a degraded
-prompt, so the user is told instead of being handed something weaker than they asked for.
-Permanent problems (a bad key, a malformed request) are not retried; transient ones (a rate
-limit, a busy provider) are, and each cause gets its own message rather than all collapsing into
-"check your configuration".
+The prompt is **always** model-written — there is no local compiler, and no
+heuristic substitute. If the model fails or returns something unusable, the
+request fails loudly with a structured error; the user is never handed a degraded
+prompt that looks like success.
+
+Retries are strictly bounded: at most one retry, and only for failures that can
+plausibly clear (a rate limit, a timeout, a 502/503, a temporary network fault).
+A bad key, an unknown model or a malformed request is never retried, because it
+can only delay the same answer. Every request is bounded by
+`AGENTFUND_AI_TIMEOUT_MS`, so a slow provider cannot hold a call open.
 
 Configure it on the backend via server-side env vars (see `.env.example`):
 
 ```
-AI_BASE_URL=...
-AI_API_KEY=...
-AI_MODEL=...
-AI_MAX_TOKENS=48000
-AI_TIMEOUT_MS=240000
+AGENTFUND_AI_BASE_URL=...
+AGENTFUND_AI_API_KEY=...
+AGENTFUND_AI_MODEL=...
+AGENTFUND_AI_MAX_TOKENS=8000
+AGENTFUND_AI_TIMEOUT_MS=120000
 ```
 
 These live on Render, never on Vercel, and are never exposed to the browser.
 
+### Error contract and observability
+
+Every failure uses one shape, and raw provider text is never forwarded:
+
+```json
+{ "success": false, "error": { "code": "AI_TIMEOUT", "message": "...", "requestId": "req_abc123" } }
+```
+
+Codes: `BACKEND_NOT_CONFIGURED`, `AI_PROVIDER_UNREACHABLE`, `AI_AUTH_FAILED`,
+`AI_MODEL_UNAVAILABLE`, `AI_RATE_LIMITED`, `AI_TIMEOUT`, `AI_INVALID_RESPONSE`,
+`AI_VALIDATION_FAILED`, `AI_UNKNOWN_ERROR`.
+
+Every AI call is assigned a `requestId`, returned in errors and logged in one
+structured line: timestamp, requestId, endpoint, model, duration, success, HTTP
+status and error code. Nothing sensitive is logged — no key, no Authorization
+header, no prompt body.
+
 ### Note on reasoning models
 
-The default internal model (`tencent/hy4-preview` via Orbio) reasons before it writes, and the
-reasoning shares the same token budget. Given a low `max_tokens`, reasoning consumes everything and
-the response contains **no content at all** — only reasoning. Observed: ~37k reasoning tokens
-before ~3k of content. `AI_MAX_TOKENS` must stay high, and a request can take 2–3 minutes, which is
+Some models reason before they write, and reasoning shares the same token
+budget: given a low `max_tokens`, reasoning can consume everything and the
+response comes back with **no content at all**. `AGENTFUND_AI_MAX_TOKENS` is
+therefore kept high enough to leave headroom, and reasoning models are given a
+low `reasoning_effort` through `getCompatibleRequestOptions()` — the only place
+any model-specific parameter is set. Reasoning models can also be slow, which is
 why the timeout is generous and the UI shows a "Writing your prompt..." state.
 
 ## Explicitly not included
@@ -245,9 +348,9 @@ No wallet, seed phrase, API-key input in the browser, CREDIT transfer, agent mar
 marketplace, autonomous execution, or chatbot UI. CREDIT is a user-provided planning budget, not
 a balance.
 
-The Orbio connection is AgentFund's own internal planning and prompt-writing model. It is
-server-side only, configured by the operator, and never surfaced to the user — the user never
-enters an API key, and the app never touches a wallet or executes a task.
+The internal planning and prompt-writing model is server-side only, configured by
+the operator through `AGENTFUND_AI_*`, and never surfaced to the user — the user
+never enters an API key, and the app never touches a wallet or executes a task.
 
 ## Notes
 

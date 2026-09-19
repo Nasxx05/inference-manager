@@ -112,28 +112,37 @@ export function Workspace() {
           }),
         });
 
-        const payload = (await response.json()) as { plan?: PlanResult; error?: string };
+        const payload = (await response.json()) as {
+          success: boolean;
+          data?: PlanResult;
+          error?: { code?: string; message?: string; requestId?: string };
+        };
 
-        if (!response.ok || !payload.plan) {
-          setError(payload.error ?? "We couldn't analyze this task. Please try again.");
+        const plan = payload.success ? payload.data : undefined;
+        if (!response.ok || !plan) {
+          // The backend returns a specific, human-readable message for every
+          // failure mode. Only fall back to a generic line if it is absent.
+          setError(
+            payload.error?.message ?? "We couldn't analyze this task. Please try again.",
+          );
           return;
         }
 
-        setPlan(payload.plan);
+        setPlan(plan);
         setValues((v) => ({ ...v, optimization: merged.optimization }));
         setQuestions(null);
         setAnswers({});
         setClarifying(false);
 
         const entry: HistoryEntry = {
-          id: payload.plan.id,
-          taskName: planToHistoryName(payload.plan),
-          modelId: payload.plan.modelId,
-          budget: payload.plan.budget,
-          estimatedCost: formatRange(payload.plan.cost.minimum, payload.plan.cost.maximum),
-          optimization: payload.plan.optimization,
-          prompt: payload.plan.prompt,
-          timestamp: payload.plan.createdAt,
+          id: plan.id,
+          taskName: planToHistoryName(plan),
+          modelId: plan.modelId,
+          budget: plan.budget,
+          estimatedCost: formatRange(plan.cost.minimum, plan.cost.maximum),
+          optimization: plan.optimization,
+          prompt: plan.prompt,
+          timestamp: plan.createdAt,
         };
         setHistory(saveEntry(entry));
       } catch {
@@ -162,17 +171,21 @@ export function Workspace() {
         body: JSON.stringify({ taskDescription: values.taskDescription.trim() }),
       });
       const payload = (await response.json()) as {
-        questions?: ClarifyingQuestion[];
-        error?: string;
+        success: boolean;
+        data?: { questions?: ClarifyingQuestion[] };
+        error?: { code?: string; message?: string };
       };
 
-      if (!response.ok || !payload.questions || payload.questions.length === 0) {
-        // No questions available: fall straight through to the old behaviour.
+      const questions = payload.success ? payload.data?.questions : undefined;
+      if (!response.ok || !questions || questions.length === 0) {
+        // No usable questions: fall straight through to planning. A provider
+        // failure here is not fatal on its own, since planning will surface the
+        // real error if the model is genuinely unreachable.
         void analyze();
         return;
       }
 
-      setQuestions(payload.questions);
+      setQuestions(questions);
       setAnswers({});
       setClarifying(true);
     } catch {

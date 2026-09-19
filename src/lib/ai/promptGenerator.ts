@@ -1,3 +1,22 @@
+/**
+ * AgentFund's INTERNAL prompt-writing model.
+ *
+ * It takes everything collected from the user and writes the final prompt,
+ * shaped for the specific model the user selected. It never executes the task.
+ *
+ * This is the ONLY path that produces a prompt. There is no local compiler and
+ * no degraded substitute: a failed attempt is retried once, and if it still
+ * fails the request errors so the user is told rather than handed something
+ * weaker than they asked for.
+ *
+ * All provider access goes through ./chatClient, so nothing here knows which
+ * model or provider is configured. Writing is generic; only the *content* is
+ * tailored, based on the target model's declared capabilities.
+ */
+
+import { chat } from "./chatClient";
+import { AiError, toAiError } from "./errors";
+import { aiMaxTokens, aiProviderConfigured, missingConfig } from "./env";
 import type {
   ClarifyingAnswer,
   CostEstimate,
@@ -5,29 +24,23 @@ import type {
   OptimizationPreference,
   TaskAnalysis,
 } from "@/types";
-import { aiApiKey, aiBaseUrl, aiModel, aiNumber, aiProviderConfigured } from "./env";
-
-/**
- * AgentFund's INTERNAL prompt-writing model. It takes everything collected
- * from the user and writes the final prompt, shaped for the specific model
- * the user selected. It never executes the task.
- *
- * This is the ONLY path that produces a prompt. There is no local fallback:
- * a failed attempt is retried, and if it still fails the request errors so
- * the user is told rather than handed a degraded prompt.
- *
- * Configured server-side only (AI_API_KEY / AI_BASE_URL / AI_MODEL).
- */
 
 export interface PromptDraftInput {
   taskDescription: string;
   analysis: TaskAnalysis;
-  /** The model the user will actually run the prompt on. */
+  /** The model the user will actually run the prompt on. Never AgentFund's own. */
   targetModel: ModelConfig;
   optimization: OptimizationPreference;
   budget: number;
   cost: Pick<CostEstimate, "minimum" | "maximum" | "recommendedMaximum">;
   clarifyingAnswers: ClarifyingAnswer[];
+}
+
+export interface PromptResult {
+  prompt: string;
+  model: string;
+  requestId: string;
+  durationMs: number;
 }
 
 const SECTIONS = [
@@ -82,55 +95,27 @@ Quality bar:
 - Keep it tight and useful. Around 500-900 words. Never pad.
 - Stay under 6000 characters total.`;
 
-export class PromptGenerationError extends Error {
-  /** False for failures that will not improve on a retry (bad key, bad request). */
-  readonly retryable: boolean;
-
-  /** The HTTP status, when the failure came from a provider response. */
-  readonly status?: number;
-
-  constructor(message: string, retryable = true, status?: number) {
-    super(message);
-    this.name = "PromptGenerationError";
-    this.retryable = retryable;
-    this.status = status;
-  }
-}
-
 export function promptProviderConfigured(): boolean {
   return aiProviderConfigured();
 }
 
 /**
- * Read at call time, not module load. The backend is a long-lived process, so
- * a constant captured here would freeze the value at startup and ignore any
- * change to the environment. Reading per call also lets tests set these vars
- * and have them actually take effect.
+ * Notes for the writer, derived from the target model's declared metadata.
  *
- * The reasoning shares the token budget: observed ~37k reasoning tokens before
- * ~3k of content. With a low cap the reasoning consumes everything and
- * `content` comes back null, so the default leaves a wide margin.
+ * Generic on purpose: capability tier and context window are properties every
+ * model has, so the phrasing adapts without branching on a model id.
  */
-function maxTokens(): number {
-  return aiNumber("AI_MAX_TOKENS", 48000);
-}
-
-/**
- * Per-attempt budget. A real prompt takes ~150s end to end, so this must be
- * generous enough for one attempt to finish. Total worst case is bounded by
- * the caller, not by retrying forever.
- */
-function timeoutMs(): number {
-  return aiNumber("AI_TIMEOUT_MS", 240000);
-}
-
 function modelNotes(model: ModelConfig): string {
   const tier =
     {
-      light: "a lightweight model: keep instructions simple, explicit and sequential. Avoid relying on it to infer unstated intent.",
-      standard: "a balanced model: normal direct instruction works well. State non-obvious expectations explicitly.",
-      advanced: "a strong model: you can rely on it for multi-step reasoning and architectural judgement, but keep requirements unambiguous.",
-      frontier: "a frontier model: you can rely on it to make sound architectural and judgement calls from a well-framed brief.",
+      light:
+        "a lightweight model: keep instructions simple, explicit and sequential. Avoid relying on it to infer unstated intent.",
+      standard:
+        "a balanced model: normal direct instruction works well. State non-obvious expectations explicitly.",
+      advanced:
+        "a strong model: you can rely on it for multi-step reasoning and architectural judgement, but keep requirements unambiguous.",
+      frontier:
+        "a frontier model: you can rely on it to make sound architectural and judgement calls from a well-framed brief.",
     }[model.capabilityTier] ?? "a general model.";
 
   const context =
@@ -165,7 +150,9 @@ function userMessage(input: PromptDraftInput): string {
     `Required capabilities: ${analysis.requiredCapabilities.join(", ") || "none specified"}`,
     `Expected iterations: ${analysis.expectedIterations}`,
     analysis.phases.length
-      ? `Planned phases:\n${analysis.phases.map((p) => `- ${p.name}: ${p.description} [${p.priority}]`).join("\n")}`
+      ? `Planned phases:\n${analysis.phases
+          .map((p) => `- ${p.name}: ${p.description} [${p.priority}]`)
+          .join("\n")}`
       : "Planned phases: none",
     analysis.risks.length ? `Risks: ${analysis.risks.join("; ")}` : "Risks: none identified",
     "",
@@ -198,28 +185,51 @@ function stripFences(text: string): string {
 export const MIN_PROMPT_CHARS = 400;
 
 /**
- * Upper bound on a usable prompt. Generous on purpose: a reasoning model can
- * legitimately write a long-but-valid prompt, and rejecting it would discard
- * work that took minutes to produce.
+ * Upper bound on a usable prompt. Generous on purpose: a long-but-valid prompt
+ * should not be discarded, but a runaway response is not a prompt.
  */
 export const MAX_PROMPT_CHARS = 40000;
 
+/**
+ * Section concepts that must be present.
+ *
+ * Checked case-insensitively and allowing internal whitespace differences:
+ * "Outof Scope" or "OUT OF SCOPE" both pass. A minor formatting difference must
+ * not reject a valid prompt, but the required concepts must all exist.
+ */
+export const REQUIRED_CONCEPTS = [
+  "role",
+  "objective",
+  "context",
+  "requirements",
+  "scope",
+  "outofscope",
+  "priorities",
+  "executionstrategy",
+  "constraints",
+  // Required in its own right, not merely as part of "constraints": the budget
+  // is the point of AgentFund, and a prompt that never states it is not an
+  // AgentFund prompt.
+  "budgetconstraint",
+  "validation",
+  "revisionpolicy",
+  "stoppingconditions",
+  "outputformat",
+] as const;
+
+/** Collapses case and spacing so header formatting can vary. */
+export function sectionKey(text: string): string {
+  return text.toLowerCase().replace(/[\s_-]+/g, "");
+}
+
 /** Keeps the model from returning an essay or a fragment. */
 export function acceptablePrompt(prompt: string): boolean {
-  if (!prompt || prompt.length < MIN_PROMPT_CHARS || prompt.length > MAX_PROMPT_CHARS) return false;
-  const mandatory = [
-    "ROLE",
-    "OBJECTIVE",
-    "REQUIREMENTS",
-    "SCOPE",
-    "CONSTRAINTS",
-    "BUDGET CONSTRAINT",
-    "VALIDATION",
-    "OUTPUT FORMAT",
-  ];
-  if (!mandatory.every((s) => prompt.includes(s))) return false;
+  if (!prompt || prompt.length < MIN_PROMPT_CHARS || prompt.length > MAX_PROMPT_CHARS) {
+    return false;
+  }
+  const normalized = sectionKey(prompt);
+  if (!REQUIRED_CONCEPTS.every((concept) => normalized.includes(concept))) return false;
   // Must start at the first section rather than with conversational preamble.
-  // A stray blank line or markdown heading is tolerated; real prose is not.
   const head = prompt.trimStart();
   return head.startsWith("ROLE") || /^#{0,6}\s*ROLE\b/.test(head);
 }
@@ -231,116 +241,91 @@ function trimToStart(prompt: string): string {
   return prompt.slice(index).trimStart();
 }
 
-async function attempt(input: PromptDraftInput): Promise<string> {
-  const baseUrl = aiBaseUrl();
-  const model = aiModel();
-  const apiKey = aiApiKey();
-
-  // Preflight: a blank or whitespace-only key would otherwise be sent as
-  // "Bearer " and come back as a 401, which reads like a bad key when the real
-  // problem is that the key was never set (or was set to empty on the host).
-  if (!apiKey) {
-    throw new PromptGenerationError("No prompt-model API key is configured", false, 401);
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs());
-
-  try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        // Low: this model reasons before writing, and a higher temperature
-        // lengthens the reasoning chain, which both slows the call down and
-        // eats the shared token budget.
-        temperature: 0.2,
-        max_tokens: maxTokens(),
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userMessage(input) },
-        ],
-      }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      // Not every 4xx is a bad request. 429 (rate limit) and 408/409 are
-      // transient and often clear within a retry or two, and 402 means the
-      // account is out of credit rather than misconfigured. Only treat the
-      // genuinely terminal codes - 401/403 (bad key) and 400/404/422 (our
-      // request is wrong) - as non-retryable, so a rate limit is not reported
-      // to the user as a configuration problem.
-      const terminal = [400, 401, 403, 404, 422].includes(response.status);
-      throw new PromptGenerationError(
-        `Prompt model returned ${response.status}`,
-        !terminal,
-        response.status,
-      );
-    }
-
-    const payload = (await response.json()) as {
-      choices?: Array<{
-        finish_reason?: string | null;
-        message?: { content?: string | null };
-      }>;
+type Attempt =
+  | { ok: true; result: PromptResult }
+  | {
+      ok: false;
+      error: AiError;
+      /**
+       * True when the provider answered but the content was unusable. False
+       * when the failure came out of `chat()`, which has already spent its one
+       * retry on transport, timeouts and transient statuses.
+       */
+      contentLevel: boolean;
     };
-    const choice = payload.choices?.[0];
-    const content = choice?.message?.content;
 
-    // A reasoning model that runs out of budget returns null content while
-    // reporting finish_reason "length". Treat that as unusable, not empty.
-    if (!content || choice?.finish_reason === "length") {
-      throw new PromptGenerationError("Prompt model ran out of its token budget");
-    }
-
-    // Salvage a good body that merely opens with preamble before ROLE.
-    const prompt = trimToStart(stripFences(content));
-    if (!acceptablePrompt(prompt)) {
-      throw new PromptGenerationError("Prompt model returned an unusable structure");
-    }
-    return `${prompt}\n`;
+async function attempt(input: PromptDraftInput): Promise<Attempt> {
+  let result;
+  try {
+    result = await chat({
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: userMessage(input) },
+      ],
+      maxTokens: aiMaxTokens(),
+      temperature: 0.2,
+    });
   } catch (error) {
-    if (error instanceof PromptGenerationError) throw error;
-    throw new PromptGenerationError("Prompt model request failed");
-  } finally {
-    clearTimeout(timer);
+    // chat() already retried once for transient faults. Retrying here too would
+    // quietly turn "one retry" into several, so this is final.
+    return { ok: false, error: toAiError(error), contentLevel: false };
   }
-}
 
-const MAX_ATTEMPTS = 3;
+  // A model that exhausts its budget reports finish_reason "length" and returns
+  // a truncated prompt. That is unusable, not merely short.
+  if (result.finishReason === "length") {
+    return {
+      ok: false,
+      contentLevel: true,
+      error: new AiError(
+        "AI_INVALID_RESPONSE",
+        "The prompt model ran out of output budget before finishing the prompt.",
+        { retryable: true, requestId: result.requestId },
+      ),
+    };
+  }
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  const prompt = trimToStart(stripFences(result.content));
+  if (!acceptablePrompt(prompt)) {
+    return {
+      ok: false,
+      contentLevel: true,
+      error: new AiError(
+        "AI_VALIDATION_FAILED",
+        "The prompt model returned something that is not a usable AgentFund prompt.",
+        { retryable: true, requestId: result.requestId },
+      ),
+    };
+  }
+
+  return { ok: true, result: { prompt: `${prompt}\n`, ...result } };
 }
 
 /**
- * Writes the prompt with the internal model. Retries up to MAX_ATTEMPTS,
- * because a reasoning model occasionally returns an empty or malformed body.
- * Failures flagged non-retryable (a 4xx) stop immediately. Throws
- * `PromptGenerationError` when no usable prompt can be produced.
+ * Writes the prompt with the configured model.
+ *
+ * At most two provider round trips in total. `chat()` spends its single retry
+ * on transport, timeout and transient-status failures; this spends one further
+ * attempt only when the provider replied with content that failed validation.
+ * The two never stack, so a failing provider is never hammered.
+ *
+ * Throws `AiError` when no usable prompt can be produced: the caller reports a
+ * real failure rather than returning a degraded prompt.
  */
-export async function generatePrompt(input: PromptDraftInput): Promise<string> {
-  if (!promptProviderConfigured()) {
-    throw new PromptGenerationError("No prompt-writing model is configured", false);
+export async function generatePrompt(input: PromptDraftInput): Promise<PromptResult> {
+  if (!aiProviderConfigured()) {
+    throw new AiError(
+      "BACKEND_NOT_CONFIGURED",
+      `AgentFund's model is not configured. Missing: ${missingConfig().join(", ")}.`,
+    );
   }
 
-  let lastError: unknown;
-  for (let i = 0; i < MAX_ATTEMPTS; i += 1) {
-    try {
-      return await attempt(input);
-    } catch (error) {
-      lastError = error;
-      if (error instanceof PromptGenerationError && !error.retryable) break;
-      // Brief pause so a rate limit or transient fault can clear.
-      if (i < MAX_ATTEMPTS - 1) await wait(1500 * (i + 1));
-    }
-  }
-  throw lastError instanceof Error
-    ? lastError
-    : new PromptGenerationError("Prompt model request failed");
+  const first = await attempt(input);
+  if (first.ok) return first.result;
+  // Transport-level failures were already retried once inside chat().
+  if (!first.contentLevel) throw first.error;
+
+  const second = await attempt(input);
+  if (second.ok) return second.result;
+  throw second.error;
 }

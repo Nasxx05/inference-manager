@@ -1,16 +1,35 @@
+/**
+ * AgentFund's INTERNAL planning model: task analysis.
+ *
+ * Separate from the user's target model — this only plans and compiles, it
+ * never executes the task, and it is never the model the prompt is written for.
+ *
+ * FAILURE IS NEVER DISGUISED. When the provider fails or returns something
+ * unusable, this throws a structured `AiError`. It does not quietly return a
+ * heuristic result that the rest of the pipeline would treat as a successful
+ * AI analysis: that would make an outage look like a working product, and the
+ * user would be shown estimates the model never produced.
+ *
+ * The heuristic analyzer still exists, but only as a *normalizer*: it supplies
+ * plausible values for fields the model omitted, and every returned analysis is
+ * labeled with its real source.
+ */
+
+import { chat } from "./chatClient";
+import { AiError, toAiError } from "./errors";
+import { aiModel, aiProviderConfigured, missingConfig } from "./env";
 import { heuristicAnalyze } from "./taskAnalyzer";
-import { aiApiKey, aiBaseUrl, aiModel, aiProviderConfigured } from "./env";
 import { AnalysisValidationError, validateAnalysis } from "@/lib/validation/schemas";
 import type { TaskAnalysis } from "@/types";
 
-/**
- * AgentFund's INTERNAL planning model. Separate from the user's target model:
- * it only plans and compiles, never executes the task.
- *
- * Configuration is server-side only (AI_API_KEY / AI_BASE_URL / AI_MODEL).
- * When no provider is configured we fall back to deterministic local analysis
- * so the product works out of the box.
- */
+export interface AnalysisResult {
+  analysis: TaskAnalysis;
+  /** Truthful provenance. Never "ai" unless the model actually produced it. */
+  source: "ai" | "heuristic-normalized";
+  model: string;
+  requestId: string;
+  durationMs: number;
+}
 
 const SYSTEM_PROMPT = `You are the planning engine inside AgentFund, a budget-aware AI task planner.
 You never execute the user's task. You only analyze it and return structured planning metadata.
@@ -37,11 +56,8 @@ Rules:
 - costWeight values across phases should sum to about 1.0.
 - Be conservative and realistic. Do not inflate or deflate estimates.`;
 
-function providerConfigured(): boolean {
-  return aiProviderConfigured();
-}
-
-function extractJson(text: string): unknown {
+/** Pulls a JSON object out of a response that may be fenced or prefixed. */
+export function extractJson(text: string): unknown {
   const trimmed = text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
   try {
     return JSON.parse(trimmed);
@@ -59,60 +75,89 @@ function extractJson(text: string): unknown {
   }
 }
 
-async function callProvider(taskDescription: string): Promise<unknown> {
-  const baseUrl = aiBaseUrl();
-  const model = aiModel();
-  const apiKey = aiApiKey();
-  if (!apiKey) throw new Error("No AI API key is configured");
-
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.2,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: `Task description:\n${taskDescription}` },
-      ],
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Provider returned ${response.status}`);
+/**
+ * Analyzes a task with the configured model.
+ *
+ * Throws `AiError` on any failure. One retry happens inside `chat()` for
+ * transient faults, and one further attempt here if the response parses but
+ * fails validation — a different wording request, not an unbounded loop. If it
+ * still fails, the error propagates.
+ */
+export async function analyzeTask(taskDescription: string): Promise<AnalysisResult> {
+  if (!aiProviderConfigured()) {
+    throw new AiError(
+      "BACKEND_NOT_CONFIGURED",
+      `AgentFund's model is not configured. Missing: ${missingConfig().join(", ")}.`,
+    );
   }
 
-  const payload = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const content = payload.choices?.[0]?.message?.content;
-  if (!content) throw new Error("Provider returned no content");
-  return extractJson(content);
-}
-
-export async function analyzeTask(
-  taskDescription: string,
-): Promise<{ analysis: TaskAnalysis; source: "ai" | "heuristic" }> {
   const baseline = heuristicAnalyze(taskDescription);
+  const messages = [
+    { role: "system" as const, content: SYSTEM_PROMPT },
+    { role: "user" as const, content: `Task description:\n${taskDescription}` },
+  ];
 
-  if (!providerConfigured()) {
-    return { analysis: baseline, source: "heuristic" };
-  }
+  let lastError: AiError | null = null;
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const raw = await callProvider(taskDescription);
-      const analysis = validateAnalysis(raw, baseline);
-      return { analysis, source: "ai" };
+      const result = await chat({ messages, jsonMode: true });
+      // A model that hits its output cap mid-JSON returns a truncated object.
+      // That is a retryable response problem, not a validation success.
+      if (result.finishReason === "length") {
+        lastError = new AiError(
+          "AI_INVALID_RESPONSE",
+          "The planning model ran out of output budget before finishing its analysis.",
+          { retryable: true, requestId: result.requestId },
+        );
+        continue;
+      }
+
+      const raw = extractJson(result.content);
+      if (raw === null) {
+        lastError = new AiError(
+          "AI_INVALID_RESPONSE",
+          "The planning model returned text that was not valid JSON.",
+          { retryable: true, requestId: result.requestId },
+        );
+        continue;
+      }
+
+      try {
+        const analysis = validateAnalysis(raw, baseline);
+        return {
+          analysis,
+          source: "ai",
+          model: result.model,
+          requestId: result.requestId,
+          durationMs: result.durationMs,
+        };
+      } catch (error) {
+        if (error instanceof AnalysisValidationError) {
+          lastError = new AiError("AI_VALIDATION_FAILED", error.message, {
+            retryable: true,
+            requestId: result.requestId,
+          });
+          continue;
+        }
+        throw error;
+      }
     } catch (error) {
-      if (error instanceof AnalysisValidationError) continue;
-      break;
+      const ai = toAiError(error);
+      lastError = ai;
+      // Non-transient failures (bad key, unknown model, malformed request) will
+      // not improve, so stop instead of spending the second attempt.
+      if (!ai.retryable) throw ai;
     }
   }
 
-  return { analysis: baseline, source: "heuristic" };
+  throw (
+    lastError ??
+    new AiError("AI_UNKNOWN_ERROR", "The planning model did not return a usable analysis.")
+  );
+}
+
+/** The model currently configured for AgentFund's own calls. */
+export function configuredModel(): string | undefined {
+  return aiModel();
 }

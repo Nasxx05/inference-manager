@@ -51,26 +51,102 @@ const STUB_PROMPT = [
   "- Return the finished work directly.",
 ].join("\n");
 
+/**
+ * A single stub serving both stages in order: the analyst's JSON first, then
+ * the writer's prompt. Analysis is no longer allowed to fall back to a
+ * heuristic when the model fails, so a stub that only returns prompt text
+ * would make the pipeline fail for an unrelated reason.
+ */
+const STUB_ANALYSIS = JSON.stringify({
+  taskType: "web-development",
+  summary: "Build a responsive SaaS landing page.",
+  complexity: "medium",
+  requiredCapabilities: ["code generation", "architectural reasoning"],
+  estimatedInputTokens: 120000,
+  estimatedOutputTokens: 80000,
+  expectedIterations: 3,
+  toolRequirements: ["file editing", "test runner"],
+  phases: [
+    { name: "Requirements", description: "Confirm scope and acceptance criteria", priority: "essential", costWeight: 0.15 },
+    { name: "Implementation", description: "Build the page sections", priority: "essential", costWeight: 0.5 },
+    { name: "Review", description: "Validate responsiveness and finalize", priority: "recommended", costWeight: 0.35 },
+  ],
+  risks: ["Scope can expand if extra sections are added late"],
+  scopeAdjustments: ["Ship the core sections first"],
+});
+
+/**
+ * Deliberately large: enough to exceed a 5 CREDIT budget on the same target
+ * model, which is what puts the scope-optimizer on the path being tested.
+ * These two constants are what make the scope tests exercise the mechanism
+ * rather than passing because an estimate happens to be small.
+ */
+const STUB_LARGE_ANALYSIS = JSON.stringify({
+  taskType: "web-development",
+  summary: "Build a complete ecommerce platform.",
+  complexity: "very-high",
+  requiredCapabilities: ["code generation", "architectural reasoning"],
+  estimatedInputTokens: 900000,
+  estimatedOutputTokens: 600000,
+  expectedIterations: 5,
+  toolRequirements: ["file editing", "terminal commands", "test runner"],
+  phases: [
+    { name: "Requirements", description: "Confirm scope and acceptance criteria", priority: "essential", costWeight: 0.1 },
+    { name: "Architecture", description: "Decide structure and key decisions", priority: "essential", costWeight: 0.15 },
+    { name: "Implementation", description: "Build the platform", priority: "essential", costWeight: 0.5 },
+    { name: "Testing", description: "Verify behaviour", priority: "essential", costWeight: 0.15 },
+    { name: "Final review", description: "Clean up and summarize", priority: "recommended", costWeight: 0.1 },
+  ],
+  risks: ["Payment handling adds compliance overhead"],
+  scopeAdjustments: ["Ship the core purchase path first"],
+});
+
+/** Serves the large analysis when the task clearly exceeds a small budget. */
+function stubProviderLarge() {
+  return vi.fn().mockImplementation(async (_url: string, init?: { body?: string }) => {
+    const body = String(init?.body ?? "");
+    const isAnalysis = body.includes("return ONLY valid JSON");
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [
+          {
+            finish_reason: "stop",
+            message: { content: isAnalysis ? STUB_LARGE_ANALYSIS : STUB_PROMPT },
+          },
+        ],
+      }),
+    };
+  });
+}
+
 function stubProvider() {
-  return vi.fn().mockResolvedValue({
-    ok: true,
-    status: 200,
-    json: async () => ({
-      choices: [{ finish_reason: "stop", message: { content: STUB_PROMPT } }],
-    }),
+  // Dispatch on what the request asks for rather than on a call counter:
+  // several tests call buildPlan in this file, and each buildPlan makes two
+  // calls (analysis, then writing), so a counter would drift between tests.
+  return vi.fn().mockImplementation(async (_url: string, init?: { body?: string }) => {
+    const body = String(init?.body ?? "");
+    const isAnalysis = body.includes("return ONLY valid JSON");
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [
+          { finish_reason: "stop", message: { content: isAnalysis ? STUB_ANALYSIS : STUB_PROMPT } },
+        ],
+      }),
+    };
   });
 }
 
 beforeEach(() => {
-  // Task analysis stays heuristic; only the prompt writer needs a provider.
-  delete process.env.AI_API_KEY;
-  delete process.env.AI_BASE_URL;
-  process.env.AI_API_KEY = "test-key";
-  process.env.AI_BASE_URL = "https://example.test/v1";
-  process.env.AI_MODEL = "test-model";
+  process.env.AGENTFUND_AI_API_KEY = "test-key";
+  process.env.AGENTFUND_AI_BASE_URL = "https://example.test/v1";
+  process.env.AGENTFUND_AI_MODEL = "test-model";
   // Keep the retry path fast. These are read per call, so lowering the
   // per-attempt timeout does not weaken what the test asserts.
-  process.env.AI_TIMEOUT_MS = "50";
+  process.env.AGENTFUND_AI_TIMEOUT_MS = "50";
   vi.stubGlobal("fetch", stubProvider());
 });
 
@@ -113,6 +189,7 @@ describe("planning pipeline", () => {
   });
 
   it("offers scope optimization for a large task with a small budget", async () => {
+    vi.stubGlobal("fetch", stubProviderLarge());
     const plan = await buildPlan({
       taskDescription:
         "Build a complete ecommerce platform with authentication, real payment processing, admin dashboard, order management, analytics and a full test suite.",
@@ -128,6 +205,7 @@ describe("planning pipeline", () => {
   });
 
   it("lowers the estimate when the optimized scope is applied", async () => {
+    vi.stubGlobal("fetch", stubProviderLarge());
     const request = {
       taskDescription:
         "Build a complete ecommerce platform with authentication, real payment processing, admin dashboard, order management and analytics.",
@@ -234,8 +312,23 @@ describe("planning pipeline", () => {
     expect(plan.prompt.toLowerCase()).not.toContain("run with orbio");
   });
 
-  it("fails loudly when the prompt model cannot be reached, instead of falling back", async () => {
+  it("fails loudly when the model cannot be reached, instead of falling back", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+
+    // The whole point: no heuristic substitute is returned, and the failure is
+    // a structured error the API can report rather than a silent success.
+    await expect(
+      buildPlan({
+        taskDescription: LANDING_PAGE,
+        modelId: "claude-sonnet",
+        optimization: "balanced",
+        budget: 10,
+      }),
+    ).rejects.toMatchObject({ name: "AiError", retryable: expect.any(Boolean) });
+  });
+
+  it("reports a missing configuration by name instead of a generic failure", async () => {
+    delete process.env.AGENTFUND_AI_MODEL;
 
     await expect(
       buildPlan({
@@ -244,6 +337,21 @@ describe("planning pipeline", () => {
         optimization: "balanced",
         budget: 10,
       }),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({ code: "BACKEND_NOT_CONFIGURED" });
+  });
+
+  it("never substitutes the internal model for the user's target model", async () => {
+    const plan = await buildPlan({
+      taskDescription: LANDING_PAGE,
+      modelId: "claude-sonnet",
+      optimization: "balanced",
+      budget: 20,
+    });
+
+    // The user picked claude-sonnet; AgentFund's own model is test-model and
+    // must not leak into the target slot.
+    expect(plan.modelId).toBe("claude-sonnet");
+    expect(plan.agentModel).toBe("test-model");
+    expect(plan.agentModel).not.toBe(plan.modelId);
   });
 });

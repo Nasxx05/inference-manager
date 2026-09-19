@@ -160,6 +160,12 @@ export interface PlanResult {
   /** "ai" when the internal model wrote the prompt, "compiled" on fallback. */
   promptSource: "ai" | "compiled";
   prompt: string;
+  /**
+   * The internal model that produced this plan (AGENTFUND_AI_MODEL).
+   * Diagnostic only — this is NOT the user's target model, and it is never a
+   * credential. Useful for confirming a model switch actually took effect.
+   */
+  agentModel?: string;
 }
 
 export interface HistoryEntry {
