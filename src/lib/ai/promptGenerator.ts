@@ -42,6 +42,8 @@ export interface PromptDraftInput {
    * ask for something the plan decided to drop.
    */
   resolvedScope?: { included: string[]; deferred: string[] };
+  /** Reference understanding, when the user supplied an image or website URL. */
+  referenceBrief?: string;
 }
 
 export interface PromptResult {
@@ -170,6 +172,22 @@ function userMessage(input: PromptDraftInput): string {
     "CLARIFYING ANSWERS:",
     answerLines(input.clarifyingAnswers),
     "",
+    /**
+     * The reference is translated into instructions, not pointed at: the
+     * prompt may be copied to a model that never sees the original image or URL.
+     */
+    ...(input.referenceBrief
+      ? [
+          "DESIGN REFERENCE — reproduce these characteristics; you cannot see the original:",
+          input.referenceBrief,
+          "",
+          "Translate the reference into concrete instructions (layout hierarchy, " +
+            "typography direction, spacing, colour direction, component patterns). " +
+            "Produce an ORIGINAL implementation inspired by it: do not copy " +
+            "proprietary copy, logos or assets.",
+          "",
+        ]
+      : []),
     /**
      * The resolved scope is BINDING.
      *

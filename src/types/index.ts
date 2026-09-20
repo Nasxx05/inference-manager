@@ -1,3 +1,5 @@
+import type { ReferenceAnalysis } from "@/lib/reference/types";
+
 export type TaskType =
   | "coding"
   | "web-development"
@@ -391,6 +393,13 @@ export interface PlanResult {
    * Lets the UI state insufficiency plainly instead of implying feasibility.
    */
   optimizationInsufficient?: boolean;
+  /**
+   * Reference understanding used for this plan. Omitted for text-only
+   * requests, so the UI can show nothing instead of an empty section.
+   */
+  referenceAnalysis?: ReferenceAnalysis[];
+  /** Why references added planning cost, when they did. */
+  referenceCostDriver?: string;
   recommendation: ModelRecommendation | null;
   comparison: ModelComparisonRow[];
   suitability: ModelSuitability | null;

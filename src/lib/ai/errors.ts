@@ -18,6 +18,20 @@ export const AI_ERROR_CODES = [
   "AI_INVALID_RESPONSE",
   "AI_VALIDATION_FAILED",
   "AI_UNKNOWN_ERROR",
+  // Reference (image / website URL) failures. Distinct codes so a blocked URL
+  // is never reported as a model outage, and a bad image never as a bad key.
+  "UNSUPPORTED_IMAGE_TYPE",
+  "IMAGE_TOO_LARGE",
+  "EMPTY_IMAGE",
+  "TOO_MANY_REFERENCES",
+  "INVALID_REFERENCE_URL",
+  "UNSUPPORTED_PROTOCOL",
+  "BLOCKED_REFERENCE_URL",
+  "WEBSITE_FETCH_TIMEOUT",
+  "WEBSITE_FETCH_FAILED",
+  "WEBSITE_UNAVAILABLE",
+  "WEBSITE_TOO_LARGE",
+  "REFERENCE_ANALYSIS_FAILED",
 ] as const;
 
 export type AiErrorCode = (typeof AI_ERROR_CODES)[number];
@@ -153,4 +167,37 @@ export function toAiError(error: unknown, requestId?: string): AiError {
     networkish ? "The AI provider could not be reached." : message,
     { retryable: networkish, requestId: id },
   );
+}
+
+/**
+ * HTTP status for an error, so the boundary never has to guess.
+ *
+ * Reference validation failures are the user's input, so they are 400 — not
+ * 502, which would wrongly suggest Promgent or the provider broke.
+ */
+export function statusForCode(code: AiErrorCode): number {
+  switch (code) {
+    case "UNSUPPORTED_IMAGE_TYPE":
+    case "IMAGE_TOO_LARGE":
+    case "EMPTY_IMAGE":
+    case "TOO_MANY_REFERENCES":
+    case "INVALID_REFERENCE_URL":
+    case "UNSUPPORTED_PROTOCOL":
+    case "BLOCKED_REFERENCE_URL":
+      return 400;
+    case "WEBSITE_FETCH_TIMEOUT":
+    case "WEBSITE_UNAVAILABLE":
+    case "WEBSITE_TOO_LARGE":
+      // The remote site's condition, not a Promgent outage: 422 says the
+      // request was understood but the reference could not be processed.
+      return 422;
+    case "WEBSITE_FETCH_FAILED":
+      return 502;
+    case "AI_TIMEOUT":
+    case "AI_RATE_LIMITED":
+    case "AI_PROVIDER_UNREACHABLE":
+      return 503;
+    default:
+      return 502;
+  }
 }

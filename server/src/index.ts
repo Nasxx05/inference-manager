@@ -30,7 +30,8 @@
 import cors from "cors";
 import express from "express";
 import { loadLocalEnv } from "./loadEnv";
-import { AiError, newRequestId, toAiError } from "@/lib/ai/errors";
+import { MultipartError, parseMultipart, type ParsedFile } from "./multipart";
+import { AiError, newRequestId, statusForCode, toAiError } from "@/lib/ai/errors";
 import {
   ENV,
   aiCombinedMaxTokens,
@@ -43,6 +44,8 @@ import { logTiming } from "@/lib/ai/chatClient";
 import { aiHealth, backendHealth, simpleAiTest, tokenBudgets } from "@/lib/ai/health";
 import { heuristicAnalyze } from "@/lib/ai/taskAnalyzer";
 import { buildPlanWithMetrics } from "@/lib/planner";
+import { processReferences, referenceError, describeReferences } from "@/lib/reference";
+import type { ReferenceAnalysis } from "@/lib/reference/types";
 import { selectQuestions } from "@/lib/clarifier";
 import { parseBudget, parseOptimization } from "@/lib/validation/schemas";
 import type { ClarifyingQuestion, OptimizationPreference, TaskType } from "@/types";
@@ -94,6 +97,63 @@ app.use(
 );
 
 app.use(express.json({ limit: "1mb" }));
+/**
+ * Raw body for multipart uploads only.
+ *
+ * Registered after the JSON parser and with a type filter, so JSON requests
+ * are still parsed as JSON and never pass through this. 12mb covers the
+ * bounded image caps in ./multipart with headroom for field data.
+ */
+app.use(express.raw({ type: "multipart/form-data", limit: "12mb" }));
+
+/**
+ * Multipart handling for image references.
+ *
+ * Only runs when the request is genuinely multipart. JSON planning requests
+ * never reach this code, so the text-only path is untouched.
+ *
+ * Files are held in memory for the duration of the request and never written
+ * to disk: the image is a transient input to one analysis, not an asset to
+ * store.
+ */
+async function readUploadedImages(request: express.Request): Promise<
+  | {
+      ok: true;
+      images: { buffer: Buffer; mimeType?: string; filename?: string }[];
+      fields: Record<string, string>;
+    }
+  | { ok: false; code: string; message: string }
+> {
+  const contentType = String(request.headers["content-type"] ?? "");
+  if (!contentType.toLowerCase().includes("multipart/form-data")) {
+    return { ok: true, images: [], fields: {} };
+  }
+
+  const raw = request.body;
+  const body: Buffer | null = Buffer.isBuffer(raw) ? raw : null;
+  if (!body) return { ok: true, images: [], fields: {} };
+
+  try {
+    const parsed = parseMultipart(body, contentType);
+    const images = parsed.files
+      .filter((file: ParsedFile) => file.fieldname === "images")
+      .map((file: ParsedFile) => ({
+        buffer: file.buffer,
+        mimeType: file.mimetype,
+        filename: file.originalname,
+      }));
+    return { ok: true, images, fields: parsed.fields };
+  } catch (error) {
+    if (error instanceof MultipartError) {
+      return { ok: false, code: error.code, message: error.message };
+    }
+    return {
+      ok: false,
+      code: "REFERENCE_ANALYSIS_FAILED",
+      message: "The upload could not be read.",
+    };
+  }
+}
 
 /* -------------------------------------------------------------------------- */
 /* Abuse protection                                                           */
@@ -208,7 +268,13 @@ const clarifyLimit = rateLimit(RATE_LIMIT_CLARIFY, RATE_LIMIT_WINDOW_MS, "clarif
  */
 function logStage(
   requestId: string,
-  stage: "clarify" | "combined-analysis-and-prompt" | "task-analysis" | "prompt-generation" | "total",
+  stage:
+    | "clarify"
+    | "combined-analysis-and-prompt"
+    | "task-analysis"
+    | "prompt-generation"
+    | "reference"
+    | "total",
   durationMs: number,
   success: boolean,
   detail = "",
@@ -303,6 +369,8 @@ function userFacingMessage(ai: AiError): string {
     case "AI_INVALID_RESPONSE":
     case "AI_VALIDATION_FAILED":
       return "The AI provider returned a response Promgent could not use. Please try again.";
+    case "REFERENCE_ANALYSIS_FAILED":
+      return "We couldn't analyse that reference. Please try again or continue without it.";
     default:
       return "Something went wrong while planning your task. Please try again.";
   }
@@ -488,7 +556,62 @@ app.post("/api/plan", planMinuteLimit, planHourLimit, async (request, response) 
 
   inFlightPlans += 1;
   try {
+    /**
+     * Reference processing runs only when there is something to process.
+     *
+     * For text-only requests this is a no-op: no fetch, no image validation,
+     * no extra model call.
+     */
+    const uploads = await readUploadedImages(request);
+    if (!uploads.ok) {
+      logStage(requestId, "total", Date.now() - totalStarted, false);
+      return response.status(400).json({
+        success: false,
+        error: { code: uploads.code, message: uploads.message, requestId },
+      });
+    }
+
+    // A multipart request carries its fields as form data, not JSON.
+    const source: Record<string, unknown> =
+      Object.keys(uploads.fields).length > 0
+        ? { ...uploads.fields, ...(payload as Record<string, unknown>) }
+        : payload;
+
+    const mightHaveUrl = String(source.taskDescription ?? "").includes("http");
+
+    let referenceAnalysis: ReferenceAnalysis[] = [];
+    if (uploads.images.length > 0 || mightHaveUrl) {
+      const processed = await processReferences({
+        taskDescription: input.taskDescription,
+        ...(uploads.images.length ? { images: uploads.images } : {}),
+        requestId,
+      });
+
+      if (!processed.ok) {
+        const ai = referenceError(processed.code, processed.message);
+        logStage(requestId, "reference", Date.now() - totalStarted, false, `code=${ai.code}`);
+        logStage(requestId, "total", Date.now() - totalStarted, false, `code=${ai.code}`);
+        const { body } = errorResponse(ai, statusForCode(ai.code));
+        return response.status(statusForCode(ai.code)).json({
+          ...body,
+          error: { ...body.error, requestId },
+        });
+      }
+
+      referenceAnalysis = processed.analyses;
+      if (processed.analyses.length) {
+        logStage(
+          requestId,
+          "reference",
+          processed.durationMs,
+          true,
+          `count=${processed.analyses.length} (${describeReferences(processed.references)})`,
+        );
+      }
+    }
+
     const built = await buildPlanWithMetrics({
+      referenceAnalysis,
       taskDescription: input.taskDescription,
       modelId: String(payload.modelId ?? "").trim() || "auto",
       optimization: input.optimization,
@@ -547,12 +670,7 @@ app.post("/api/plan", planMinuteLimit, planHourLimit, async (request, response) 
     logStage(requestId, "combined-analysis-and-prompt", totalMs, false, `code=${ai.code}`);
     logStage(requestId, "total", totalMs, false, `code=${ai.code}`);
 
-    const status =
-      ai.code === "AI_TIMEOUT" ||
-      ai.code === "AI_RATE_LIMITED" ||
-      ai.code === "AI_PROVIDER_UNREACHABLE"
-        ? 503
-        : 502;
+    const status = statusForCode(ai.code);
     const { body } = errorResponse(ai, status);
     console.error(
       `[api] requestId=${ai.requestId} code=${ai.code} status=${ai.status ?? "-"} message=${ai.message}`,

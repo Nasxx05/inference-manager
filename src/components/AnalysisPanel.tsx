@@ -140,7 +140,21 @@ export function AnalysisPanel({
   const effort =
     plan.cost.effort ??
     resolveTaskEffort({ analysis: plan.analysis, taskDescription: plan.taskDescription });
-  const drivers = explainCost(plan.analysis, effort);
+  /**
+ * How many references were analyzed, or null when there were none.
+ *
+ * Null means the References card is not rendered at all, so a text-only plan
+ * shows no empty section.
+ */
+const referenceSummary = plan.referenceAnalysis?.length
+  ? {
+      count: `${plan.referenceAnalysis.length} reference${
+        plan.referenceAnalysis.length === 1 ? "" : "s"
+      } used as design direction`,
+    }
+  : null;
+
+const drivers = explainCost(plan.analysis, effort);
 
   /**
    * Major work drivers: the resolved components and their weights.
@@ -186,6 +200,26 @@ export function AnalysisPanel({
         <Metric label="Modelled passes" value={plan.cost.modelledPasses} />
         <Metric label="Pricing" value={plan.cost.pricingSource} mono={false} />
       </Card>
+
+      {/*
+        References, when they were used.
+
+        Absent entirely for text-only plans, and it names the analysis source so
+        the user can see whether visual style was actually assessed.
+      */}
+      {referenceSummary ? (
+        <Card title="References analyzed">
+          <p className="text-xs font-medium text-ink">{referenceSummary.count}</p>
+          <ul className="mt-1 flex flex-col gap-1.5">
+            {(plan.referenceAnalysis ?? []).map((item) => (
+              <li key={item.id} className="text-xs leading-relaxed text-muted">
+                • <span className="text-ink">{item.type}</span> — {item.summary}
+                <span className="mt-0.5 block text-[11px] text-muted">via {item.source}</span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : null}
 
       {/* WHY: makes a large estimate explainable rather than arbitrary. */}
       {drivers.length ? (

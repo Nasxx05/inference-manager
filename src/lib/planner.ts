@@ -46,6 +46,14 @@ import {
   includedRequirements,
   optimizeFinalScope,
 } from "@/lib/scopeOptimizer/finalScope";
+import type {
+  ReferenceAnalysis,
+  ReferenceInput,
+  ReferenceWorkload,
+} from "@/lib/reference/types";
+import { NO_REFERENCE_WORKLOAD } from "@/lib/reference/types";
+import { referenceWorkload } from "@/lib/reference/workload";
+import { describeReferenceForPrompt } from "@/lib/reference/referenceAnalyzer";
 import type { FinalScope } from "@/types";
 import type {
   ClarifyingAnswer,
@@ -63,6 +71,18 @@ export interface PlanRequest {
   optimization: OptimizationPreference;
   budget: number;
   applyOptimizedScope?: boolean;
+  /**
+   * Optional image/website references. Omit entirely for text-only requests:
+   * `[]` and `undefined` are both valid, and neither triggers any reference
+   * processing.
+   */
+  references?: ReferenceInput[];
+  /**
+   * Pre-computed reference understanding, when the caller analyzed references
+   * before planning. Supplying it means the analysis is done exactly once and
+   * the same object reaches cost, scope and prompt.
+   */
+  referenceAnalysis?: ReferenceAnalysis[];
   /** Questions that were shown to the user, if the clarifying step ran. */
   clarifyingQuestions?: ClarifyingQuestion[];
   /** Raw user answers keyed by question id. Missing or blank means skipped. */
@@ -223,12 +243,28 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     optimization,
     budget,
     applyOptimizedScope = false,
+    references = [],
+    referenceAnalysis = [],
     clarifyingQuestions = [],
     clarifyingResponses = {},
     keepSelectedModel = false,
   } = request;
 
   const started = Date.now();
+
+  /**
+   * The reference analyses for this request.
+   *
+   * Computed once by the caller (or empty for text-only requests) and read by
+   * every stage that needs it — estimation, scope and the prompt — so no stage
+   * can end up with a different understanding of the same reference.
+   */
+  const referenceAnalyses: ReferenceAnalysis[] = Array.isArray(referenceAnalysis)
+    ? referenceAnalysis
+    : [];
+  const referenceSignal: ReferenceWorkload = referenceAnalyses.length
+    ? referenceWorkload(referenceAnalyses)
+    : NO_REFERENCE_WORKLOAD;
 
   const clarifyingAnswers: ClarifyingAnswer[] = resolveAnswers(
     clarifyingQuestions,
@@ -353,11 +389,23 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
   const heuristicAnalysis = heuristicAnalyze(describeEnrichedTask(enrichedTask));
   const { model, recommendation } = await resolveTargetModel(heuristicAnalysis);
 
+  /**
+   * References add planning workload.
+   *
+   * Combined with the clarifying-answer signal into the SAME two inputs the
+   * estimator already accepts, so the deterministic cost engine is extended
+   * rather than duplicated or bypassed.
+   */
+  const effortMultiplier =
+    answerSignal.effortMultiplier * referenceSignal.effortMultiplier;
+  const addedRequirements =
+    answerSignal.addedRequirements + referenceSignal.addedRequirements;
+
   const baseEffort = resolveTaskEffort({
     analysis: heuristicAnalysis,
     taskDescription,
-    answerMultiplier: answerSignal.effortMultiplier,
-    addedRequirements: answerSignal.addedRequirements,
+    answerMultiplier: effortMultiplier,
+    addedRequirements,
   });
 
   /** INITIAL SCOPE — requirements with stable ids, nothing deferred yet. */
@@ -375,8 +423,8 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     model,
     optimization,
     taskDescription,
-    answerMultiplier: answerSignal.effortMultiplier,
-    addedRequirements: answerSignal.addedRequirements,
+    answerMultiplier: effortMultiplier,
+    addedRequirements,
     baseEffort,
     fullRequirementCount: initialScope.requirements.length,
   });
@@ -420,6 +468,17 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
 
   const optimizedEstimate = optimized ? canonical.estimateFull(finalScope) : null;
 
+  /**
+   * The reference brief given to the prompt writer.
+   *
+   * Built once from the same analyses the estimator used, so the prompt cannot
+   * describe a different reference than the plan costed. Empty for text-only
+   * requests, in which case no reference block is added at all.
+   */
+  const referenceBrief = referenceAnalyses.length
+    ? referenceAnalyses.map(describeReferenceForPrompt).join("\n\n")
+    : "";
+
   let route: PlanRoute = "combined";
   let llmDurationMs = 0;
   let parseDurationMs = 0;
@@ -458,6 +517,7 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
             included: includedRequirements(finalScope).map((unit) => unit.name),
             deferred: excludedRequirements(finalScope).map((unit) => unit.name),
           },
+          ...(referenceBrief ? { referenceBrief } : {}),
         });
         route = "combined";
         agentModel = combined.model;
@@ -507,6 +567,7 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
         included: includedRequirements(finalScope).map((unit) => unit.name),
         deferred: excludedRequirements(finalScope).map((unit) => unit.name),
       },
+      ...(referenceBrief ? { referenceBrief } : {}),
     });
     llmDurationMs += generated.durationMs;
     providerDurationMs = generated.providerDurationMs ?? providerDurationMs;
@@ -654,6 +715,13 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
       : undefined,
     /** True when even the safest scope reduction leaves the budget short. */
     optimizationInsufficient: optimizationStillInsufficient,
+    /**
+     * The reference understanding used for this plan. Absent for text-only
+     * requests, so the UI shows nothing rather than an empty section.
+     */
+    ...(referenceAnalyses.length ? { referenceAnalysis: referenceAnalyses } : {}),
+    /** Why references changed the estimate, when they did. */
+    ...(referenceSignal.driver ? { referenceCostDriver: referenceSignal.driver } : {}),
     suitability,
     comparison: buildComparison(
       rawAnalysis,

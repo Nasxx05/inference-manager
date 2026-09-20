@@ -57,6 +57,12 @@ export interface CombinedInput {
    * larger request.
    */
   resolvedScope?: { included: string[]; deferred: string[] };
+  /**
+   * Reference understanding, when the user supplied an image or website URL.
+   * Omitted entirely for text-only requests so the writer sees no reference
+   * block at all.
+   */
+  referenceBrief?: string;
 }
 
 export interface CombinedResult {
@@ -215,8 +221,15 @@ function answerLines(answers: ClarifyingAnswer[]): string {
  * without improving the result.
  */
 function userMessage(input: CombinedInput): string {
-  const { taskDescription, targetModel, optimization, budget, clarifyingAnswers, resolvedScope } =
-    input;
+  const {
+    taskDescription,
+    targetModel,
+    optimization,
+    budget,
+    clarifyingAnswers,
+    resolvedScope,
+    referenceBrief,
+  } = input;
 
   const blocks = ["TASK:", taskDescription.trim(), "", "ANSWERS:", answerLines(clarifyingAnswers)];
 
@@ -239,6 +252,25 @@ function userMessage(input: CombinedInput): string {
       ...resolvedScope.deferred.map((item) => `- ${item}`),
       "",
       "Write SCOPE from the IN SCOPE list and OUT OF SCOPE from the deferred list.",
+    );
+  }
+
+  /**
+   * The reference is translated into instructions, not pointed at.
+   *
+   * The prompt may be copied to a model that never sees the image or URL, so
+   * "make it like the reference" would be useless. The brief states the
+   * characteristics to reproduce instead.
+   */
+  if (referenceBrief) {
+    blocks.push(
+      "",
+      "DESIGN REFERENCE — reproduce these characteristics; you cannot see the original:",
+      referenceBrief,
+      "",
+      "Translate the reference into concrete instructions (layout hierarchy, typography " +
+        "direction, spacing, colour direction, component patterns). Produce an ORIGINAL " +
+        "implementation inspired by it: do not copy proprietary copy, logos or assets.",
     );
   }
 

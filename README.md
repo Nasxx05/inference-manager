@@ -20,14 +20,20 @@ Promgent never executes your task. It plans it, prices it, and hands you the pro
 
 ```mermaid
 flowchart TD
-    A[User] --> B[Promgent]
-    B --> C[Render Backend]
-    C --> D[Orbio Gateway]
-    D --> E[Internal AI Model]
-    E --> F[Task Planning]
-    F --> G[Cost + Feasibility + Model + Scope Analysis]
-    G --> H[Model-Specific Prompt Generation]
-    H --> I[Copy Prompt]
+    A[User] --> B[Promgent UI]
+    B --> C[Text + Optional Image + Website URL]
+    C --> D[Reference Processing]
+    D --> E[Render Backend]
+    E --> F[Orbio Gateway]
+    F --> G[Internal AI Model]
+    G --> H[Task + Reference Understanding]
+    H --> I[Existing Planning Engine]
+    I --> J[Model Selection]
+    J --> K[Final Canonical Scope]
+    K --> L[Cost + Feasibility]
+    L --> M[Reference-Aware Model-Specific Prompt]
+    M --> N[Copy Prompt]
+    N --> O[User Executes Elsewhere]
 ```
 
 Promgent uses an internal AI model through the Orbio Gateway to reason about the user's task and
@@ -46,6 +52,49 @@ elsewhere.
 
 ---
 
+## Multimodal References
+
+Promgent can now accept optional visual and website references alongside the user's task. Users can
+paste a website URL directly into the task input, or attach an image using the input's `+` control.
+
+Promgent processes those references **before** planning the task. Images are analyzed for visual
+structure and design characteristics. Website references are inspected for relevant visual and
+structural patterns. The resulting reference analysis is combined with the user's original task and
+passed through Promgent's existing model, budget, scope and prompt-planning pipeline.
+
+References are optional. Text-only requests continue to use the existing planning flow with no
+reference processing at all.
+
+### How a reference flows through the system
+
+```mermaid
+flowchart TD
+    A[Task text + optional image + optional URL] --> B{Reference present?}
+    B -- No --> Z[Existing text-only planning]
+    B -- Yes --> C[Validate]
+    C --> D[Image: multimodal analysis]
+    C --> E[URL: validate + secure fetch + inspect]
+    D --> F[Structured ReferenceAnalysis]
+    E --> F
+    F --> G[Existing planning engine]
+    G --> H[Resolved model + final scope + estimate]
+    H --> I[Reference-aware prompt]
+    Z --> I
+```
+
+Key rules the implementation follows:
+
+- **The original task stays authoritative.** A reference answers "what should this look like?",
+  never "what does the user want?". Both are carried through to the prompt.
+- **One resolved model, one final scope.** References do not create a second model-selection or
+  scope system; they are additional input to the existing pipeline.
+- **References do not bypass budget or feasibility.** The scope optimizer still runs when the
+  budget is too small.
+- **Uncertainty is recorded, not invented.** Anything the analyzer cannot determine confidently is
+  listed in `uncertainties` rather than guessed.
+
+---
+
 ## What it does
 
 Promgent is a budget-aware AI task planner and prompt compiler. For a single request it answers:
@@ -57,7 +106,8 @@ Promgent is a budget-aware AI task planner and prompt compiler. For a single req
 5. **Does your budget support it?** — feasible, tight, feasible with reduced scope, or insufficient.
 6. **If not, what should change?** — an iteratively optimized scope, re-estimated.
 7. **What's the most appropriate execution strategy?** — phases, iteration plan, revision policy.
-8. **What prompt should you use?** — a structured, budget-aware prompt built for your target model.
+8. **Do you have a reference?** — an optional image or website URL, understood before planning.
+9. **What prompt should you use?** — a structured, budget-aware prompt built for your target model.
 
 The output is a prompt. You copy it and run it wherever you like.
 
@@ -183,6 +233,70 @@ added revision risk is stated. No model is named in the engine, so renaming or a
 changes nothing.
 
 ---
+
+## Reference processing
+
+Reference handling lives in `src/lib/reference/`, isolated so the planner stays responsible for
+planning orchestration only.
+
+| Module | Responsibility |
+|---|---|
+| `types.ts` | `ReferenceInput`, `ReferenceAnalysis`, limits |
+| `urlSafety.ts` | URL detection and SSRF validation |
+| `imageValidation.ts` | Magic-byte image validation |
+| `websiteInspector.ts` | Secure single-page fetch and inspection |
+| `referenceAnalyzer.ts` | Structured analysis + prompt translation |
+| `workload.ts` | How much planning work a reference adds |
+| `index.ts` | Orchestration seam used by the backend |
+
+### Images
+
+PNG, JPEG and WEBP are accepted, up to 5MB each, at most 4 references per request. The backend
+validates the **actual bytes** against magic-byte signatures — a client-supplied MIME type is only
+a claim — and rejects a declared type that disagrees with the file. Images are held in memory for
+the request and never written to disk, so there is no image storage to operate or leak.
+
+Image understanding requires a configured multimodal model (`AGENTFUND_AI_MULTIMODAL_MODEL`). When
+none is configured, Promgent fails with a clear `REFERENCE_ANALYSIS_FAILED` error rather than
+claiming to have understood an image it cannot see.
+
+### Website URLs
+
+A URL typed into the task field is detected automatically; the text is never rewritten. Before any
+fetch, the URL is validated and every redirect target is re-checked:
+
+- only `http` / `https`
+- `localhost`, loopback, private, link-local and cloud-metadata addresses rejected
+- credentials in the URL rejected
+- bounded redirects, bounded timeout, bounded response size
+- one page only — no crawling
+
+Failures return structured errors (`BLOCKED_REFERENCE_URL`, `WEBSITE_FETCH_TIMEOUT`,
+`WEBSITE_UNAVAILABLE`, …) and never become a fake successful analysis.
+
+### What website inspection does today
+
+The inspector fetches the single page and extracts real structure: title, meta description,
+headings, navigation labels, landmark sections, detected components, stack hints and a small text
+sample for topic.
+
+It does **not** render the page, so it does **not** claim to know colour, typography or spacing.
+Those fields are left absent and the limitation is recorded in `uncertainties`. The architecture
+supports adding a renderer later without changing the planner.
+
+### From reference to prompt
+
+The reference is translated into actionable instructions rather than pointed at, because the final
+prompt may be copied to a model that never sees the original image or URL:
+
+> BAD: "Make the website like the reference image."
+>
+> BETTER: "Use the supplied visual reference as the design direction. Reproduce the overall layout
+> hierarchy, oversized hero typography, restrained colour system, generous whitespace, card
+> composition and navigation treatment while creating an original implementation and content."
+
+The prompt is instructed to produce an **original** implementation inspired by the reference, not
+to copy proprietary copy, logos or assets.
 
 ## How Orbio powers the internal agent
 
@@ -369,6 +483,24 @@ Accuracy matters more than confidence, so the limits are stated plainly:
 - **Confidence reflects information, not statistics.** It measures how much
   structured information the estimate was built from, not a confidence interval
   from past runs.
+
+## Reference limitations
+
+These are current, not aspirational:
+
+- **Website pages are not rendered.** Visual style (colour, typography, spacing) is not assessed
+  for URL references; only structure and metadata are.
+- **Pages that block automated access may not be analyzable.** Bot protection, CAPTCHAs and
+  authenticated pages will fail with a structured error.
+- **Image analysis depends on the configured multimodal model.** Without
+  `AGENTFUND_AI_MULTIMODAL_MODEL`, image references cannot be analyzed.
+- **Visual interpretation is an AI analysis and may contain uncertainty.** It is recorded, not
+  hidden, but it is not ground truth.
+- **Promgent does not guarantee pixel-perfect reproduction.** The output is planning guidance.
+- **References do not mean copyrighted assets or content are copied.** The prompt is instructed
+  toward an original implementation.
+- **Video references are not supported.** The architecture is kept extensible, but video is not
+  implemented.
 
 ## Notes and limits
 

@@ -17,9 +17,20 @@ import { AnalysisPanel } from "./AnalysisPanel";
 import { ClarifyingQuestions } from "./ClarifyingQuestions";
 import { HistoryPanel } from "./HistoryPanel";
 import { PromptEditor } from "./PromptEditor";
-import { TaskForm, type TaskFormValues } from "./TaskForm";
+import { TaskForm, validateAttachment, type Attachment, type TaskFormValues } from "./TaskForm";
 import { Button } from "./ui";
 import { GeneratingScreen } from "./GeneratingScreen";
+
+/** Builds a multipart body only when there is an image to attach. */
+function formDataFor(
+  fields: Record<string, string>,
+  attachments: Attachment[],
+): FormData {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) form.append(key, value);
+  for (const item of attachments) form.append("images", item.file, item.name);
+  return form;
+}
 
 const INITIAL_VALUES: TaskFormValues = {
   taskDescription: "",
@@ -63,6 +74,41 @@ export function Workspace() {
   const inFlight = useRef<AbortController | null>(null);
 
   const loading = state === "analyzing";
+
+  /**
+   * Attached image references. Held only in component state: they are sent
+   * with the request, used for one analysis, and never stored anywhere.
+   */
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+
+  const addAttachment = useCallback((file: File) => {
+    const problem = validateAttachment(file);
+    if (problem) {
+      setAttachmentError(problem);
+      return;
+    }
+    setAttachmentError(null);
+    setAttachments((current) => [
+      ...current,
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        file,
+        name: file.name,
+        previewUrl: URL.createObjectURL(file),
+      },
+    ]);
+  }, []);
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((current) => {
+      const target = current.find((item) => item.id === id);
+      // Release the object URL so a removed attachment does not leak memory.
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return current.filter((item) => item.id !== id);
+    });
+    setAttachmentError(null);
+  }, []);
 
   const [questions, setQuestions] = useState<ClarifyingQuestion[] | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
@@ -129,19 +175,30 @@ export function Workspace() {
       inFlight.current = controller;
 
       try {
+        const fields = {
+          taskDescription: merged.taskDescription,
+          modelId: merged.modelId,
+          optimization: merged.optimization,
+          budget: String(budget),
+          applyOptimizedScope: overrides?.applyOptimizedScope === true ? "true" : "false",
+          clarifyingQuestions: JSON.stringify(overrides?.clarifyingQuestions ?? []),
+          clarifyingResponses: JSON.stringify(overrides?.clarifyingResponses ?? {}),
+        };
+
+        /**
+         * JSON unless an image is attached.
+         *
+         * Text-only requests keep the exact request shape they always had —
+         * multipart is only used when there is genuinely a file to send.
+         */
+        const hasImages = attachments.length > 0;
+        const body = hasImages ? formDataFor(fields, attachments) : JSON.stringify(fields);
+
         const response = await fetch(endpoint("/api/plan"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          ...(hasImages ? {} : { headers: { "Content-Type": "application/json" } }),
           signal: controller.signal,
-          body: JSON.stringify({
-            taskDescription: merged.taskDescription,
-            modelId: merged.modelId,
-            optimization: merged.optimization,
-            budget,
-            applyOptimizedScope: overrides?.applyOptimizedScope === true,
-            clarifyingQuestions: overrides?.clarifyingQuestions ?? [],
-            clarifyingResponses: overrides?.clarifyingResponses ?? {},
-          }),
+          body,
         });
 
         const payload = (await response.json()) as {
@@ -249,6 +306,12 @@ export function Workspace() {
   function handleNewTask() {
     setPlan(null);
     setError(null);
+    setAttachmentError(null);
+    // Release every preview URL before dropping the attachments.
+    setAttachments((current) => {
+      for (const item of current) URL.revokeObjectURL(item.previewUrl);
+      return [];
+    });
     setState("idle");
     setQuestions(null);
     setAnswers({});
@@ -365,6 +428,10 @@ export function Workspace() {
                 onSubmit={() => void handleSubmit()}
                 loading={loading}
                 error={error}
+                attachments={attachments}
+                onAddAttachment={addAttachment}
+                onRemoveAttachment={removeAttachment}
+                attachmentError={attachmentError}
               />
               <div className="mt-6 flex flex-wrap gap-3">
                 <Button onClick={() => void handleSubmit()} disabled={loading}>
@@ -451,6 +518,10 @@ export function Workspace() {
                 onSubmit={handleSubmit}
                 loading={loading}
                 error={error}
+                attachments={attachments}
+                onAddAttachment={addAttachment}
+                onRemoveAttachment={removeAttachment}
+                attachmentError={attachmentError}
               />
               {state === "error" && error ? (
                 <div role="alert" className="mt-4 text-center">

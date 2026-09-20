@@ -16,9 +16,38 @@
 import { AiError, classifyStatus, newRequestId, toAiError } from "./errors";
 import { aiApiKey, aiBaseUrl, aiModel, aiTimeoutMs, missingConfig } from "./env";
 
+/** One text part of a multimodal user message. */
+export interface TextPart {
+  type: "text";
+  text: string;
+}
+
+/**
+ * One image part, in the OpenAI-compatible `image_url` shape.
+ *
+ * A data URL is used rather than a bare URL because the reference image is
+ * uploaded to Promgent, not hosted anywhere the provider could fetch. Passing
+ * an http URL would give the model no actual visual access.
+ */
+export interface ImagePart {
+  type: "image_url";
+  image_url: { url: string; detail?: "auto" | "low" | "high" };
+}
+
+export type MessageContentPart = TextPart | ImagePart;
+
+/**
+ * Message content: plain text, or an array of parts when images are included.
+ *
+ * The string form is the default and is what every existing call uses, so the
+ * text-only path is completely unchanged. Only the reference analyzer sends
+ * the array form.
+ */
+export type MessageContent = string | MessageContentPart[];
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: MessageContent;
 }
 
 /** Which part of the flow a call belongs to. Logged, never sent to the provider. */
@@ -26,8 +55,15 @@ export type AiStage =
   | "combined-analysis-and-prompt"
   | "task-analysis"
   | "prompt-generation"
+  | "reference-analysis"
   | "health-test"
   | "model-list";
+
+/** True when this message carries image content. */
+export function hasImageContent(message: ChatMessage): boolean {
+  return Array.isArray(message.content)
+    && message.content.some((part) => part.type === "image_url");
+}
 
 export interface ChatRequest {
   messages: ChatMessage[];

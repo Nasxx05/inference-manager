@@ -34,6 +34,18 @@ export const ENV = {
   COMBINED: "AGENTFUND_AI_COMBINED",
   FALLBACK_MODEL: "AGENTFUND_AI_FALLBACK_MODEL",
   ALLOWED_ORIGINS: "ALLOWED_ORIGINS",
+  /**
+   * Optional separate model for reference (image/website) understanding.
+   *
+   * Deliberately separate from AGENTFUND_AI_MODEL: the planning model is
+   * chosen for analysis and prompt writing, and it may not accept images.
+   * Configuring a multimodal model here adds reference understanding WITHOUT
+   * touching the existing planning model or the target-model selection system.
+   * Unset means image references cannot be analyzed yet.
+   */
+  MULTIMODAL_MODEL: "AGENTFUND_AI_MULTIMODAL_MODEL",
+  REFERENCE_MAX_TOKENS: "AGENTFUND_AI_REFERENCE_MAX_TOKENS",
+  REFERENCE_TIMEOUT_MS: "AGENTFUND_AI_REFERENCE_TIMEOUT_MS",
 } as const;
 
 /**
@@ -164,6 +176,39 @@ export function aiAnalysisMaxTokens(): number {
  */
 export function aiPromptMaxTokens(): number {
   return Math.round(aiNumber(ENV.PROMPT_MAX_TOKENS, 3000));
+}
+
+/**
+ * Optional multimodal model for reference understanding.
+ *
+ * Unset means image references cannot be analyzed. Callers must surface that
+ * as a real limitation rather than pretending the image was understood.
+ */
+export function aiMultimodalModel(): string | undefined {
+  return readEnv(ENV.MULTIMODAL_MODEL);
+}
+
+/** True when a model is configured specifically for reference analysis. */
+export function aiMultimodalConfigured(): boolean {
+  return Boolean(aiMultimodalModel());
+}
+
+/**
+ * Output cap for one reference analysis. Small on purpose: the analyzer
+ * returns one compact structured object, not prose.
+ */
+export function aiReferenceMaxTokens(): number {
+  return Math.round(aiNumber(ENV.REFERENCE_MAX_TOKENS, 1200));
+}
+
+/**
+ * Per-attempt budget for reference analysis.
+ *
+ * Shorter than the planning timeout because reference analysis is one bounded
+ * step in a longer request, not the whole request.
+ */
+export function aiReferenceTimeoutMs(): number {
+  return Math.round(aiNumber(ENV.REFERENCE_TIMEOUT_MS, 45000));
 }
 
 /**
