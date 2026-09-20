@@ -1,16 +1,30 @@
 import type { CapabilityTier, ModelConfig, TaskType } from "@/types";
 
 /**
- * Local model metadata for the MVP.
+ * Promgent's TARGET-model catalogue: curated static MVP data.
  *
- * Pricing is expressed in CREDIT per 1M tokens and is STATIC CONFIGURATION,
- * not live data. Replace with a live pricing adapter later; the shape of
- * `ModelConfig` is intentionally provider-agnostic so the rest of the system
- * never depends on these literal values.
+ * This is NOT a live catalogue and NOT a complete list of what any provider or
+ * gateway offers. It is a small, hand-maintained set of model FAMILY profiles
+ * used for planning and suitability. Nothing here fetches live pricing, and no
+ * claim is made that these are all available models.
+ *
+ * Two identities per entry, kept deliberately separate:
+ *   - `id`              Promgent's stable internal profile id (UI, history).
+ *   - `providerModelId` The provider/gateway identifier, where one is known.
+ *
+ * `capability*` scores are Promgent's INTERNAL suitability heuristics on a
+ * 0-100 scale. They are not benchmark rankings and should never be presented
+ * as objective measurements. Pricing is CREDIT per 1M tokens, curated and
+ * static; a live pricing adapter can replace it without changing this shape.
+ *
+ * Adding a model means appending one entry here — no other module needs to
+ * change, because nothing in the engine references a model by name.
  */
+export const REGISTRY_PROFILE_SOURCE = "curated" as const;
 export const MODELS: ModelConfig[] = [
   {
     id: "claude-opus",
+    providerModelId: "anthropic/claude-opus",
     displayName: "Claude Opus",
     provider: "Anthropic",
     capabilityTier: "frontier",
@@ -19,10 +33,12 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 95,
     reasoningCapability: 97,
     researchCapability: 92,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 200000,
   },
   {
     id: "claude-sonnet",
+    providerModelId: "anthropic/claude-sonnet",
     displayName: "Claude Sonnet",
     provider: "Anthropic",
     capabilityTier: "advanced",
@@ -31,10 +47,12 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 90,
     reasoningCapability: 88,
     researchCapability: 85,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 200000,
   },
   {
     id: "gpt-4o",
+    providerModelId: "openai/gpt-4o",
     displayName: "GPT-4o",
     provider: "OpenAI",
     capabilityTier: "advanced",
@@ -43,10 +61,12 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 87,
     reasoningCapability: 85,
     researchCapability: 82,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 128000,
   },
   {
     id: "gpt-4o-mini",
+    providerModelId: "openai/gpt-4o-mini",
     displayName: "GPT-4o mini",
     provider: "OpenAI",
     capabilityTier: "standard",
@@ -55,10 +75,12 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 68,
     reasoningCapability: 66,
     researchCapability: 64,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 128000,
   },
   {
     id: "gemini-pro",
+    providerModelId: "google/gemini-pro",
     displayName: "Gemini Pro",
     provider: "Google",
     capabilityTier: "advanced",
@@ -67,10 +89,12 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 80,
     reasoningCapability: 83,
     researchCapability: 88,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 1000000,
   },
   {
     id: "gemini-flash",
+    providerModelId: "google/gemini-flash",
     displayName: "Gemini Flash",
     provider: "Google",
     capabilityTier: "standard",
@@ -79,10 +103,12 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 65,
     reasoningCapability: 64,
     researchCapability: 70,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 1000000,
   },
   {
     id: "deepseek-v3",
+    providerModelId: "deepseek/deepseek-v3",
     displayName: "DeepSeek V3",
     provider: "DeepSeek",
     capabilityTier: "advanced",
@@ -91,10 +117,12 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 84,
     reasoningCapability: 79,
     researchCapability: 72,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 128000,
   },
   {
     id: "deepseek-r1",
+    providerModelId: "deepseek/deepseek-r1",
     displayName: "DeepSeek R1",
     provider: "DeepSeek",
     capabilityTier: "advanced",
@@ -103,6 +131,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 82,
     reasoningCapability: 93,
     researchCapability: 76,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 128000,
   },
   {
@@ -115,6 +144,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 52,
     reasoningCapability: 50,
     researchCapability: 48,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 32000,
   },
   {
@@ -127,6 +157,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 96,
     reasoningCapability: 98,
     researchCapability: 93,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 200000,
   },
   {
@@ -139,6 +170,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 92,
     reasoningCapability: 90,
     researchCapability: 86,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 200000,
   },
   {
@@ -151,6 +183,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 73,
     reasoningCapability: 71,
     researchCapability: 68,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 200000,
   },
   {
@@ -163,6 +196,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 95,
     reasoningCapability: 96,
     researchCapability: 90,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 400000,
   },
   {
@@ -175,6 +209,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 74,
     reasoningCapability: 76,
     researchCapability: 70,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 400000,
   },
   {
@@ -187,6 +222,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 91,
     reasoningCapability: 94,
     researchCapability: 93,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 1000000,
   },
   {
@@ -199,6 +235,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 76,
     reasoningCapability: 78,
     researchCapability: 74,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 1000000,
   },
   {
@@ -211,6 +248,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 90,
     reasoningCapability: 94,
     researchCapability: 88,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 256000,
   },
   {
@@ -223,6 +261,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 88,
     reasoningCapability: 85,
     researchCapability: 76,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 160000,
   },
   {
@@ -235,6 +274,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 86,
     reasoningCapability: 88,
     researchCapability: 80,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 256000,
   },
   {
@@ -247,6 +287,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 89,
     reasoningCapability: 85,
     researchCapability: 79,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 128000,
   },
   {
@@ -259,6 +300,7 @@ export const MODELS: ModelConfig[] = [
     codingCapability: 78,
     reasoningCapability: 80,
     researchCapability: 74,
+    profileSource: REGISTRY_PROFILE_SOURCE,
     contextWindow: 128000,
   },
 ];

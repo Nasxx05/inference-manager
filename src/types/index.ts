@@ -15,22 +15,49 @@ export type OptimizationPreference = "minimize-cost" | "balanced" | "maximum-qua
 
 export type CapabilityTier = "light" | "standard" | "advanced" | "frontier";
 
+/**
+ * A target-model entry in Promgent's registry.
+ *
+ * Two identities are deliberately kept separate:
+ *
+ *  - `id` is Promgent's INTERNAL profile id. It is stable, appears in the UI,
+ *    history and plan payloads, and must not change when a provider renames
+ *    something.
+ *  - `providerModelId` is the identifier that would be sent to the provider or
+ *    gateway. It may be unset when the catalogue is curated and no specific
+ *    provider id is being asserted.
+ *
+ * Capability scores are Promgent's internal suitability heuristics on a 0-100
+ * scale — they are NOT benchmark rankings, and `profileSource` records that the
+ * catalogue is curated static MVP data rather than fetched live.
+ */
 export interface ModelConfig {
+  /** Stable internal profile id. Never rename: it is persisted in history. */
   id: string;
   displayName: string;
   provider: string;
+  /**
+   * The provider/gateway model identifier, when one is known.
+   *
+   * Optional by design: the curated MVP catalogue describes model families
+   * rather than asserting exact provider ids, and Promgent never sends this
+   * anywhere itself — the user executes the prompt in their own environment.
+   */
+  providerModelId?: string;
   capabilityTier: CapabilityTier;
-  /** Price per million input tokens, in CREDIT. */
+  /** Price per million input tokens, in CREDIT. Curated static data. */
   inputPrice: number;
-  /** Price per million output tokens, in CREDIT. */
+  /** Price per million output tokens, in CREDIT. Curated static data. */
   outputPrice: number;
-  /** 0-100 */
+  /** 0-100 internal heuristic, not a benchmark score. */
   codingCapability: number;
-  /** 0-100 */
+  /** 0-100 internal heuristic, not a benchmark score. */
   reasoningCapability: number;
-  /** 0-100 */
+  /** 0-100 internal heuristic, not a benchmark score. */
   researchCapability: number;
   contextWindow: number;
+  /** Where this profile came from. "curated" means static MVP data. */
+  profileSource?: "curated" | "live";
 }
 
 export interface TaskPhase {
@@ -122,10 +149,35 @@ export interface TaskAnalysis {
   costDrivers?: string[];
 }
 
+/**
+ * A PLANNING estimate, not a provider quote.
+ *
+ * Every figure here is derived locally from workload signals and the curated
+ * pricing in the model registry. Nothing is fetched from a provider, and no
+ * number should be read as a guaranteed bill.
+ */
 export interface CostEstimate {
+  /** Estimated input/context tokens across all passes. */
+  estimatedInputTokens: number;
+  /** Estimated output/generation tokens across all passes. */
+  estimatedOutputTokens: number;
+  /** Cost of the estimated input tokens at the model's input rate. */
   inputCost: number;
+  /** Cost of the estimated output tokens at the model's output rate. */
   outputCost: number;
+  /** Tokens × rate for a single pass, before iterations and overhead. */
   baseExecutionCost: number;
+  /** Estimated total inference cost including iterations and overhead. */
+  estimatedInferenceCost: number;
+  /** How many generation/validation/revision passes were modelled. */
+  modelledPasses: number;
+  /** Human-readable reasons this estimate is what it is. */
+  costDrivers: string[];
+  /**
+   * Whether pricing came from curated static data or a live source. Drives the
+   * UI disclaimer, so the product never implies a live quote.
+   */
+  pricingSource: "curated" | "live";
   iterationCost: number;
   overheadCost: number;
   contextOverheadCost: number;
@@ -259,6 +311,15 @@ export interface PlanResult {
   feasibility: FeasibilityResult;
   optimizedScope: OptimizedScope | null;
   scopeApplied: boolean;
+  /** The concrete model Auto resolved to, when Auto was used. */
+  resolvedModelId?: string;
+  /** Why that model was chosen, when Auto was used. */
+  resolvedModelReason?: string;
+  /**
+   * True when every safe reduction was applied and the budget is still short.
+   * Lets the UI state insufficiency plainly instead of implying feasibility.
+   */
+  optimizationInsufficient?: boolean;
   recommendation: ModelRecommendation | null;
   comparison: ModelComparisonRow[];
   suitability: ModelSuitability | null;

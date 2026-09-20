@@ -35,6 +35,7 @@ import {
   WEIGHT_VALUE,
   buildEnrichedTask,
   describeEnrichedTask,
+  requirementWorkload,
   type EnrichedTask,
   type ResolvedRequirement,
 } from "@/lib/clarifier/enrichedTask";
@@ -44,7 +45,10 @@ import { resolveTaskEffort } from "@/lib/estimator/taskEffort";
 import { evaluateSuitability, selectCapableModel } from "@/lib/models/suitability";
 import { deriveRequirementProfile } from "@/lib/models/capabilities";
 import { buildComparison, selectModel } from "@/lib/models/modelSelector";
-import { applyScopeReduction, optimizeScope } from "@/lib/scopeOptimizer/scopeOptimizer";
+import {
+  applyScopeReduction,
+  optimizeScopeForBudget,
+} from "@/lib/scopeOptimizer/scopeOptimizer";
 import type {
   ClarifyingAnswer,
   ClarifyingQuestion,
@@ -261,6 +265,23 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
   const autoSelected = modelId === AUTO_MODEL_ID;
 
   /**
+   * Auto model resolution, done up front from capability requirements.
+   *
+   * This is a purely local decision: it needs what the task DEMANDS, which the
+   * enriched task already describes, not the LLM's narrative analysis. Resolving
+   * it here means the combined call always writes for a concrete model.
+   */
+  const autoRequirementProfile = deriveRequirementProfile({
+    taskType: enrichedTask.taskType,
+    complexity: "high",
+    effortScore: requirementWorkload(enrichedTask) * 4,
+  });
+  const preResolvedAutoModel = autoSelected
+    ? (selectCapableModel(autoRequirementProfile, MODELS, optimization) ?? null)
+    : null;
+
+
+  /**
    * Resolve the target model.
    *
    * Auto needs an analysis first, so on the two-call route it is resolved after
@@ -338,7 +359,24 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
       // Auto is resolved after this call, so the writer is told the capability
       // tier of the explicit choice, or a neutral tier when the user picked
       // Auto. The local recommendation still decides the target model.
-      const target = autoSelected ? neutralTargetModel() : findModelOrThrow(modelId);
+      /**
+       * The target model must be resolved BEFORE the prompt is written.
+       *
+       * Auto previously fell back to a neutral placeholder profile at this
+       * point, so the prompt was written generically and the real model was
+       * chosen only afterwards — the prompt could not be specialized for the
+       * model it would actually run on.
+       *
+       * On the two-call route the model is resolved after analysis and before
+       * generation (below). The combined route returns analysis and prompt in
+       * one response, so the model cannot be resolved in between; in that case
+       * Auto is resolved from the enriched task up front, before the call, and
+       * only falls back to the neutral profile when no capable model could be
+       * determined at all.
+       */
+      const target = autoSelected
+        ? (preResolvedAutoModel ?? neutralTargetModel())
+        : findModelOrThrow(modelId);
       try {
         const combined = await generatePlan({
           // The enriched description leads with the user's own words, then adds
@@ -431,6 +469,8 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
   let analysis = rawAnalysis;
   let optimizedScope: PlanResult["optimizedScope"] = null;
   let scopeApplied = false;
+  /** True when every safe reduction was applied and the budget is still short. */
+  let optimizationStillInsufficient = false;
 
   if (needsOptimization) {
     /**
@@ -441,40 +481,65 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
      * Each pass re-estimates and stops as soon as the budget is actually met,
      * so the returned scope is one that has been verified to fit.
      */
-    let candidate = optimizeScope(rawAnalysis, budget);
-    let current = estimateCost({
-      analysis: applyScopeReduction(rawAnalysis, candidate, taskDescription),
-      model,
-      preference: optimization,
-      taskDescription,
-      answerMultiplier: answerSignal.effortMultiplier,
-      addedRequirements: answerSignal.addedRequirements,
-    });
+    /**
+     * Optimize with the REAL estimator, not a proxy.
+     *
+     * The optimizer re-estimates after every deferral using the same cost
+     * engine the final number comes from, so the returned scope is one that has
+     * been verified to fit rather than one that merely looks smaller.
+     */
+    /**
+     * The requirement units under consideration, and the scale they imply.
+     *
+     * The estimate must actually respond to which requirements are kept — if
+     * it returned the same number regardless, the optimizer could not tell a
+     * helpful deferral from a useless one and would stop immediately.
+     */
+    const scopeRequirements = enrichedTask.resolvedRequirements.map((requirement) => ({
+      name: requirement.name,
+      weight: requirement.weight,
+      essential: false,
+    }));
 
-    for (let pass = 0; pass < 4 && current.recommendedMaximum > budget; pass += 1) {
-      const next = optimizeScope(
-        applyScopeReduction(rawAnalysis, candidate, taskDescription),
-        budget,
+    const estimateForScope = (includedNames: string[]) => {
+      const kept = scopeRequirements.filter((requirement) =>
+        includedNames.includes(requirement.name),
       );
-      // Stop when nothing further can be deferred: claiming another pass would
-      // produce a "reduced" scope that costs the same.
-      if (next.deferred.length <= candidate.deferred.length) break;
-      candidate = {
-        ...next,
-        deferred: [...next.deferred, ...candidate.deferred.filter((d) => !next.deferred.includes(d))],
-      };
-      current = estimateCost({
-        analysis: applyScopeReduction(rawAnalysis, candidate, taskDescription),
+      // Requirements kept drive the workload directly, so the estimate falls as
+      // items are deferred. Phase names are always present and never deferred.
+      const retainedRatio =
+        scopeRequirements.length > 0 ? kept.length / scopeRequirements.length : 1;
+
+      return estimateCost({
+        analysis: applyScopeReduction(
+          rawAnalysis,
+          { included: includedNames, deferred: [], simplified: [], rationale: "" },
+          taskDescription,
+        ),
         model,
         preference: optimization,
         taskDescription,
-        answerMultiplier: answerSignal.effortMultiplier,
-      });
-    }
+        answerMultiplier: 1 + (answerSignal.effortMultiplier - 1) * retainedRatio,
+        addedRequirements: kept.length,
+      }).recommendedMaximum;
+    };
 
-    optimizedScope = candidate;
-    if (applyOptimizedScope) {
-      analysis = applyScopeReduction(rawAnalysis, candidate, taskDescription);
+    const optimized = optimizeScopeForBudget({
+      taskDescription,
+      analysis: rawAnalysis,
+      budget,
+      estimate: estimateForScope,
+      // Defer real requirements, not generic phases: "payments" and
+      // "analytics" are deferrable, "Execution" is not.
+      requirements: scopeRequirements,
+    });
+
+    optimizedScope = optimized.scope;
+    // Whether the budget was actually met is part of the result, so the UI can
+    // say "still insufficient" instead of implying feasibility.
+    optimizationStillInsufficient = optimized.stillInsufficient;
+    if (applyOptimizedScope && optimized.scope) {
+      analysis = applyScopeReduction(rawAnalysis, optimized.scope, taskDescription);
       scopeApplied = true;
     }
   }
@@ -568,6 +633,13 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     optimizedScope,
     scopeApplied,
     recommendation,
+    /** Concrete resolved model when Auto was used, for the UI to show. */
+    resolvedModelId: autoSelected ? model.id : undefined,
+    resolvedModelReason: autoSelected
+      ? (recommendation?.reasons[0] ?? "Cheapest model that meets this task's capability requirements.")
+      : undefined,
+    /** True when even the safest scope reduction leaves the budget short. */
+    optimizationInsufficient: optimizationStillInsufficient,
     suitability,
     comparison: buildComparison(
       rawAnalysis,

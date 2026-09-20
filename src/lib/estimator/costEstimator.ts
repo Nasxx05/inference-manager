@@ -66,9 +66,15 @@ function round(value: number, decimals = 2): number {
 /**
  * Confidence in the estimate.
  *
- * Low confidence is honest for underspecified or huge tasks, and it widens the
- * range rather than pretending to precision. Small, well-defined tasks earn
- * high confidence.
+ * This is NOT statistical confidence — Promgent has no distribution of past
+ * runs to compute one from, and inventing a percentage would be false
+ * precision. It measures something defensible instead: how much structured
+ * information the estimate was built from.
+ *
+ * More known structure (analyser-supplied effort, per-phase tokens, an explicit
+ * confidence from the model, answered clarifications) means fewer assumptions
+ * had to be filled in locally, so the range can be narrower. Thin input means
+ * wide range and low confidence.
  */
 export function estimateConfidence(
   analysis: TaskAnalysis,
@@ -76,22 +82,52 @@ export function estimateConfidence(
   taskDescription: string,
 ): Confidence {
   const words = (taskDescription ?? "").trim().split(/\s+/).filter(Boolean).length;
-  const answeredContext = (analysis.risks?.length ?? 0) > 0;
 
   let score = 2; // start at "medium"
 
-  // A brief too short to describe real work is underspecified.
+  // --- Signals that the input is thin (fewer knowns, wider range) ---
   if (words < 5) score -= 1;
-  // Huge effort implies more unknowns.
   if (effort.score >= 80) score -= 1;
-  // Many requirements means more that could have been left unclear.
   if (effort.requirementCount > 10) score -= 1;
-  // Well-described, bounded work earns confidence.
-  if (words >= 4 && words <= 120 && effort.score < 45) score += 1;
-  if (answeredContext && effort.score < 60) score += 0;
 
-  if (score >= 3) return "high";
-  if (score <= 1) return "low";
+  // --- Signals that real structure was available (fewer assumptions) ---
+  // The analyser supplied its own effort model rather than us deriving one.
+  if (analysis.effort) score += 1;
+  // Per-phase token estimates mean tokens were built up, not assumed whole.
+  if (analysis.phaseTokens && Object.keys(analysis.phaseTokens).length > 0) score += 1;
+  // The model stated its own confidence and it agrees this is well-specified.
+  if (analysis.confidence === "high") score += 1;
+  // A concrete phase breakdown is evidence the scope was actually decomposed.
+  if ((analysis.phases?.length ?? 0) >= 4) score += 1;
+  // Bounded, well-described work.
+  if (words >= 4 && words <= 120 && effort.score < 45) score += 1;
+  /**
+   * Small and singular is itself a strong signal.
+   *
+   * A task with one requirement and a low effort score has almost nowhere to
+   * hide: there is no integration surface and no decomposition ambiguity. The
+   * absence of extra structure is not missing information here — it is evidence
+   * the work is genuinely small.
+   */
+  if (effort.requirementCount <= 2 && effort.score < 45) score += 1;
+
+  if (score >= 5) score = 5;
+
+  /**
+   * Scale caps confidence, and it is not negotiable by other signals.
+   *
+   * A fully-specified brief for a genuinely huge system is still uncertain:
+   * emergent complexity, integration failures and rework cannot be ruled out by
+   * knowing the requirements. Good structure narrows the range; it cannot make
+   * a large build predictable. Without this cap a huge task with a detailed
+   * analysis could score "high", which would be false confidence.
+   */
+  if (effort.score >= 80 || effort.requirementCount > 10) {
+    return score >= 4 ? "medium" : "low";
+  }
+
+  if (score >= 5) return "high";
+  if (score <= 2) return "low";
   return "medium";
 }
 
@@ -225,10 +261,28 @@ export function estimateCost(
   const minimumViable = Math.max(0.05, minimum * config.minimumViableFactor);
 
 
+  /**
+   * Total modelled token volume across every pass, not just one.
+   *
+   * Shown to the user so the estimate's basis is visible: "this many tokens at
+   * this model's rate" is auditable, whereas a lone CREDIT figure is not.
+   */
+  const totalInputTokens = Math.round(totalsInput * iteration.passes);
+  const totalOutputTokens = Math.round(totalsOutput * iteration.passes);
+
   return {
+    estimatedInputTokens: totalInputTokens,
+    estimatedOutputTokens: totalOutputTokens,
     inputCost: round(inputCost, 3),
     outputCost: round(outputCost, 3),
     baseExecutionCost: round(baseExecutionCost, 3),
+    estimatedInferenceCost: round(baseline, 2),
+    modelledPasses: iteration.passes,
+    // Generated from the same signals the estimator used, never written by hand.
+    costDrivers: explainCost(analysis, effort),
+    // Curated until a live pricing adapter exists; the UI reads this to state
+    // plainly that the figure is not a live quote.
+    pricingSource: "curated",
     iterationCost: round(iterationCost, 3),
     overheadCost: round(overheadCost, 3),
     contextOverheadCost: round(contextOverheadCost, 3),

@@ -238,9 +238,21 @@ export function deriveTaskEffort({
    * Apply the clarifying-answer signal. Confirmed components are real work, so
    * the score, requirement count and implementation size all rise together.
    */
-  const adjustedScore = Math.round(clamp(score * answerMultiplier, 0, 100));
   const adjustedRequirements = clamp(requirementCount + addedRequirements, 1, 60);
   const adjustedCritical = Math.max(1, Math.round(adjustedRequirements * 0.7));
+
+  /**
+   * Extra requirements must raise the workload, not just the count.
+   *
+   * Counting a component while leaving the score unchanged would mean the cost
+   * never moves — the requirement count would be display-only. Each additional
+   * requirement adds implementation and integration work, so the score and
+   * implementation size scale with it.
+   */
+  const requirementLift = 1 + Math.max(0, addedRequirements) * 0.06;
+  const adjustedScore = Math.round(
+    clamp(score * answerMultiplier * requirementLift, 0, 100),
+  );
 
   return {
     level: effortLevelFromScore(adjustedScore),
@@ -249,10 +261,12 @@ export function deriveTaskEffort({
     criticalRequirementCount: adjustedCritical,
     optionalRequirementCount: Math.max(0, adjustedRequirements - adjustedCritical),
     estimatedIterations: iterations,
-    implementationSize: Math.round(clamp(implementationSize * answerMultiplier, 0, 100)),
+    implementationSize: Math.round(
+      clamp(implementationSize * answerMultiplier * requirementLift, 0, 100),
+    ),
     contextOverhead: Math.round(contextOverhead),
-    toolOverhead: Math.round(clamp(toolOverhead * answerMultiplier, 0, 100)),
-    revisionLoad: Math.round(clamp(revisionLoad * answerMultiplier, 0, 100)),
+    toolOverhead: Math.round(clamp(toolOverhead * answerMultiplier * requirementLift, 0, 100)),
+    revisionLoad: Math.round(clamp(revisionLoad * answerMultiplier * requirementLift, 0, 100)),
   };
 }
 
@@ -312,8 +326,13 @@ export function resolveTaskEffort(input: EffortInput): TaskEffort {
     Number.isFinite(iterations.max);
 
   // The LLM scored the task before the user answered, so the confirmed scope
-  // is layered on top of its score rather than replacing it.
-  const score = clamp01to100(supplied.score * (input.answerMultiplier ?? 1), derived.score);
+  // is layered on top of its score rather than replacing it. Additional
+  // confirmed requirements lift it further.
+  const requirementLift = 1 + Math.max(0, input.addedRequirements ?? 0) * 0.06;
+  const score = clamp01to100(
+    supplied.score * (input.answerMultiplier ?? 1) * requirementLift,
+    derived.score,
+  );
 
   return {
     level: effortLevelFromScore(score),
@@ -341,16 +360,16 @@ export function resolveTaskEffort(input: EffortInput): TaskEffort {
         }
       : derived.estimatedIterations,
     implementationSize: clamp01to100(
-      supplied.implementationSize * (input.answerMultiplier ?? 1),
+      supplied.implementationSize * (input.answerMultiplier ?? 1) * requirementLift,
       derived.implementationSize,
     ),
     contextOverhead: clamp01to100(supplied.contextOverhead, derived.contextOverhead),
     toolOverhead: clamp01to100(
-      supplied.toolOverhead * (input.answerMultiplier ?? 1),
+      supplied.toolOverhead * (input.answerMultiplier ?? 1) * requirementLift,
       derived.toolOverhead,
     ),
     revisionLoad: clamp01to100(
-      supplied.revisionLoad * (input.answerMultiplier ?? 1),
+      supplied.revisionLoad * (input.answerMultiplier ?? 1) * requirementLift,
       derived.revisionLoad,
     ),
   };

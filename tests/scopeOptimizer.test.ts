@@ -2,16 +2,31 @@ import { describe, expect, it } from "vitest";
 import { heuristicAnalyze } from "@/lib/ai/taskAnalyzer";
 import { estimateCost } from "@/lib/estimator/costEstimator";
 import { findModelOrThrow } from "@/data/models";
-import { applyScopeReduction, optimizeScope } from "@/lib/scopeOptimizer/scopeOptimizer";
+import {
+  applyScopeReduction,
+  optimizeScope,
+} from "@/lib/scopeOptimizer/scopeOptimizer";
+import { buildEnrichedTask } from "@/lib/clarifier/enrichedTask";
 
 const BIG_TASK =
   "Build a complete ecommerce platform with authentication, real payment processing, admin dashboard, order management and analytics.";
 
 const bigTask = heuristicAnalyze(BIG_TASK);
 
+/**
+ * The resolved requirements for BIG_TASK, from the same enriched-task module the
+ * planner uses. The optimizer defers REQUIREMENTS, so tests must supply them —
+ * deferring generic phases ("Review") would prove nothing about real behavior.
+ */
+const bigRequirements = buildEnrichedTask({
+  taskDescription: BIG_TASK,
+  taskType: bigTask.taskType,
+  answers: [],
+}).resolvedRequirements;
+
 describe("scope optimizer", () => {
   it("produces included, deferred and simplified lists for a large task with a small budget", () => {
-    const scope = optimizeScope(bigTask, 5);
+    const scope = optimizeScope(bigTask, 5, bigRequirements);
     expect(scope.included.length).toBeGreaterThan(0);
     expect(scope.deferred.length).toBeGreaterThan(0);
     expect(scope.simplified.length).toBeGreaterThan(0);
@@ -19,7 +34,7 @@ describe("scope optimizer", () => {
   });
 
   it("defers known expensive features for an ecommerce task", () => {
-    const scope = optimizeScope(bigTask, 5);
+    const scope = optimizeScope(bigTask, 5, bigRequirements);
     const joined = scope.deferred.join(" | ").toLowerCase();
     expect(joined).toContain("payment");
     expect(joined).toContain("admin");
@@ -33,7 +48,7 @@ describe("scope optimizer", () => {
       preference: "balanced",
       taskDescription: BIG_TASK,
     });
-    const scope = optimizeScope(bigTask, 5);
+    const scope = optimizeScope(bigTask, 5, bigRequirements);
     const after = estimateCost({
       analysis: applyScopeReduction(bigTask, scope, BIG_TASK),
       model,
@@ -91,7 +106,7 @@ describe("scope optimizer", () => {
   });
 
   it("keeps essential phases in the included scope", () => {
-    const scope = optimizeScope(bigTask, 5);
+    const scope = optimizeScope(bigTask, 5, bigRequirements);
     const essential = bigTask.phases.filter((p) => p.priority === "essential");
     for (const phase of essential) {
       expect(scope.included.join(" | ")).toContain(phase.name);
@@ -99,7 +114,7 @@ describe("scope optimizer", () => {
   });
 
   it("does not produce duplicate scope items", () => {
-    const scope = optimizeScope(bigTask, 5);
+    const scope = optimizeScope(bigTask, 5, bigRequirements);
     const counts = new Map<string, number>();
     for (const item of [...scope.included, ...scope.deferred, ...scope.simplified]) {
       counts.set(item, (counts.get(item) ?? 0) + 1);

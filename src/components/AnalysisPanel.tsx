@@ -111,6 +111,14 @@ function StatusBadge({ plan }: { plan: PlanResult }) {
   );
 }
 
+/** Rounds tokens to readable figures — 24.3k, not 24,318. */
+function formatTokens(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  if (value >= 1_000_000) return `${Math.round(value / 100_000) / 10}M`;
+  if (value >= 1000) return `${Math.round(value / 100) / 10}k`;
+  return String(Math.round(value));
+}
+
 export function AnalysisPanel({
   plan,
   onUseOptimizedScope,
@@ -164,6 +172,19 @@ export function AnalysisPanel({
           ) : null}
           <Metric label="Confidence" value={plan.cost.confidence} mono={false} />
         </div>
+      </Card>
+
+      {/* The arithmetic behind the range, so the estimate is auditable. */}
+      <Card title="Estimate Basis">
+        <Metric label="Est. input tokens" value={formatTokens(plan.cost.estimatedInputTokens)} />
+        <Metric label="Est. output tokens" value={formatTokens(plan.cost.estimatedOutputTokens)} />
+        <Metric
+          label="Est. inference cost"
+          value={`${formatCredit(plan.cost.estimatedInferenceCost)} CREDIT`}
+          tone="credit"
+        />
+        <Metric label="Modelled passes" value={plan.cost.modelledPasses} />
+        <Metric label="Pricing" value={plan.cost.pricingSource} mono={false} />
       </Card>
 
       {/* WHY: makes a large estimate explainable rather than arbitrary. */}
@@ -230,6 +251,12 @@ export function AnalysisPanel({
         <div className="mt-3 border-t border-line pt-3">
           <StatusBadge plan={plan} />
         </div>
+        {/* Estimates are derived locally from curated pricing, so the UI must
+            never imply a live provider quote. */}
+        <p className="mt-3 text-xs leading-relaxed text-muted">
+          Planning estimate, not a guaranteed final provider bill. Actual cost depends on
+          the model, token usage, iterations, tools and execution environment.
+        </p>
       </Card>
 
       {plan.analysis.phases.length > 0 ? (

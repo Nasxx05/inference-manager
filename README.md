@@ -16,6 +16,36 @@ Promgent never executes your task. It plans it, prices it, and hands you the pro
 
 ---
 
+## How Promgent works
+
+```mermaid
+flowchart TD
+    A[User] --> B[Promgent]
+    B --> C[Render Backend]
+    C --> D[Orbio Gateway]
+    D --> E[Internal AI Model]
+    E --> F[Task Planning]
+    F --> G[Cost + Feasibility + Model + Scope Analysis]
+    G --> H[Model-Specific Prompt Generation]
+    H --> I[Copy Prompt]
+```
+
+Promgent uses an internal AI model through the Orbio Gateway to reason about the user's task and
+compile a model-specific prompt. The user does not connect a wallet, provide an Orbio key, or
+execute the task through Promgent. Promgent plans the work and returns a prompt the user can take
+elsewhere.
+
+| Layer | Where | Notes |
+|---|---|---|
+| Frontend | Vercel | Static UI. Holds no credentials. |
+| Backend | Render | Owns the Orbio API key. Does all AI calls. |
+| Orbio Gateway | `AGENTFUND_AI_BASE_URL` | OpenAI-compatible API used by the backend. |
+| Internal AI model | `AGENTFUND_AI_MODEL` | Configurable through server environment variables. |
+| Final task execution | **Outside Promgent** | The user runs the copied prompt themselves. |
+| User CREDIT field | Planning budget | A number the user types — **not a wallet balance**. |
+
+---
+
 ## What it does
 
 Promgent is a budget-aware AI task planner and prompt compiler. For a single request it answers:
@@ -44,6 +74,22 @@ Promgent refuses to do that. It counts requirements, weights phases, models iter
 and multiplies by the actual price of the model you chose. A portfolio site stays cheap; a
 production RAG pipeline and a multi-tenant SaaS platform cost substantially more — because the
 underlying work does.
+
+---
+
+## Clarification actually changes the plan
+
+Promgent resolves the task and the user's answers into one **enriched task
+specification** before analysis: `originalTask` (verbatim), resolved
+requirements (each with a workload weight), answers, and stated assumptions.
+
+Because the estimator reads that same specification, answers affect **effort,
+requirement count, cost, model suitability and scope** — not only the wording of
+the prompt. Confirming authentication, multi-user support or production
+deployment raises the estimate; "no auth" or "prototype only" lowers it.
+
+Questions are only asked when the answer could materially change the work, and
+skipped questions become explicit assumptions rather than silent defaults.
 
 ---
 
@@ -303,6 +349,26 @@ Health endpoints: `/health`, `/health/ai`, `/health/ai/test`. None return secret
 To change the internal model, set `AGENTFUND_AI_MODEL` and restart. Nothing else is required.
 
 ---
+
+## What Promgent is and is not claiming
+
+Accuracy matters more than confidence, so the limits are stated plainly:
+
+- **An internal AI model is required.** Task analysis and prompt generation go
+  through the configured model. Without `AGENTFUND_AI_*` set, planning fails —
+  there is no offline mode that produces real plans.
+- **Model and pricing data is curated static MVP data.** It is a small set of
+  model *family* profiles, not a live catalogue and not a complete list of any
+  provider's models. Capability scores are Promgent's internal suitability
+  heuristics, **not** benchmark rankings.
+- **Estimates are planning estimates.** They are computed locally from workload
+  signals and curated pricing. They are not live Orbio prices and not a
+  guaranteed provider bill.
+- **Model suitability is heuristic.** "Not recommended" means the model is
+  unlikely to be a reliable choice for this task — not that it cannot attempt it.
+- **Confidence reflects information, not statistics.** It measures how much
+  structured information the estimate was built from, not a confidence interval
+  from past runs.
 
 ## Notes and limits
 

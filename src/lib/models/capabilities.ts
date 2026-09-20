@@ -92,27 +92,40 @@ export function deriveRequirementProfile(input: {
    * Demand rises steeply with effort, not gently.
    *
    * A large build cannot be attempted by a weak model: it fails partway and
-   * burns the budget on corrections. So a high-effort task demands
-   * near-frontier capability, while a small task stays within reach of cheap
-   * models. Without this steepness the derived floor stays low enough that a
-   * mini model reads as a "strong fit" for a production RAG pipeline — exactly
-   * the mistake the suitability engine exists to catch.
+   * burns the budget on corrections. So a high-effort task demands near-frontier
+   * capability, while a small task stays within reach of cheap models. Without
+   * this steepness the derived floor stays low enough that a mini model reads as
+   * a "strong fit" for a production RAG pipeline — exactly the mistake the
+   * suitability engine exists to catch.
+   *
+   * The ceiling is 88, not 100. Saturating at 100 would mean no model can ever
+   * clear the bar, so every model would be flagged and the verdict would carry
+   * no information. High effort should demand a *lot*, not the impossible.
    */
-  const demand = Math.min(100, 40 + general * 0.75);
+  const demand = Math.min(88, 40 + general * 0.6);
 
   if (isCoding) {
     return {
       codingRequirement: Math.min(100, demand + 10),
       reasoningRequirement: Math.min(100, demand),
-      researchRequirement: Math.round(demand * 0.6),
-      contextRequirement: Math.min(100, demand),
-      structuredOutputRequirement: Math.round(demand * 0.85),
+      /**
+       * Context and research stay proportional to the task, not to raw effort.
+       *
+       * Previously these scaled with `demand` alone, so a large coding task
+       * demanded maximum research and context handling. That flagged even
+       * frontier models as merely "acceptable" and made the verdict useless.
+       * A build task is coding- and reasoning-bound; context matters, but it is
+       * not the binding constraint.
+       */
+      researchRequirement: Math.round(demand * 0.45),
+      contextRequirement: Math.round(demand * 0.7),
+      structuredOutputRequirement: Math.round(demand * 0.8),
     };
   }
 
   if (isResearch) {
     return {
-      codingRequirement: Math.round(demand * 0.5),
+      codingRequirement: Math.round(demand * 0.4),
       reasoningRequirement: Math.min(100, demand),
       researchRequirement: Math.min(100, demand + 8),
       contextRequirement: Math.min(100, demand + 8),
