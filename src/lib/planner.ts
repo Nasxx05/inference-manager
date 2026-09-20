@@ -32,25 +32,20 @@ import { AiError } from "@/lib/ai/errors";
 import { heuristicAnalyze } from "@/lib/ai/taskAnalyzer";
 import { generatePrompt } from "@/lib/ai/promptGenerator";
 import { answerScopeSignal, resolveAnswers, answersUsed } from "@/lib/clarifier";
-import {
-  WEIGHT_VALUE,
-  buildEnrichedTask,
-  describeEnrichedTask,
-  requirementWorkload,
-  type EnrichedTask,
-  type ResolvedRequirement,
-} from "@/lib/clarifier/enrichedTask";
+import { buildEnrichedTask, describeEnrichedTask } from "@/lib/clarifier/enrichedTask";
 import { allocatePhaseCosts, estimateCost, formatRange } from "@/lib/estimator/costEstimator";
 import { evaluateFeasibility, planReserve } from "@/lib/estimator/feasibilityEngine";
 import { resolveTaskEffort } from "@/lib/estimator/taskEffort";
 import { evaluateSuitability, selectCapableModel } from "@/lib/models/suitability";
 import { deriveRequirementProfile } from "@/lib/models/capabilities";
 import { buildComparison, selectModel } from "@/lib/models/modelSelector";
+import { createCanonicalEstimator } from "@/lib/scopeOptimizer/canonicalEstimator";
 import {
-  applyScopeReduction,
-  optimizeScopeForBudget,
-} from "@/lib/scopeOptimizer/scopeOptimizer";
-import { buildFinalScope, optimizeFinalScope } from "@/lib/scopeOptimizer/finalScope";
+  buildFinalScope,
+  excludedRequirements,
+  includedRequirements,
+  optimizeFinalScope,
+} from "@/lib/scopeOptimizer/finalScope";
 import type { FinalScope } from "@/types";
 import type {
   ClarifyingAnswer,
@@ -99,23 +94,6 @@ export interface PlanBuildResult {
   retryCount: number;
 }
 
-/** Stand-in target description for Auto: "auto" is not a model id, and naming
- * one here would bake a specific model into the prompt. */
-function neutralTargetModel(): ModelConfig {
-  return {
-    id: "auto",
-    displayName: "the recommended model",
-    provider: "unspecified",
-    capabilityTier: "standard",
-    inputPrice: 0,
-    outputPrice: 0,
-    codingCapability: 0,
-    reasoningCapability: 0,
-    researchCapability: 0,
-    contextWindow: 32000,
-  };
-}
-
 function executionPlanFor(
   analysis: TaskAnalysis,
   optimization: OptimizationPreference,
@@ -149,59 +127,6 @@ export async function buildPlan(request: PlanRequest): Promise<PlanResult> {
  * the provider rather than guessed at.
  */
 /**
- * Estimates the scope locally from the enriched task and defers work until the
- * budget is met. Used only to give the prompt writer the resolved scope in the
- * same call; the plan's authoritative scope is still computed after analysis.
- */
-function preResolveScope(input: {
-  enrichedTask: EnrichedTask;
-  budget: number;
-  optimization: OptimizationPreference;
-  modelId: string;
-}): { included: string[]; deferred: string[] } | null {
-  const { enrichedTask, budget, optimization, modelId } = input;
-
-  let model: ModelConfig;
-  try {
-    model = findModelOrThrow(modelId);
-  } catch {
-    return null;
-  }
-
-  const included: string[] = [];
-  const deferred: string[] = [];
-  const active = [...enrichedTask.resolvedRequirements];
-
-  const estimateFor = (requirements: ResolvedRequirement[]): number =>
-    estimateCost({
-      analysis: {
-        ...heuristicAnalyze(enrichedTask.originalTask),
-        effort: undefined,
-      },
-      model,
-      preference: optimization,
-      taskDescription: enrichedTask.originalTask,
-      answerMultiplier: 1 + requirements.length * 0.08,
-      addedRequirements: requirements.length,
-    }).recommendedMaximum;
-
-  // Defer the heaviest requirements first while the estimate exceeds budget.
-  for (let pass = 0; pass < 8 && estimateFor(active) > budget; pass += 1) {
-    if (active.length === 0) break;
-    const heaviest = active.reduce((worst, current) =>
-      WEIGHT_VALUE[current.weight] > WEIGHT_VALUE[worst.weight] ? current : worst,
-    );
-    active.splice(active.indexOf(heaviest), 1);
-    deferred.push(heaviest.name);
-  }
-
-  for (const requirement of active) included.push(requirement.name);
-  if (deferred.length === 0) return null;
-
-  return { included, deferred };
-}
-
-/**
  * Enforces the invariants that make a plan internally consistent.
  *
  * Throws rather than repairing: silently "fixing" a mismatch after the prompt
@@ -212,28 +137,62 @@ function assertPlanConsistency(input: {
   promptModelId: string;
   costModelId: string;
   finalScope: FinalScope;
+  /** The scope the final estimate was computed from. */
+  estimateScope: FinalScope;
+  /** The scope the prompt was written for. */
+  promptScope: FinalScope;
+  /** Re-derives the cost of a scope through the canonical estimator. */
+  reestimate: (scope: FinalScope) => number;
+  /** The number the plan reports. */
+  reportedEstimate: number;
   prompt: string;
   autoSelected: boolean;
 }): void {
-  const { resolvedModelId, promptModelId, costModelId, finalScope, prompt, autoSelected } = input;
+  const {
+    resolvedModelId,
+    promptModelId,
+    costModelId,
+    finalScope,
+    estimateScope,
+    promptScope,
+    reestimate,
+    reportedEstimate,
+    prompt,
+    autoSelected,
+  } = input;
 
-  // 1 & 2. One model everywhere.
+  const fail = (message: string): never => {
+    throw new AiError("AI_VALIDATION_FAILED", `Internal planning inconsistency: ${message}`);
+  };
+
+  // 1. One model everywhere: resolved === prompt === cost.
   if (resolvedModelId !== promptModelId || resolvedModelId !== costModelId) {
-    throw new AiError(
-      "AI_VALIDATION_FAILED",
-      `Internal planning inconsistency: model mismatch (resolved=${resolvedModelId}, prompt=${promptModelId}, cost=${costModelId}).`,
+    fail(
+      `model mismatch (resolved=${resolvedModelId}, prompt=${promptModelId}, cost=${costModelId}).`,
     );
   }
 
-  // 3. Auto must resolve to a concrete model.
+  // 2. Auto must resolve to a concrete model, never "auto".
   if (autoSelected && (!resolvedModelId || resolvedModelId === "auto")) {
-    throw new AiError(
-      "AI_VALIDATION_FAILED",
-      "Internal planning inconsistency: Auto did not resolve to a concrete model.",
+    fail("Auto did not resolve to a concrete model.");
+  }
+
+  // 3. One scope everywhere: final === estimated === prompted.
+  const ids = (scope: FinalScope) => [...scope.includedIds].sort().join("|");
+  if (ids(finalScope) !== ids(estimateScope) || ids(finalScope) !== ids(promptScope)) {
+    fail("the final scope, the estimated scope and the prompted scope are not the same scope.");
+  }
+
+  // 4. The reported estimate is the canonical estimate OF THAT SCOPE.
+  const recomputed = reestimate(finalScope);
+  if (Math.abs(recomputed - reportedEstimate) > 0.01) {
+    fail(
+      `the reported estimate (${reportedEstimate}) is not the canonical estimate of the ` +
+        `final scope (${recomputed}).`,
     );
   }
 
-  // 4. Core REQUIREMENTS must survive optimization. (Generic phases are
+  // 5. Core REQUIREMENTS must survive optimization. (Generic phases are
   //    workflow scaffolding, not the user's requirements, so they are excluded
   //    from this check.)
   const included = new Set(finalScope.includedIds);
@@ -241,26 +200,18 @@ function assertPlanConsistency(input: {
     (unit) => unit.core && unit.source === "task" && !included.has(unit.id),
   );
   if (droppedCore.length > 0) {
-    throw new AiError(
-      "AI_VALIDATION_FAILED",
-      `Internal planning inconsistency: core requirement(s) removed (${droppedCore
-        .map((unit) => unit.name)
-        .join(", ")}).`,
-    );
+    fail(`core requirement(s) removed (${droppedCore.map((unit) => unit.name).join(", ")}).`);
   }
 
-  // 5. Deferred work must not be requested in the prompt.
+  // 6. Deferred work must not be requested in the prompt.
   const excluded = new Set(finalScope.excludedIds);
   const lower = prompt.toLowerCase();
   const leaked = finalScope.requirements.filter(
     (unit) => excluded.has(unit.id) && lower.includes(unit.name.toLowerCase()),
   );
   if (leaked.length > 0) {
-    throw new AiError(
-      "AI_VALIDATION_FAILED",
-      `Internal planning inconsistency: deferred requirement(s) present in the prompt (${leaked
-        .map((unit) => unit.name)
-        .join(", ")}).`,
+    fail(
+      `deferred requirement(s) present in the prompt (${leaked.map((unit) => unit.name).join(", ")}).`,
     );
   }
 }
@@ -307,64 +258,22 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     answers: clarifyingAnswers,
   });
 
-  /**
-   * Pre-call scope resolution.
-   *
-   * The prompt is written once, by the same call that produces the analysis. If
-   * the user has accepted an optimized scope, the writer must know about it
-   * up front — otherwise the prompt describes the original request while the UI
-   * shows a reduced one.
-   *
-   * This estimates from the enriched task's own resolved requirements (no LLM
-   * call), defers the heaviest non-essential ones while over budget, and feeds
-   * the result into the prompt. The authoritative post-analysis scope is still
-   * computed after the call; this one exists so the two cannot contradict.
-   */
-  const preResolvedScope = applyOptimizedScope
-    ? preResolveScope({
-        enrichedTask,
-        budget,
-        optimization,
-        modelId: modelId === AUTO_MODEL_ID ? "claude-sonnet" : modelId,
-      })
-    : null;
-
   const autoSelected = modelId === AUTO_MODEL_ID;
 
   /**
-   * Auto model resolution, done up front from capability requirements.
+   * THE ONE authoritative model resolution for this request.
    *
-   * This is a purely local decision: it needs what the task DEMANDS, which the
-   * enriched task already describes, not the LLM's narrative analysis. Resolving
-   * it here means the combined call always writes for a concrete model.
-   */
-  const autoRequirementProfile = deriveRequirementProfile({
-    taskType: enrichedTask.taskType,
-    complexity: "high",
-    effortScore: requirementWorkload(enrichedTask) * 4,
-  });
-  const preResolvedAutoModel = autoSelected
-    ? (selectCapableModel(autoRequirementProfile, MODELS, optimization) ?? null)
-    : null;
-
-
-  /**
-   * Resolve the target model.
+   * There is exactly one decision, memoised here and read by every later
+   * stage: prompt writer, canonical estimator, feasibility, suitability and
+   * the final consistency check.
    *
-   * Auto needs an analysis first, so on the two-call route it is resolved after
-   * analysis. On the combined route the model is unknown until the response
-   * arrives, so Auto is resolved from that analysis and the prompt is already
-   * written for the tier of whatever was chosen — which is why the combined
-   * prompt asks for phrasing suited to the target's capability tier and the
-   * fallback path is used when an explicit Auto selection needs precision.
-   */
-  /**
-   * THE authoritative model resolution, memoised.
+   * Both routes obey this contract. The combined route returns analysis and
+   * prompt in one response, so the model cannot be resolved in between; it is
+   * therefore resolved BEFORE the call. Either way it happens once, and the
+   * prompt is written for the exact model the plan reports.
    *
-   * Auto was previously resolved once before the prompt call (as a
-   * pre-resolved guess) and again afterwards, so the prompt could be
-   * specialized for one model while the plan reported another. Now it is
-   * computed once and every later stage reads this same value.
+   * Auto is always resolved to a concrete model — never a neutral placeholder
+   * and never the literal id "auto".
    */
   let resolvedModel: {
     model: ModelConfig;
@@ -428,6 +337,89 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     return { model: findModelOrThrow(resolvedModelId), recommendation };
   }
 
+  /**
+   * THE PLANNING CONTEXT: target model and canonical scope, decided ONCE,
+   * before any prompt is written.
+   *
+   * Both come from the enriched task and the local heuristic analysis, not
+   * from the LLM's narrative. On the combined route the LLM's analysis arrives
+   * in the same response as the prompt, so anything decided afterwards could
+   * not reach the writer — deciding up front is what makes "the prompt is
+   * written for the scope and model the plan reports" actually true.
+   *
+   * Requirements are deterministic from the user's own words plus their
+   * answers, so the scope never depends on the LLM at all.
+   */
+  const heuristicAnalysis = heuristicAnalyze(describeEnrichedTask(enrichedTask));
+  const { model, recommendation } = await resolveTargetModel(heuristicAnalysis);
+
+  const baseEffort = resolveTaskEffort({
+    analysis: heuristicAnalysis,
+    taskDescription,
+    answerMultiplier: answerSignal.effortMultiplier,
+    addedRequirements: answerSignal.addedRequirements,
+  });
+
+  /** INITIAL SCOPE — requirements with stable ids, nothing deferred yet. */
+  const initialScope: FinalScope = buildFinalScope({
+    analysis: heuristicAnalysis,
+    requirements: enrichedTask.resolvedRequirements.map((requirement) => ({
+      name: requirement.name,
+      weight: requirement.weight,
+    })),
+  });
+
+  /** THE canonical estimator, shared by the optimizer and the final estimate. */
+  const canonical = createCanonicalEstimator({
+    analysis: heuristicAnalysis,
+    model,
+    optimization,
+    taskDescription,
+    answerMultiplier: answerSignal.effortMultiplier,
+    addedRequirements: answerSignal.addedRequirements,
+    baseEffort,
+    fullRequirementCount: initialScope.requirements.length,
+  });
+
+  /** CANONICAL ESTIMATE of the initial scope, and the budget check. */
+  const initialCost = canonical.estimateFull(initialScope);
+  const needsOptimization =
+    initialCost.recommendedMaximum > budget || initialCost.maximum > budget;
+
+  /**
+   * OPTIMIZE THE SAME SCOPE — the only optimization engine. It re-estimates
+   * every candidate with the canonical estimator, respects core work and
+   * dependency safety, is bounded and deterministic, and never uses a
+   * "drop half the optional items" strategy.
+   */
+  const optimized = needsOptimization
+    ? optimizeFinalScope({ scope: initialScope, budget, estimate: canonical.estimate })
+    : null;
+
+  /** True when every safe reduction was applied and the budget is still short. */
+  const optimizationStillInsufficient = optimized
+    ? !optimized.withinBudget
+    : initialCost.recommendedMaximum > budget;
+
+  /**
+   * THE FINAL CANONICAL SCOPE — the single source of truth.
+   *
+   * The reduction the user accepted becomes the scope; otherwise the full
+   * scope stands. Either way this one object is what the prompt is written
+   * for, what the final estimate is computed from, and what the plan reports.
+   */
+  const finalScope: FinalScope =
+    applyOptimizedScope && optimized ? optimized.finalScope : initialScope;
+
+  /** Whether the reduced scope was actually applied to the plan's numbers. */
+  const scopeApplied =
+    applyOptimizedScope && optimized !== null && finalScope.reductions.length > 0;
+
+  /** FINAL CANONICAL ESTIMATE of that scope, with the resolved model. */
+  const cost = canonical.estimateFull(finalScope);
+
+  const optimizedEstimate = optimized ? canonical.estimateFull(finalScope) : null;
+
   let route: PlanRoute = "combined";
   let llmDurationMs = 0;
   let parseDurationMs = 0;
@@ -445,47 +437,27 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
    */
   async function produceAnalysisAndPrompt(): Promise<{ analysis: TaskAnalysis; prompt: string }> {
     if (aiCombinedEnabled()) {
-      // Auto is resolved after this call, so the writer is told the capability
-      // tier of the explicit choice, or a neutral tier when the user picked
-      // Auto. The local recommendation still decides the target model.
       /**
-       * The target model must be resolved BEFORE the prompt is written.
-       *
-       * Auto previously fell back to a neutral placeholder profile at this
-       * point, so the prompt was written generically and the real model was
-       * chosen only afterwards — the prompt could not be specialized for the
-       * model it would actually run on.
-       *
-       * On the two-call route the model is resolved after analysis and before
-       * generation (below). The combined route returns analysis and prompt in
-       * one response, so the model cannot be resolved in between; in that case
-       * Auto is resolved from the enriched task up front, before the call, and
-       * only falls back to the neutral profile when no capable model could be
-       * determined at all.
+       * The target model and the final scope were both resolved above, before
+       * this call. The writer therefore receives the exact model the plan will
+       * report and the exact scope the plan will cost — never a placeholder.
        */
-      /**
-       * Resolve the model BEFORE the prompt is written, via the single
-       * authoritative resolver. Never a neutral placeholder: the prompt must be
-       * specialized for the exact model the plan will report.
-       */
-      const { model: target } = await resolveTargetModel(
-        heuristicAnalyze(taskDescription),
-      );
       try {
         const combined = await generatePlan({
           // The enriched description leads with the user's own words, then adds
           // the resolved requirements the estimator also uses — so the
           // analysis and the estimate are derived from the same input.
           taskDescription: describeEnrichedTask(enrichedTask),
-          targetModel: target,
+          targetModel: model,
           optimization,
           budget,
           clarifyingAnswers,
-          // When the user has accepted an optimized scope, the prompt must be
-          // written for that scope, not the original request.
-          resolvedScope: preResolvedScope
-            ? { included: preResolvedScope.included, deferred: preResolvedScope.deferred }
-            : undefined,
+          // The prompt is written for the FINAL canonical scope, so it can
+          // never ask for work the plan deferred.
+          resolvedScope: {
+            included: includedRequirements(finalScope).map((unit) => unit.name),
+            deferred: excludedRequirements(finalScope).map((unit) => unit.name),
+          },
         });
         route = "combined";
         agentModel = combined.model;
@@ -516,15 +488,9 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     llmCalls += 1;
     retryCount += Math.max(0, analysisResult.attemptCount - 1);
 
-    const { model } = await resolveTargetModel(firstAnalysis);
-    const preliminary = estimateCost({
-      analysis: firstAnalysis,
-      model,
-      preference: optimization,
-      taskDescription,
-      answerMultiplier: answerSignal.effortMultiplier,
-      addedRequirements: answerSignal.addedRequirements,
-    });
+    // The model and scope were resolved before this call; reuse them so the
+    // prompt and the plan cannot disagree.
+    const preliminary = cost;
     const generated = await generatePrompt({
       taskDescription,
       analysis: { ...firstAnalysis, phases: allocatePhaseCosts(firstAnalysis, preliminary) },
@@ -537,6 +503,10 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
         recommendedMaximum: preliminary.recommendedMaximum,
       },
       clarifyingAnswers,
+      resolvedScope: {
+        included: includedRequirements(finalScope).map((unit) => unit.name),
+        deferred: excludedRequirements(finalScope).map((unit) => unit.name),
+      },
     });
     llmDurationMs += generated.durationMs;
     providerDurationMs = generated.providerDurationMs ?? providerDurationMs;
@@ -550,110 +520,9 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
   // Everything from here is local: no LLM work, only deterministic maths.
   const localStart = Date.now();
 
-  const { model, recommendation } = await resolveTargetModel(rawAnalysis);
+  /** The analysis shown to the user. */
+  const analysis = rawAnalysis;
 
-  const preliminary = estimateCost({
-    analysis: rawAnalysis,
-    model,
-    preference: optimization,
-    taskDescription,
-  });
-  const needsOptimization = preliminary.recommendedMaximum > budget || preliminary.maximum > budget;
-
-  let analysis = rawAnalysis;
-  let optimizedScope: PlanResult["optimizedScope"] = null;
-  let scopeApplied = false;
-  /** True when every safe reduction was applied and the budget is still short. */
-  let optimizationStillInsufficient = false;
-
-  if (needsOptimization) {
-    /**
-     * Iterative optimization: propose, re-estimate, repeat.
-     *
-     * Removing a fixed fraction of optional work does not reliably land inside
-     * the budget — it can leave the task far over, or cut far more than needed.
-     * Each pass re-estimates and stops as soon as the budget is actually met,
-     * so the returned scope is one that has been verified to fit.
-     */
-    /**
-     * Optimize with the REAL estimator, not a proxy.
-     *
-     * The optimizer re-estimates after every deferral using the same cost
-     * engine the final number comes from, so the returned scope is one that has
-     * been verified to fit rather than one that merely looks smaller.
-     */
-    /**
-     * The requirement units under consideration, and the scale they imply.
-     *
-     * The estimate must actually respond to which requirements are kept — if
-     * it returned the same number regardless, the optimizer could not tell a
-     * helpful deferral from a useless one and would stop immediately.
-     */
-    const scopeRequirements = enrichedTask.resolvedRequirements.map((requirement) => ({
-      name: requirement.name,
-      weight: requirement.weight,
-      essential: false,
-    }));
-
-    const estimateForScope = (includedNames: string[]) => {
-      const kept = scopeRequirements.filter((requirement) =>
-        includedNames.includes(requirement.name),
-      );
-      // Requirements kept drive the workload directly, so the estimate falls as
-      // items are deferred. Phase names are always present and never deferred.
-      const retainedRatio =
-        scopeRequirements.length > 0 ? kept.length / scopeRequirements.length : 1;
-
-      return estimateCost({
-        analysis: applyScopeReduction(
-          rawAnalysis,
-          { included: includedNames, deferred: [], simplified: [], rationale: "" },
-          taskDescription,
-        ),
-        model,
-        preference: optimization,
-        taskDescription,
-        answerMultiplier: 1 + (answerSignal.effortMultiplier - 1) * retainedRatio,
-        addedRequirements: kept.length,
-      }).recommendedMaximum;
-    };
-
-    const optimized = optimizeScopeForBudget({
-      taskDescription,
-      analysis: rawAnalysis,
-      budget,
-      estimate: estimateForScope,
-      // Defer real requirements, not generic phases: "payments" and
-      // "analytics" are deferrable, "Execution" is not.
-      requirements: scopeRequirements,
-    });
-
-    optimizedScope = optimized.scope;
-    // Whether the budget was actually met is part of the result, so the UI can
-    // say "still insufficient" instead of implying feasibility.
-    optimizationStillInsufficient = optimized.stillInsufficient;
-    if (applyOptimizedScope && optimized.scope) {
-      analysis = applyScopeReduction(rawAnalysis, optimized.scope, taskDescription);
-      scopeApplied = true;
-    }
-  }
-
-  const cost = estimateCost({
-    analysis,
-    model,
-    preference: optimization,
-    taskDescription,
-    answerMultiplier: answerSignal.effortMultiplier,
-    addedRequirements: answerSignal.addedRequirements,
-  });
-  const optimizedEstimate = optimizedScope
-    ? estimateCost({
-        analysis: applyScopeReduction(rawAnalysis, optimizedScope, taskDescription),
-        model,
-        preference: optimization,
-        taskDescription,
-      })
-    : null;
 
   const feasibility = evaluateFeasibility({
     userBudget: budget,
@@ -711,39 +580,27 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
   }
 
   /**
-   * CANONICAL FINAL SCOPE.
+   * The legacy `optimizedScope` view: the reduction being OFFERED.
    *
-   * Derived from the optimizer's single result, then exposed on the plan and
-   * used for the consistency check. Every consumer (estimate, feasibility,
-   * prompt, UI) reads this object rather than rebuilding scope from the
-   * original task, the raw analysis or a pre-optimization requirement set.
+   * Derived from the optimizer's single result rather than produced by a second
+   * optimization pass, so there is still only one scope computation. It always
+   * reflects what could be deferred, even before the user accepts it — that is
+   * what lets the UI offer the reduction.
+   *
+   * When the user has accepted it, this is identical to `finalScope`.
    */
-  const finalScope: FinalScope = buildFinalScope({
-    analysis: rawAnalysis,
-    requirements: enrichedTask.resolvedRequirements.map((requirement) => ({
-      name: requirement.name,
-      weight: requirement.weight,
-    })),
-  });
-
-  if (optimizedScope) {
-    finalScope.optimized = true;
-    finalScope.stillInsufficient = optimizationStillInsufficient;
-    finalScope.reductions = optimizedScope.deferred.map((name, index) => ({
-      requirementId: finalScope.requirements.find((unit) => unit.name === name)?.id ?? `deferred:${index}`,
-      name,
-      action: "deferred",
-      reason: "Deferred to bring the estimate within the planning budget.",
-    }));
-    const deferredNames = new Set(optimizedScope.deferred);
-    finalScope.includedIds = finalScope.requirements
-      .filter((unit) => !deferredNames.has(unit.name))
-      .map((unit) => unit.id);
-    finalScope.excludedIds = finalScope.requirements
-      .filter((unit) => deferredNames.has(unit.name))
-      .map((unit) => unit.id);
-    finalScope.rationale = [optimizedScope.rationale];
-  }
+  const offeredScope = optimized ? optimized.finalScope : null;
+  const optimizedScope: PlanResult["optimizedScope"] =
+    offeredScope && offeredScope.reductions.length > 0
+      ? {
+          included: includedRequirements(offeredScope).map((unit) =>
+            unit.description ? `${unit.name}: ${unit.description}` : unit.name,
+          ),
+          deferred: excludedRequirements(offeredScope).map((unit) => unit.name),
+          simplified: ["Deliver the smallest complete version before adding enhancements."],
+          rationale: offeredScope.rationale.join(" "),
+        }
+      : null;
 
   /**
    * FINAL CONSISTENCY VALIDATION.
@@ -763,6 +620,10 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     promptModelId: model.id,
     costModelId: cost.modelId,
     finalScope,
+    estimateScope: finalScope,
+    promptScope: finalScope,
+    reestimate: (scope) => canonical.estimate(scope.includedIds, scope),
+    reportedEstimate: cost.recommendedMaximum,
     prompt,
     autoSelected,
   });

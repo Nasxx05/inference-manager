@@ -35,6 +35,13 @@ export interface PromptDraftInput {
   budget: number;
   cost: Pick<CostEstimate, "minimum" | "maximum" | "recommendedMaximum">;
   clarifyingAnswers: ClarifyingAnswer[];
+  /**
+   * The FINAL canonical scope the prompt must be written for.
+   *
+   * Deferred work is listed as explicitly out of scope, so the prompt cannot
+   * ask for something the plan decided to drop.
+   */
+  resolvedScope?: { included: string[]; deferred: string[] };
 }
 
 export interface PromptResult {
@@ -163,6 +170,28 @@ function userMessage(input: PromptDraftInput): string {
     "CLARIFYING ANSWERS:",
     answerLines(input.clarifyingAnswers),
     "",
+    /**
+     * The resolved scope is BINDING.
+     *
+     * Anything deferred is named as explicitly out of scope, so the prompt
+     * cannot silently reintroduce work the plan dropped to fit the budget.
+     */
+    ...(input.resolvedScope
+      ? [
+          "RESOLVED SCOPE — IN SCOPE (must be delivered):",
+          input.resolvedScope.included.length
+            ? input.resolvedScope.included.map((item) => `- ${item}`).join("\n")
+            : "- Deliver the core of the task as described.",
+          "",
+          "RESOLVED SCOPE — EXPLICITLY DEFERRED (do NOT build these):",
+          input.resolvedScope.deferred.length
+            ? input.resolvedScope.deferred.map((item) => `- ${item}`).join("\n")
+            : "- Nothing deferred.",
+          "",
+          "Treat the deferred list as binding: put those items under OUT OF SCOPE and never ask for them.",
+          "",
+        ]
+      : []),
     "TARGET MODEL THE PROMPT MUST BE WRITTEN FOR:",
     `${targetModel.displayName} (${targetModel.provider})`,
     modelNotes(targetModel),
