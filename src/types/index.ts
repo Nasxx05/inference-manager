@@ -252,6 +252,70 @@ export interface OptimizedScope {
   rationale: string;
 }
 
+/**
+ * A unit of work with a STABLE identity.
+ *
+ * The id is what makes scope tracking safe: included/excluded/retained sets are
+ * compared by id, never by matching prose. It is assigned once when the scope is
+ * built and does not change when scope is optimized or re-estimated.
+ */
+export interface ScopeRequirement {
+  /** Stable within a single planning run. Derived from the source name. */
+  id: string;
+  name: string;
+  description?: string;
+  /** How much work this unit represents. */
+  weight: "low" | "medium" | "high" | "very-high";
+  /**
+   * Whether this work is load-bearing for the task.
+   *
+   * Core work is never dropped to meet a budget — doing so would mean claiming
+   * the task is achievable when the thing that makes it that task was removed.
+   */
+  core: boolean;
+  /** Ids of other requirements this one depends on. */
+  dependsOn: string[];
+  /** Where the requirement came from. */
+  source: "task" | "answer" | "phase";
+}
+
+/**
+ * A record of one reduction applied by the optimizer.
+ *
+ * Kept so the result can say what changed and why, rather than leaving the user
+ * to diff two lists.
+ */
+export interface ScopeReduction {
+  requirementId: string;
+  name: string;
+  action: "deferred" | "simplified";
+  reason: string;
+}
+
+/**
+ * The ONE authoritative representation of what will actually be planned.
+ *
+ * Everything downstream — estimator, feasibility, suitability and the prompt
+ * writer — reads this object. No component reconstructs scope from the original
+ * task text, the raw analysis, or a pre-optimization requirement set.
+ */
+export interface FinalScope {
+  /** All requirements considered, in stable order. */
+  requirements: ScopeRequirement[];
+  /** Ids retained in the final scope. */
+  includedIds: string[];
+  /** Ids removed or reduced away. */
+  excludedIds: string[];
+  /** What the optimizer changed, in order. Empty when nothing was optimized. */
+  reductions: ScopeReduction[];
+  /** True when optimization actually ran and changed something. */
+  optimized: boolean;
+  /** True when the budget is still not met after all safe reductions. */
+  stillInsufficient: boolean;
+  /** Human-readable reasons for the final scope. */
+  rationale: string[];
+}
+
 export interface ClarifyingQuestion {
   id: string;
   question: string;
@@ -315,6 +379,13 @@ export interface PlanResult {
   resolvedModelId?: string;
   /** Why that model was chosen, when Auto was used. */
   resolvedModelReason?: string;
+  /**
+   * The canonical final scope. Authoritative: the estimate, feasibility and
+   * prompt are all derived from this exact object.
+   */
+  finalScope?: FinalScope;
+  /** The model the prompt was actually specialized for. */
+  promptModelId?: string;
   /**
    * True when every safe reduction was applied and the budget is still short.
    * Lets the UI state insufficiency plainly instead of implying feasibility.

@@ -28,6 +28,7 @@ import { AUTO_MODEL_ID, MODELS, findModelOrThrow } from "@/data/models";
 import { generatePlan } from "@/lib/ai/combined";
 import { aiCombinedEnabled } from "@/lib/ai/env";
 import { analyzeTask } from "@/lib/ai/provider";
+import { AiError } from "@/lib/ai/errors";
 import { heuristicAnalyze } from "@/lib/ai/taskAnalyzer";
 import { generatePrompt } from "@/lib/ai/promptGenerator";
 import { answerScopeSignal, resolveAnswers, answersUsed } from "@/lib/clarifier";
@@ -49,6 +50,8 @@ import {
   applyScopeReduction,
   optimizeScopeForBudget,
 } from "@/lib/scopeOptimizer/scopeOptimizer";
+import { buildFinalScope, optimizeFinalScope } from "@/lib/scopeOptimizer/finalScope";
+import type { FinalScope } from "@/types";
 import type {
   ClarifyingAnswer,
   ClarifyingQuestion,
@@ -198,6 +201,70 @@ function preResolveScope(input: {
   return { included, deferred };
 }
 
+/**
+ * Enforces the invariants that make a plan internally consistent.
+ *
+ * Throws rather than repairing: silently "fixing" a mismatch after the prompt
+ * has been written would return a prompt that does not match the plan.
+ */
+function assertPlanConsistency(input: {
+  resolvedModelId: string;
+  promptModelId: string;
+  costModelId: string;
+  finalScope: FinalScope;
+  prompt: string;
+  autoSelected: boolean;
+}): void {
+  const { resolvedModelId, promptModelId, costModelId, finalScope, prompt, autoSelected } = input;
+
+  // 1 & 2. One model everywhere.
+  if (resolvedModelId !== promptModelId || resolvedModelId !== costModelId) {
+    throw new AiError(
+      "AI_VALIDATION_FAILED",
+      `Internal planning inconsistency: model mismatch (resolved=${resolvedModelId}, prompt=${promptModelId}, cost=${costModelId}).`,
+    );
+  }
+
+  // 3. Auto must resolve to a concrete model.
+  if (autoSelected && (!resolvedModelId || resolvedModelId === "auto")) {
+    throw new AiError(
+      "AI_VALIDATION_FAILED",
+      "Internal planning inconsistency: Auto did not resolve to a concrete model.",
+    );
+  }
+
+  // 4. Core REQUIREMENTS must survive optimization. (Generic phases are
+  //    workflow scaffolding, not the user's requirements, so they are excluded
+  //    from this check.)
+  const included = new Set(finalScope.includedIds);
+  const droppedCore = finalScope.requirements.filter(
+    (unit) => unit.core && unit.source === "task" && !included.has(unit.id),
+  );
+  if (droppedCore.length > 0) {
+    throw new AiError(
+      "AI_VALIDATION_FAILED",
+      `Internal planning inconsistency: core requirement(s) removed (${droppedCore
+        .map((unit) => unit.name)
+        .join(", ")}).`,
+    );
+  }
+
+  // 5. Deferred work must not be requested in the prompt.
+  const excluded = new Set(finalScope.excludedIds);
+  const lower = prompt.toLowerCase();
+  const leaked = finalScope.requirements.filter(
+    (unit) => excluded.has(unit.id) && lower.includes(unit.name.toLowerCase()),
+  );
+  if (leaked.length > 0) {
+    throw new AiError(
+      "AI_VALIDATION_FAILED",
+      `Internal planning inconsistency: deferred requirement(s) present in the prompt (${leaked
+        .map((unit) => unit.name)
+        .join(", ")}).`,
+    );
+  }
+}
+
 export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBuildResult> {
   const {
     taskDescription,
@@ -291,7 +358,29 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
    * prompt asks for phrasing suited to the target's capability tier and the
    * fallback path is used when an explicit Auto selection needs precision.
    */
+  /**
+   * THE authoritative model resolution, memoised.
+   *
+   * Auto was previously resolved once before the prompt call (as a
+   * pre-resolved guess) and again afterwards, so the prompt could be
+   * specialized for one model while the plan reported another. Now it is
+   * computed once and every later stage reads this same value.
+   */
+  let resolvedModel: {
+    model: ModelConfig;
+    recommendation: PlanResult["recommendation"];
+  } | null = null;
+
   async function resolveTargetModel(analysis: TaskAnalysis): Promise<{
+    model: ModelConfig;
+    recommendation: PlanResult["recommendation"];
+  }> {
+    if (resolvedModel) return resolvedModel;
+    resolvedModel = await computeTargetModel(analysis);
+    return resolvedModel;
+  }
+
+  async function computeTargetModel(analysis: TaskAnalysis): Promise<{
     model: ModelConfig;
     recommendation: PlanResult["recommendation"];
   }> {
@@ -374,9 +463,14 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
        * only falls back to the neutral profile when no capable model could be
        * determined at all.
        */
-      const target = autoSelected
-        ? (preResolvedAutoModel ?? neutralTargetModel())
-        : findModelOrThrow(modelId);
+      /**
+       * Resolve the model BEFORE the prompt is written, via the single
+       * authoritative resolver. Never a neutral placeholder: the prompt must be
+       * specialized for the exact model the plan will report.
+       */
+      const { model: target } = await resolveTargetModel(
+        heuristicAnalyze(taskDescription),
+      );
       try {
         const combined = await generatePlan({
           // The enriched description leads with the user's own words, then adds
@@ -616,6 +710,63 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     }
   }
 
+  /**
+   * CANONICAL FINAL SCOPE.
+   *
+   * Derived from the optimizer's single result, then exposed on the plan and
+   * used for the consistency check. Every consumer (estimate, feasibility,
+   * prompt, UI) reads this object rather than rebuilding scope from the
+   * original task, the raw analysis or a pre-optimization requirement set.
+   */
+  const finalScope: FinalScope = buildFinalScope({
+    analysis: rawAnalysis,
+    requirements: enrichedTask.resolvedRequirements.map((requirement) => ({
+      name: requirement.name,
+      weight: requirement.weight,
+    })),
+  });
+
+  if (optimizedScope) {
+    finalScope.optimized = true;
+    finalScope.stillInsufficient = optimizationStillInsufficient;
+    finalScope.reductions = optimizedScope.deferred.map((name, index) => ({
+      requirementId: finalScope.requirements.find((unit) => unit.name === name)?.id ?? `deferred:${index}`,
+      name,
+      action: "deferred",
+      reason: "Deferred to bring the estimate within the planning budget.",
+    }));
+    const deferredNames = new Set(optimizedScope.deferred);
+    finalScope.includedIds = finalScope.requirements
+      .filter((unit) => !deferredNames.has(unit.name))
+      .map((unit) => unit.id);
+    finalScope.excludedIds = finalScope.requirements
+      .filter((unit) => deferredNames.has(unit.name))
+      .map((unit) => unit.id);
+    finalScope.rationale = [optimizedScope.rationale];
+  }
+
+  /**
+   * FINAL CONSISTENCY VALIDATION.
+   *
+   * Invariants:
+   *   1. the model the prompt was written for IS the resolved target model;
+   *   2. the cost was computed with that same model;
+   *   3. Auto resolves to a concrete model, never "auto";
+   *   4. core requirements were not removed by optimization;
+   *   5. deferred requirements do not appear as required work in the prompt.
+   *
+   * A violation makes the plan untrue, so it is surfaced as a structured error
+   * instead of being silently repaired after the prompt was written.
+   */
+  assertPlanConsistency({
+    resolvedModelId: model.id,
+    promptModelId: model.id,
+    costModelId: cost.modelId,
+    finalScope,
+    prompt,
+    autoSelected,
+  });
+
   const localDurationMs = Date.now() - localStart;
 
   const plan: PlanResult = {
@@ -635,6 +786,8 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     recommendation,
     /** Concrete resolved model when Auto was used, for the UI to show. */
     resolvedModelId: autoSelected ? model.id : undefined,
+    finalScope,
+    promptModelId: model.id,
     resolvedModelReason: autoSelected
       ? (recommendation?.reasons[0] ?? "Cheapest model that meets this task's capability requirements.")
       : undefined,
