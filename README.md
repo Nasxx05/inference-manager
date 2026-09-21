@@ -12,7 +12,7 @@ Promgent never executes your task. It plans it, prices it, and hands you the pro
 
 **Live Demo:** https://promgent.vercel.app
 **GitHub:** https://github.com/Nasxx05/inference-manager
-**Demo Video:** _(add link)_
+**Demo Video:** https://www.youtube.com/watch?v=lX3L2aQozeA
 
 ---
 
@@ -348,6 +348,17 @@ prompts, while keeping execution under the user's control.
 **Promgent plans. The user executes.** No wallet is connected, and Promgent never
 runs the final prompt.
 
+### Getting CREDIT
+
+CREDIT is Orbio's tokenized inference unit. Promgent uses it as a planning
+primitive — the **Planning Budget** field is a number the user types, and it is
+not read from any wallet — but the actual inference users spend when they run a
+prompt elsewhere is topped up on Orbio.
+
+The header's **Buy Credits** link opens https://orbio.so in a new tab
+(`rel="noopener noreferrer"`), so Promgent itself never handles payment,
+accounts or balances.
+
 ---
 
 ## Architecture
@@ -423,7 +434,7 @@ The internal model is paid for by the builder's key, so the backend is bounded:
 npm test
 ```
 
-193 tests across 13 files. Rather than testing internals, most assert the product promise:
+288 tests across 19 files. Rather than testing internals, most assert the product promise:
 
 | Area | What's asserted |
 |---|---|
@@ -438,6 +449,9 @@ npm test
 | Scope optimizer | Iteratively converges toward the budget without ever increasing it |
 | Malformed output | Empty, absurd and NaN-bearing responses never crash or produce NaN |
 | Model switching | `AGENTFUND_AI_MODEL` changes require no code change |
+| Buy Credits | Opens Orbio in a new tab with `noopener noreferrer`, and leaks nothing |
+| How to Use dialog | Embeds the walkthrough; closes on Escape; restores focus and scrolling |
+| Dialog isolation | Opening and closing never clears input and never submits |
 
 ---
 

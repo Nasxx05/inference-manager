@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Plus } from "lucide-react";
+import { ArrowLeft, ExternalLink, PlayCircle, Plus } from "lucide-react";
 import { AUTO_MODEL_ID } from "@/data/models";
 import { endpoint } from "@/lib/backend";
+import { BUY_CREDITS_URL, EXTERNAL_LINK_REL } from "@/lib/externalLinks";
 import { readHistory, saveEntry } from "@/lib/historyManager";
 import { planToHistoryName } from "@/lib/promptCompiler/promptCompiler";
 import { formatRange } from "@/lib/estimator/costEstimator";
@@ -16,6 +17,7 @@ import type {
 import { AnalysisPanel } from "./AnalysisPanel";
 import { ClarifyingQuestions } from "./ClarifyingQuestions";
 import { HistoryPanel } from "./HistoryPanel";
+import { HowToUseModal } from "./HowToUseModal";
 import { PromptEditor } from "./PromptEditor";
 import { TaskForm, validateAttachment, type Attachment, type TaskFormValues } from "./TaskForm";
 import { Button } from "./ui";
@@ -113,6 +115,13 @@ export function Workspace() {
   const [questions, setQuestions] = useState<ClarifyingQuestion[] | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [clarifying, setClarifying] = useState(false);
+
+  /**
+   * The walkthrough dialog is pure local UI state. It never touches `values`,
+   * `plan` or `state`, so opening and closing it cannot disturb what the user
+   * has typed or the result they are looking at.
+   */
+  const [howToUseOpen, setHowToUseOpen] = useState(false);
 
   useEffect(() => {
     setHistory(readHistory());
@@ -359,6 +368,29 @@ export function Workspace() {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Guidance and top-ups stay reachable from every screen. */}
+            <button
+              type="button"
+              onClick={() => setHowToUseOpen(true)}
+              aria-haspopup="dialog"
+              aria-expanded={howToUseOpen}
+              // The text label collapses to just the icon on narrow screens,
+              // where display:none would otherwise leave the button nameless.
+              aria-label="How to use Promgent"
+              className="inline-flex items-center gap-1.5 rounded border border-line bg-paper px-2.5 py-1.5 text-xs text-muted transition-colors hover:border-lineStrong hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-forest"
+            >
+              <PlayCircle aria-hidden="true" className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">How to Use</span>
+            </button>
+            <a
+              href={BUY_CREDITS_URL}
+              target="_blank"
+              rel={EXTERNAL_LINK_REL}
+              className="inline-flex items-center gap-1.5 rounded border border-line bg-paper px-2.5 py-1.5 text-xs text-muted transition-colors hover:border-lineStrong hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-forest"
+            >
+              Buy Credits
+              <ExternalLink aria-hidden="true" className="h-3.5 w-3.5" />
+            </a>
             <HistoryPanel
               entries={history}
               onSelect={(entry) => {
@@ -380,6 +412,8 @@ export function Workspace() {
           </div>
         </div>
       </header>
+
+      <HowToUseModal open={howToUseOpen} onClose={() => setHowToUseOpen(false)} />
 
       <main className="mx-auto w-full max-w-[1180px] flex-1 px-5 py-8 sm:py-12">
         {state === "analyzing" ? (
