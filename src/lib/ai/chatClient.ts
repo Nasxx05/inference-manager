@@ -56,6 +56,12 @@ export type AiStage =
   | "task-analysis"
   | "prompt-generation"
   | "reference-analysis"
+  | "guided-interview"
+  | "repository-review"
+  | "traceability-analysis"
+  | "suggestion-analysis"
+  | "change-impact"
+  | "correction-prompt"
   | "health-test"
   | "model-list";
 
@@ -82,6 +88,14 @@ export interface ChatRequest {
   stage: AiStage;
   /** Correlates every stage belonging to one user request. */
   requestId?: string;
+  /** Per-request credentials, used by user-funded Orbio Guided Project calls. */
+  apiKey?: string;
+  /** Per-request provider base, paired with `apiKey` when supplied. */
+  baseUrl?: string;
+  /** Per-request timeout override. */
+  timeoutMs?: number;
+  /** User-funded calls opt out of retries to avoid an ambiguous double charge. */
+  retry?: boolean;
 }
 
 export interface ChatResult {
@@ -92,6 +106,11 @@ export interface ChatResult {
   durationMs: number;
   /** Provider-reported generation time, when the provider supplies it. */
   providerDurationMs?: number;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  };
   /** How many times the request was actually sent: 1, or 2 after one retry. */
   attemptCount: number;
 }
@@ -191,7 +210,24 @@ function logCall(fields: LogFields): void {
 }
 
 /** Reads config once per call. Never returns a key value to a caller that logs. */
-function config() {
+function config(request: ChatRequest = { messages: [], maxTokens: 1, stage: "model-list" }) {
+  const overrideKey = request.apiKey?.trim();
+  const overrideBase = request.baseUrl?.trim().replace(/\/+$/, "");
+  if (overrideKey || overrideBase) {
+    if (!overrideKey || !overrideBase || !request.model?.trim()) {
+      throw new AiError(
+        "BACKEND_NOT_CONFIGURED",
+        "The per-request model provider configuration is incomplete.",
+      );
+    }
+    return {
+      baseUrl: overrideBase,
+      apiKey: overrideKey,
+      model: request.model.trim(),
+      timeoutMs: request.timeoutMs ?? aiTimeoutMs(),
+    };
+  }
+
   const missing = missingConfig();
   if (missing.length) {
     throw new AiError(
@@ -212,7 +248,7 @@ function config() {
  * can never hold a request open indefinitely.
  */
 async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatResult> {
-  const { baseUrl, apiKey, model, timeoutMs } = config();
+  const { baseUrl, apiKey, model, timeoutMs } = config(request);
   const useModel = request.model ?? model;
   const url = chatCompletionsUrl(baseUrl);
   const started = Date.now();
@@ -273,6 +309,11 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
       }>;
       /** Present on some OpenAI-compatible providers. Reporting only. */
       timings?: Record<string, number>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+      };
     };
     const providerDurationMs =
       typeof payload.timings?.["total_seconds"] === "number"
@@ -320,6 +361,13 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
       requestId,
       durationMs,
       providerDurationMs,
+      usage: payload.usage
+        ? {
+            inputTokens: payload.usage.prompt_tokens,
+            outputTokens: payload.usage.completion_tokens,
+            totalTokens: payload.usage.total_tokens,
+          }
+        : undefined,
       attemptCount: attempt,
     };
   } catch (error) {
@@ -352,6 +400,7 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
  * and a retry is never triggered by a failure that cannot plausibly improve.
  */
 export async function chat(request: ChatRequest): Promise<ChatResult> {
+  if (request.retry === false) return attemptOnce(request, 1);
   try {
     return await attemptOnce(request, 1);
   } catch (error) {

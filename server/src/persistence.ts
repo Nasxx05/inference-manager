@@ -1,0 +1,470 @@
+import { createHash, createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import type {
+  ArchitectureVersion,
+  GuidedProjectSnapshot,
+  InterviewMessage,
+  InterviewSession,
+  ProjectMemory,
+  ProjectRecord,
+  SrsDocument,
+} from "@/types/project";
+import type { IterationPrompt, ProjectIteration } from "@/types/iteration";
+
+export interface AuthUser {
+  id: string;
+  email?: string;
+}
+
+export class PersistenceError extends Error {
+  readonly code: string;
+  readonly status: number;
+  constructor(code: string, message: string, status = 503) {
+    super(message);
+    this.name = "PersistenceError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
+function supabaseUrl(): string {
+  return String(process.env.SUPABASE_URL ?? "").trim().replace(/\/+$/, "");
+}
+
+function anonKey(): string {
+  return String(process.env.SUPABASE_ANON_KEY ?? "").trim();
+}
+
+function serviceRoleKey(): string {
+  return String(process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
+}
+
+export function persistenceConfigured(): boolean {
+  return Boolean(supabaseUrl() && anonKey() && serviceRoleKey());
+}
+
+function requireConfigured(): void {
+  if (!persistenceConfigured()) {
+    throw new PersistenceError(
+      "PERSISTENCE_NOT_CONFIGURED",
+      "Guided Projects require SUPABASE_URL, SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY.",
+    );
+  }
+}
+
+async function request<T>(input: {
+  path: string;
+  method?: string;
+  body?: unknown;
+  accessToken?: string;
+  auth?: boolean;
+}): Promise<T> {
+  requireConfigured();
+  const headers: Record<string, string> = {
+    apikey: input.auth ? anonKey() : serviceRoleKey(),
+    "Content-Type": "application/json",
+  };
+  if (input.method === "POST" && input.path.startsWith("/rest/v1/")) {
+    headers.Prefer = "resolution=merge-duplicates,return=representation";
+  }
+  if (input.accessToken) headers.Authorization = `Bearer ${input.accessToken}`;
+  const response = await fetch(`${supabaseUrl()}${input.path}`, {
+    method: input.method ?? "GET",
+    headers,
+    ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
+  });
+  const raw = await response.text();
+  let payload: unknown = null;
+  try {
+    payload = raw ? JSON.parse(raw) : null;
+  } catch {
+    payload = raw;
+  }
+  if (!response.ok) {
+    const message = typeof payload === "object" && payload !== null && "message" in payload
+      ? String((payload as { message?: unknown }).message)
+      : "The persistence service rejected the request.";
+    throw new PersistenceError("PERSISTENCE_REQUEST_FAILED", message, response.status);
+  }
+  return payload as T;
+}
+
+export interface AuthResponse {
+  access_token?: string;
+  refresh_token?: string;
+  user?: AuthUser;
+}
+
+export async function signUp(email: string, password: string): Promise<AuthResponse> {
+  return request<AuthResponse>({
+    path: "/auth/v1/signup",
+    method: "POST",
+    auth: true,
+    body: { email, password },
+  });
+}
+
+export async function signIn(email: string, password: string): Promise<AuthResponse> {
+  return request<AuthResponse>({
+    path: "/auth/v1/token?grant_type=password",
+    method: "POST",
+    auth: true,
+    body: { email, password },
+  });
+}
+
+export async function userForToken(accessToken: string): Promise<AuthUser> {
+  return request<AuthUser>({ path: "/auth/v1/user", accessToken, auth: true });
+}
+
+function query(value: string): string {
+  return encodeURIComponent(value);
+}
+
+export async function listProjects(userId: string): Promise<ProjectRecord[]> {
+  const rows = await request<Record<string, unknown>[]>({
+    path: `/rest/v1/projects?select=*&user_id=eq.${query(userId)}&order=updated_at.desc`,
+  });
+  return rows.map(projectFromRow);
+}
+
+export async function insertProject(project: ProjectRecord): Promise<ProjectRecord> {
+  const rows = await request<Record<string, unknown>[]>({
+    path: "/rest/v1/projects?select=*",
+    method: "POST",
+    body: [projectToRow(project)],
+  });
+  const row = rows[0];
+  if (!row) throw new PersistenceError("PERSISTENCE_REQUEST_FAILED", "The project was not created.");
+  return projectFromRow(row);
+}
+
+export async function projectForUser(projectId: string, userId: string): Promise<ProjectRecord> {
+  const rows = await request<Record<string, unknown>[]>({
+    path: `/rest/v1/projects?select=*&id=eq.${query(projectId)}&user_id=eq.${query(userId)}&limit=1`,
+  });
+  const row = rows[0];
+  if (!row) throw new PersistenceError("PROJECT_NOT_FOUND", "That project was not found.", 404);
+  return projectFromRow(row);
+}
+
+/** Loads a connected Orbio credential only inside the backend process. */
+export async function loadOrbioKey(userId: string): Promise<string> {
+  const rows = await request<Array<{ encrypted_key?: string; status?: string }>>({
+    path: `/rest/v1/orbio_connections?select=encrypted_key,status&user_id=eq.${query(userId)}&limit=1`,
+  });
+  const row = rows[0];
+  if (!row?.encrypted_key || row.status !== "active") {
+    throw new PersistenceError("ORBIO_NOT_CONNECTED", "Connect an active Orbio key before using the interview.", 400);
+  }
+  return decryptOrbioKey(String(row.encrypted_key));
+}
+
+export async function insertUsageEvent(input: {
+  userId: string;
+  projectId: string;
+  phase: string;
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  requestId?: string;
+}): Promise<void> {
+  await request({
+    path: "/rest/v1/usage_events",
+    method: "POST",
+    body: [{
+      user_id: input.userId,
+      project_id: input.projectId,
+      phase: input.phase,
+      source: "promgent",
+      model: input.model ?? null,
+      input_tokens: input.inputTokens ?? null,
+      output_tokens: input.outputTokens ?? null,
+      cost: null,
+      request_id: input.requestId ?? null,
+    }],
+  });
+}
+
+export async function listIterations(projectId: string): Promise<ProjectIteration[]> {
+  const rows = await request<Record<string, unknown>[]>({
+    path: `/rest/v1/project_iterations?select=*&project_id=eq.${query(projectId)}&order=sequence_number.asc`,
+  });
+  return rows.map(iterationFromRow);
+}
+
+export async function iterationForUser(iterationId: string, userId: string): Promise<ProjectIteration> {
+  const rows = await request<Record<string, unknown>[]>({
+    path: `/rest/v1/project_iterations?select=*&id=eq.${query(iterationId)}&limit=1`,
+  });
+  const row = rows[0];
+  if (!row) throw new PersistenceError("ITERATION_NOT_FOUND", "That iteration was not found.", 404);
+  await projectForUser(String(row.project_id), userId);
+  return iterationFromRow(row);
+}
+
+export async function saveIteration(iteration: ProjectIteration): Promise<void> {
+  await request({
+    path: "/rest/v1/project_iterations?on_conflict=id",
+    method: "POST",
+    body: [{
+      id: iteration.id,
+      project_id: iteration.projectId,
+      sequence_number: iteration.sequenceNumber,
+      title: iteration.title,
+      status: iteration.status,
+      base_srs_version_id: iteration.baseSrsVersionId ?? null,
+      base_architecture_version_id: iteration.baseArchitectureVersionId ?? null,
+      reviewed_commit_sha: iteration.repositorySnapshot?.commitSha ?? null,
+      data: iteration,
+      started_at: iteration.startedAt,
+      reviewed_at: iteration.reviewedAt ?? null,
+      completed_at: iteration.completedAt ?? null,
+      updated_at: iteration.updatedAt,
+    }],
+  });
+}
+
+export async function saveIterationPrompt(prompt: IterationPrompt): Promise<void> {
+  await request({
+    path: "/rest/v1/iteration_prompts?on_conflict=id",
+    method: "POST",
+    body: [{ id: prompt.id, iteration_id: prompt.iterationId, project_id: prompt.projectId, kind: prompt.kind, reviewed_commit_sha: prompt.reviewedCommitSha ?? null, prompt: prompt.prompt, data: prompt }],
+  });
+}
+
+export async function loadLatestSrs(projectId: string): Promise<SrsDocument | undefined> {
+  const rows = await request<Record<string, unknown>[]>({ path: `/rest/v1/srs_documents?select=*&project_id=eq.${query(projectId)}&order=version.desc&limit=1` });
+  const row = rows[0];
+  if (!row) return undefined;
+  return { id: String(row.id), projectId: String(row.project_id), version: Number(row.version), title: String(row.title), content: String(row.content), requirementIds: Array.isArray(row.requirement_ids) ? row.requirement_ids.map(String) : [], status: row.status as SrsDocument["status"], createdAt: String(row.created_at) };
+}
+
+export async function loadLatestArchitecture(projectId: string): Promise<ArchitectureVersion | undefined> {
+  const rows = await request<Record<string, unknown>[]>({ path: `/rest/v1/architecture_versions?select=*&project_id=eq.${query(projectId)}&order=version.desc&limit=1` });
+  const row = rows[0];
+  if (!row) return undefined;
+  return { id: String(row.id), projectId: String(row.project_id), version: Number(row.version), diagramSource: String(row.diagram_source), summary: String(row.summary), reasonForChange: String(row.reason_for_change), createdAt: String(row.created_at) };
+}
+
+export async function insertInterviewSession(session: InterviewSession): Promise<void> {
+  await request({
+    path: "/rest/v1/interview_sessions",
+    method: "POST",
+    body: [sessionToRow(session)],
+  });
+}
+
+export async function insertMessage(message: InterviewMessage): Promise<void> {
+  await request({ path: "/rest/v1/interview_messages", method: "POST", body: [messageToRow(message)] });
+}
+
+export async function insertRequirements(projectId: string, requirements: ProjectMemory["requirements"]): Promise<void> {
+  if (!requirements.length) return;
+  await request({
+    path: "/rest/v1/requirements?on_conflict=id",
+    method: "POST",
+    body: requirements.map((item) => requirementToRow(projectId, item)),
+  });
+}
+
+export async function saveMemory(memory: ProjectMemory): Promise<void> {
+  await request({
+    path: "/rest/v1/project_memory?on_conflict=project_id",
+    method: "POST",
+    body: [{ project_id: memory.projectId, memory, version: memory.version }],
+  });
+}
+
+export async function loadMemory(projectId: string): Promise<ProjectMemory | null> {
+  const rows = await request<Array<{ memory?: ProjectMemory }>>({
+    path: `/rest/v1/project_memory?select=memory&project_id=eq.${query(projectId)}&limit=1`,
+  });
+  return rows[0]?.memory ?? null;
+}
+
+export async function saveArchitecture(version: ArchitectureVersion): Promise<void> {
+  await request({
+    path: "/rest/v1/architecture_versions",
+    method: "POST",
+    body: [architectureToRow(version)],
+  });
+}
+
+export async function saveSrs(document: SrsDocument): Promise<void> {
+  await request({
+    path: "/rest/v1/srs_documents",
+    method: "POST",
+    body: [srsToRow(document)],
+  });
+}
+
+export async function approveSrs(projectId: string, srsId: string): Promise<void> {
+  await request({
+    path: `/rest/v1/srs_documents?id=eq.${query(srsId)}&project_id=eq.${query(projectId)}`,
+    method: "PATCH",
+    body: { status: "approved" },
+  });
+  await request({
+    path: `/rest/v1/srs_documents?project_id=eq.${query(projectId)}&id=neq.${query(srsId)}`,
+    method: "PATCH",
+    body: { status: "superseded" },
+  });
+  await request({
+    path: `/rest/v1/projects?id=eq.${query(projectId)}`,
+    method: "PATCH",
+    body: { approved_srs_version_id: srsId, status: "approved" },
+  });
+}
+
+export async function saveProjectSession(session: InterviewSession): Promise<void> {
+  await request({
+    path: `/rest/v1/interview_sessions?id=eq.${query(session.id)}`,
+    method: "PATCH",
+    body: sessionToRow(session),
+  });
+}
+
+export async function updateProjectStatus(projectId: string, status: ProjectRecord["status"]): Promise<void> {
+  await request({ path: `/rest/v1/projects?id=eq.${query(projectId)}`, method: "PATCH", body: { status, updated_at: new Date().toISOString() } });
+}
+
+export async function snapshotForUser(projectId: string, userId: string): Promise<GuidedProjectSnapshot> {
+  const project = await projectForUser(projectId, userId);
+  const memory = await loadMemory(projectId);
+  if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
+  const sessions = await request<Record<string, unknown>[]>({
+    path: `/rest/v1/interview_sessions?select=*&project_id=eq.${query(projectId)}&order=created_at.desc&limit=1`,
+  });
+  const session = sessions[0] ? sessionFromRow(sessions[0]) : null;
+  if (!session) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no interview session.", 500);
+  const messages = await request<Record<string, unknown>[]>({
+    path: `/rest/v1/interview_messages?select=*&project_id=eq.${query(projectId)}&order=created_at.asc`,
+  });
+  return {
+    project,
+    memory,
+    interview: session,
+    messages: messages.map(messageFromRow),
+  };
+}
+
+export function encryptOrbioKey(value: string): string {
+  const configured = String(process.env.CREDENTIAL_ENCRYPTION_KEY ?? "").trim();
+  if (!/^[0-9a-fA-F]{64}$/.test(configured)) {
+    throw new PersistenceError("CREDENTIAL_ENCRYPTION_NOT_CONFIGURED", "CREDENTIAL_ENCRYPTION_KEY must be a 32-byte hex key.");
+  }
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", Buffer.from(configured, "hex"), iv);
+  const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  return [iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), encrypted.toString("base64url")].join(".");
+}
+
+export function decryptOrbioKey(value: string): string {
+  const configured = String(process.env.CREDENTIAL_ENCRYPTION_KEY ?? "").trim();
+  if (!/^[0-9a-fA-F]{64}$/.test(configured)) throw new PersistenceError("CREDENTIAL_ENCRYPTION_NOT_CONFIGURED", "Credential encryption is not configured.");
+  const [ivRaw, tagRaw, encryptedRaw] = value.split(".");
+  if (!ivRaw || !tagRaw || !encryptedRaw) throw new PersistenceError("CREDENTIAL_DECRYPTION_FAILED", "Stored credential could not be read.");
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", Buffer.from(configured, "hex"), Buffer.from(ivRaw, "base64url"));
+    decipher.setAuthTag(Buffer.from(tagRaw, "base64url"));
+    return Buffer.concat([decipher.update(Buffer.from(encryptedRaw, "base64url")), decipher.final()]).toString("utf8");
+  } catch {
+    throw new PersistenceError("CREDENTIAL_DECRYPTION_FAILED", "Stored credential could not be read.");
+  }
+}
+
+export function fingerprint(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+function projectToRow(project: ProjectRecord): Record<string, unknown> {
+  return {
+    id: project.id,
+    user_id: project.userId,
+    title: project.title,
+    initial_description: project.initialDescription,
+    project_type: project.projectType,
+    selected_model: project.selectedModel,
+    planning_depth: project.planningDepth,
+    credit_budget: project.creditBudget,
+    status: project.status,
+    created_at: project.createdAt,
+    updated_at: project.updatedAt,
+  };
+}
+
+function projectFromRow(row: Record<string, unknown>): ProjectRecord {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    title: String(row.title),
+    initialDescription: String(row.initial_description),
+    projectType: String(row.project_type),
+    selectedModel: String(row.selected_model),
+    planningDepth: row.planning_depth as ProjectRecord["planningDepth"],
+    creditBudget: Number(row.credit_budget),
+    status: row.status as ProjectRecord["status"],
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function iterationFromRow(row: Record<string, unknown>): ProjectIteration {
+  const data = row.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) return data as ProjectIteration;
+  return {
+    id: String(row.id),
+    projectId: String(row.project_id),
+    sequenceNumber: Number(row.sequence_number),
+    title: String(row.title),
+    status: row.status as ProjectIteration["status"],
+    ...(row.base_srs_version_id ? { baseSrsVersionId: String(row.base_srs_version_id) } : {}),
+    ...(row.base_architecture_version_id ? { baseArchitectureVersionId: String(row.base_architecture_version_id) } : {}),
+    changeRequests: [], findings: [], evidence: [], traceability: [], suggestions: [], decisions: [],
+    startedAt: String(row.started_at), updatedAt: String(row.updated_at),
+  };
+}
+
+function sessionToRow(session: InterviewSession): Record<string, unknown> {
+  return {
+    id: session.id,
+    project_id: session.projectId,
+    planning_depth: session.planningDepth,
+    status: session.status,
+    turn_count: session.turnCount,
+    created_at: session.createdAt,
+    updated_at: session.updatedAt,
+  };
+}
+
+function sessionFromRow(row: Record<string, unknown>): InterviewSession {
+  return {
+    id: String(row.id),
+    projectId: String(row.project_id),
+    planningDepth: row.planning_depth as InterviewSession["planningDepth"],
+    status: row.status as InterviewSession["status"],
+    turnCount: Number(row.turn_count ?? 0),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function messageToRow(message: InterviewMessage): Record<string, unknown> {
+  return { id: message.id, project_id: message.projectId, session_id: message.sessionId, role: message.role, content: message.content, source: message.source, created_at: message.createdAt };
+}
+
+function messageFromRow(row: Record<string, unknown>): InterviewMessage {
+  return { id: String(row.id), projectId: String(row.project_id), sessionId: String(row.session_id), role: row.role as InterviewMessage["role"], content: String(row.content), source: row.source as InterviewMessage["source"], createdAt: String(row.created_at) };
+}
+
+function requirementToRow(projectId: string, item: ProjectMemory["requirements"][number]): Record<string, unknown> {
+  return { id: item.id, project_id: projectId, type: item.type, category: item.category, description: item.description, priority: item.priority, required: item.required, source: item.source, source_message_id: item.sourceMessageId ?? null, status: item.status, confidence: item.confidence, dependencies: item.dependencies, version: item.version, created_at: item.createdAt, updated_at: item.updatedAt };
+}
+
+function architectureToRow(version: ArchitectureVersion): Record<string, unknown> {
+  return { id: version.id, project_id: version.projectId, version: version.version, diagram_source: version.diagramSource, summary: version.summary, reason_for_change: version.reasonForChange, created_at: version.createdAt };
+}
+
+function srsToRow(document: SrsDocument): Record<string, unknown> {
+  return { id: document.id, project_id: document.projectId, version: document.version, title: document.title, content: document.content, requirement_ids: document.requirementIds, status: document.status, created_at: document.createdAt };
+}

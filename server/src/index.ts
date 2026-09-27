@@ -49,6 +49,7 @@ import type { ReferenceAnalysis } from "@/lib/reference/types";
 import { selectQuestions } from "@/lib/clarifier";
 import { parseBudget, parseOptimization } from "@/lib/validation/schemas";
 import type { ClarifyingQuestion, OptimizationPreference, TaskType } from "@/types";
+import { guidedRouter } from "./guidedRoutes";
 
 // Must run before any env value is read below, and before PORT or the CORS
 // allow-list are captured. On the host this is a no-op: the variables already
@@ -84,6 +85,7 @@ const isProduction = (process.env.NODE_ENV ?? "").toLowerCase() === "production"
 
 app.use(
   cors({
+    credentials: true,
     origin(origin, callback) {
       // Same-origin and server-to-server calls have no Origin header.
       if (!origin) return callback(null, true);
@@ -97,6 +99,7 @@ app.use(
 );
 
 app.use(express.json({ limit: "1mb" }));
+app.use(express.raw({ type: ["audio/webm", "audio/ogg", "audio/wav", "audio/mpeg"], limit: "12mb" }));
 /**
  * Raw body for multipart uploads only.
  *
@@ -105,6 +108,11 @@ app.use(express.json({ limit: "1mb" }));
  * bounded image caps in ./multipart with headroom for field data.
  */
 app.use(express.raw({ type: "multipart/form-data", limit: "12mb" }));
+
+// Persistent Guided Project endpoints. Quick Plan routes below remain
+// available without an account for backward compatibility; Guided Projects
+// enforce authentication inside the router before touching project state.
+app.use("/api", guidedRouter());
 
 /**
  * Multipart handling for image references.

@@ -36,15 +36,16 @@ flowchart TD
     N --> O[User Executes Elsewhere]
 ```
 
-Promgent uses an internal AI model through the Orbio Gateway to reason about the user's task and
-compile a model-specific prompt. The user does not connect a wallet, provide an Orbio key, or
-execute the task through Promgent. Promgent plans the work and returns a prompt the user can take
-elsewhere.
+Quick Plan uses Promgent's internal AI model through the Orbio Gateway to reason about the user's
+task and compile a model-specific prompt. Quick Plan does not require the user to connect an Orbio
+key or execute the task through Promgent. Guided Projects are the persistent workflow and use the
+connected user's Orbio key for their requirements interview; they still only plan the work and do
+not execute implementation.
 
 | Layer | Where | Notes |
 |---|---|---|
 | Frontend | Vercel | Static UI. Holds no credentials. |
-| Backend | Render | Owns the Orbio API key. Does all AI calls. |
+| Backend | Render | Owns the internal key and temporarily decrypts connected user keys for Guided Project inference. |
 | Orbio Gateway | `AGENTFUND_AI_BASE_URL` | OpenAI-compatible API used by the backend. |
 | Internal AI model | `AGENTFUND_AI_MODEL` | Configurable through server environment variables. |
 | Final task execution | **Outside Promgent** | The user runs the copied prompt themselves. |
@@ -301,11 +302,11 @@ to copy proprietary copy, logos or assets.
 ## How Orbio powers the internal agent
 
 Promgent's internal task-analysis and prompt-compilation agent runs through the **Orbio Gateway**,
-using the builder's Orbio API key configured **server-side on Render**.
+using the builder's Orbio API key configured **server-side on Render**. This describes Quick Plan;
+Guided Project interview calls use the connected user's key instead.
 
-**The user does not need to connect an Orbio account.** There is no wallet, no API-key field, and
-no seed phrase anywhere in the product. The Orbio key powers Promgent's own internal AI processing
-only.
+Quick Plan does not require the user to connect an Orbio account. Guided Projects do require a
+connected key because their interview inference is billed directly to that user's Orbio account.
 
 ```text
 Promgent (Vercel)
@@ -518,6 +519,82 @@ These are current, not aspirational:
 
 ## Notes and limits
 
+## Guided Projects
+
+Promgent now has the foundation of a second, persistent workflow alongside the
+existing lightweight Quick Plan experience. Guided Projects are designed for
+longer software projects: an authenticated user can create a project, choose a
+planning depth and model, persist structured project memory, continue an
+adaptive requirements interview, generate a Mermaid architecture view, and
+draft a versioned software requirements specification.
+
+The Guided Project state is designed around Supabase Auth/PostgreSQL with
+ownership-enforced tables and RLS policies. The browser never becomes the
+source of truth for project state. The existing Quick Plan route remains
+available and does not require an account, preserving the original product
+experience during this migration.
+
+The first Guided Project endpoints are:
+
+- `/api/auth/*` for account sessions
+- `/api/projects` for persistent project creation and listing
+- `/api/projects/:id/interview` for structured interview turns
+- `/api/projects/:id/architecture` for Mermaid architecture versions
+- `/api/projects/:id/srs` for draft SRS generation
+- `/api/projects/:id/iterations` for persistent implementation-review cycles
+- `/api/projects/:id/iterations/:iterationId/review` for repository/live-product evidence review
+- iteration decision endpoints for findings, changes and suggestions
+- `/api/projects/:id/iterations/:iterationId/generate-prompt` for the next implementation prompt
+
+Apply [`server/migrations/001_guided_projects.sql`](/Users/user/promgent/server/migrations/001_guided_projects.sql) and
+[`server/migrations/002_project_iterations.sql`](/Users/user/promgent/server/migrations/002_project_iterations.sql)
+to a Supabase project and configure the Supabase and credential-encryption
+variables from [`.env.example`](/Users/user/promgent/.env.example) before using
+the Guided Project flow locally. The raw Orbio key is verified server-side,
+encrypted before persistence, and never returned to the browser or included in
+model context.
+
+The interview opening and every subsequent interview turn make one
+OpenAI-compatible Orbio call authenticated with the connected user's Orbio key.
+The key is decrypted only in the backend process, never sent to the browser or
+included in project memory. Provider-reported input/output tokens are written
+to the existing `usage_events` ledger; the provider remains authoritative for
+the actual charge. Interview retries are disabled to avoid accidentally billing
+an ambiguous request twice.
+
+The implementation-review loop keeps the same `projectId`, canonical Project
+Memory, requirements, SRS, architecture, authentication, Orbio connection and
+usage ledger. Public GitHub repositories are inspected at an exact commit with
+bounded file retrieval and secret redaction. Live URLs reuse the existing SSRF-
+protected website inspector. Repository and website content is untrusted data,
+not Promgent instructions.
+
+The current review layer supports repository/live URL input, text and voice
+transcript feedback, requirements traceability, evidence-backed required fixes,
+technical concerns, optional suggestions, user decisions, versioned
+SRS/architecture updates for accepted changes, and a user-key-funded next
+implementation prompt. Promgent does not execute repository code; source review
+is not runtime verification.
+
+```mermaid
+flowchart TD
+    A[Approved Project] --> B[External Coding Agent]
+    B --> C[GitHub Repository / Live Product]
+    C --> D[Promgent Iteration Review]
+    D --> E[Traceability + Findings]
+    D --> F[Optional Suggestions]
+    E --> G[User Decisions]
+    F --> G
+    G --> H[Versioned Project State]
+    H --> I[Correction / Enhancement Prompt]
+    I --> B
+```
+
+Known limits remain: private GitHub OAuth/App access, uploaded screenshot
+analysis, background review jobs, full discussion transcripts, external
+implementation usage snapshots, and runtime execution testing are not yet
+implemented.
+
 - Model pricing and capability scores are **static configuration, not live data**, and capability
   scores are heuristics rather than benchmarks. The registry is structured so both can be replaced
   with live provider data.
@@ -526,4 +603,6 @@ These are current, not aspirational:
   unit; Promgent uses it as the planning primitive for estimates, not as a payment rail.
 - Estimates are planning ranges. Actual external cost depends on the model, token usage,
   iterations, tools and execution environment.
-- No wallet, no Orbio account connection, no prompt execution, no agent marketplace.
+- Quick Plan has no wallet or Orbio account connection. Guided Projects use a
+  connected user Orbio key for their interview inference. Promgent still does
+  not execute implementation prompts or operate an agent marketplace.

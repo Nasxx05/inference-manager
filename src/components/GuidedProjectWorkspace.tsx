@@ -1,0 +1,204 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, LogOut, Plus, RefreshCw } from "lucide-react";
+import { MODELS } from "@/data/models";
+import type { GuidedProjectSnapshot, PlanningDepth, ProjectRecord, SrsDocument } from "@/types/project";
+import { approveSrs, connectOrbio, createProject, disconnectOrbio, generateArchitecture, generateSrs, getOrbioStatus, getSession, listProjects, loadProject, sendInterview, signIn, signOut, signUp, transcribeAudio } from "@/lib/guidedApi";
+import { Button, Field, Select } from "./ui";
+import { IterationWorkspace } from "./IterationWorkspace";
+
+type Mode = "loading" | "auth" | "projects" | "create" | "interview" | "srs" | "iteration";
+
+export function GuidedProjectWorkspace({ onBack }: { onBack: () => void }) {
+  const [mode, setMode] = useState<Mode>("loading");
+  const [error, setError] = useState<string | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+  const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [snapshot, setSnapshot] = useState<GuidedProjectSnapshot | null>(null);
+  const [srs, setSrs] = useState<SrsDocument | null>(null);
+  const [description, setDescription] = useState("");
+  const [modelId, setModelId] = useState(MODELS[0]?.id ?? "auto");
+  const [planningDepth, setPlanningDepth] = useState<PlanningDepth>("balanced");
+  const [budget, setBudget] = useState("10");
+  const [message, setMessage] = useState("");
+  const [messageSource, setMessageSource] = useState<"text" | "voice_transcript">("text");
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const recorder = useRef<MediaRecorder | null>(null);
+  const audioChunks = useRef<Blob[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [orbioConnected, setOrbioConnected] = useState(false);
+  const [orbioKey, setOrbioKey] = useState("");
+
+  async function refreshProjects() {
+    setBusy(true);
+    try { const [nextProjects, status] = await Promise.all([listProjects(), getOrbioStatus()]); setProjects(nextProjects); setOrbioConnected(status.connected); setMode("projects"); setError(null); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "Could not load projects."); }
+    finally { setBusy(false); }
+  }
+
+  async function handleConnectOrbio() {
+    setBusy(true); setError(null);
+    try { await connectOrbio(orbioKey); setOrbioConnected(true); setOrbioKey(""); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "Could not connect Orbio."); }
+    finally { setBusy(false); }
+  }
+
+  async function handleDisconnectOrbio() {
+    setBusy(true); setError(null);
+    try { await disconnectOrbio(); setOrbioConnected(false); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "Could not disconnect Orbio."); }
+    finally { setBusy(false); }
+  }
+
+  useEffect(() => {
+    getSession().then(() => refreshProjects()).catch(() => setMode("auth"));
+  }, []);
+
+  async function submitAuth(event: React.FormEvent) {
+    event.preventDefault(); setBusy(true); setError(null);
+    try {
+      if (authMode === "signin") await signIn(email, password);
+      else {
+        const result = await signUp(email, password);
+        if (!result.authenticated) { setError("Check your email to confirm your account, then sign in."); setAuthMode("signin"); return; }
+      }
+      await refreshProjects();
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "Authentication failed."); }
+    finally { setBusy(false); }
+  }
+
+  async function submitProject(event: React.FormEvent) {
+    event.preventDefault(); setBusy(true); setError(null);
+    try {
+      const created = await createProject({ description, modelId, planningDepth, budget: Number(budget) });
+      setSnapshot({ project: created.project, memory: created.memory, interview: created.interview, messages: [created.assistantMessage] });
+      setMode("interview");
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not create the project."); }
+    finally { setBusy(false); }
+  }
+
+  async function openProject(projectId: string) {
+    setBusy(true); setError(null);
+    try { setSnapshot(await loadProject(projectId)); setMode("interview"); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "Could not load the project."); }
+    finally { setBusy(false); }
+  }
+
+  async function submitMessage(event: React.FormEvent) {
+    event.preventDefault();
+    if (!snapshot || !message.trim()) return;
+    setBusy(true); setError(null);
+    try {
+      const result = await sendInterview(snapshot.project.id, message);
+      setSnapshot((current) => current ? { ...current, memory: result.memory, interview: result.session, messages: [...current.messages, result.userMessage, result.assistantMessage] } : current);
+      setMessage("");
+      setMessageSource("text");
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "The interview turn failed."); }
+    finally { setBusy(false); }
+  }
+
+  async function makeSrs() {
+    if (!snapshot) return;
+    setBusy(true); setError(null);
+    try { setSrs(await generateSrs(snapshot.project.id)); setMode("srs"); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "Could not generate the specification."); }
+    finally { setBusy(false); }
+  }
+
+  async function makeArchitecture() {
+    if (!snapshot) return;
+    setBusy(true); setError(null);
+    try {
+      const architecture = await generateArchitecture(snapshot.project.id);
+      setSnapshot((current) => current ? { ...current, architecture } : current);
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not generate architecture."); }
+    finally { setBusy(false); }
+  }
+
+  async function toggleRecording() {
+    if (recording) { recorder.current?.stop(); return; }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setError("Voice recording is not available in this browser.");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const nextRecorder = new MediaRecorder(stream);
+      audioChunks.current = [];
+      nextRecorder.ondataavailable = (event) => { if (event.data.size) audioChunks.current.push(event.data); };
+      nextRecorder.onstop = async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        setRecording(false);
+        setTranscribing(true);
+        setError(null);
+        try {
+          const text = await transcribeAudio(new Blob(audioChunks.current, { type: nextRecorder.mimeType || "audio/webm" }));
+          setMessage(text);
+          setMessageSource("voice_transcript");
+        } catch (caught) { setError(caught instanceof Error ? caught.message : "Voice transcription failed."); }
+        finally { setTranscribing(false); }
+      };
+      recorder.current = nextRecorder;
+      nextRecorder.start();
+      setRecording(true);
+    } catch { setError("Microphone access was not granted."); }
+  }
+
+  async function approveSpecification() {
+    if (!snapshot || !srs) return;
+    setBusy(true); setError(null);
+    try { await approveSrs(snapshot.project.id, srs.id); setSrs({ ...srs, status: "approved" }); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "Could not approve the specification."); }
+    finally { setBusy(false); }
+  }
+
+  const progress = useMemo(() => snapshot ? snapshot.memory.completeness : null, [snapshot]);
+
+  return (
+    <div className="min-h-screen bg-canvas">
+      <header className="border-b border-line bg-canvas">
+        <div className="mx-auto flex max-w-[1180px] items-center justify-between gap-3 px-5 py-3.5">
+          <div className="flex items-center gap-3">
+            <button type="button" onClick={onBack} className="inline-flex items-center gap-1.5 text-sm text-muted hover:text-ink"><ArrowLeft className="h-4 w-4" /> Quick Plan</button>
+            <span className="font-mono text-sm font-medium">Guided Project</span>
+          </div>
+          {mode !== "auth" && mode !== "loading" ? <button type="button" onClick={() => { void signOut().finally(() => setMode("auth")); }} className="inline-flex items-center gap-1.5 text-xs text-muted hover:text-ink"><LogOut className="h-3.5 w-3.5" /> Sign out</button> : null}
+        </div>
+      </header>
+      <main className="mx-auto w-full max-w-[1000px] px-5 py-8 sm:py-12">
+        {mode === "loading" ? <p className="text-center text-sm text-muted">Loading your projects...</p> : null}
+        {mode === "auth" ? <AuthCard {...{ authMode, setAuthMode, email, setEmail, password, setPassword, submitAuth, busy, error }} /> : null}
+        {mode === "projects" ? <ProjectList projects={projects} busy={busy} onCreate={() => { setError(null); setMode("create"); }} onOpen={(id) => void openProject(id)} onRefresh={() => void refreshProjects()} error={error} orbioConnected={orbioConnected} orbioKey={orbioKey} setOrbioKey={setOrbioKey} onConnect={() => void handleConnectOrbio()} onDisconnect={() => void handleDisconnectOrbio()} /> : null}
+        {mode === "create" ? <CreateProjectCard {...{ description, setDescription, modelId, setModelId, planningDepth, setPlanningDepth, budget, setBudget, submitProject, busy, error }} onCancel={() => setMode("projects")} /> : null}
+        {mode === "interview" && snapshot ? <InterviewCard snapshot={snapshot} progress={progress} message={message} setMessage={(value) => { setMessage(value); setMessageSource("text"); }} messageSource={messageSource} submitMessage={submitMessage} busy={busy} error={error} recording={recording} transcribing={transcribing} onRecord={() => void toggleRecording()} onClearVoice={() => { setMessage(""); setMessageSource("text"); }} onSrs={() => void makeSrs()} onArchitecture={() => void makeArchitecture()} onIteration={() => setMode("iteration")} /> : null}
+        {mode === "srs" && snapshot && srs ? <SrsCard snapshot={snapshot} srs={srs} busy={busy} onBack={() => setMode("interview")} onApprove={() => void approveSpecification()} error={error} onIteration={() => setMode("iteration")} /> : null}
+        {mode === "iteration" && snapshot ? <IterationWorkspace projectId={snapshot.project.id} projectTitle={snapshot.project.title} onBack={() => setMode("interview")} /> : null}
+      </main>
+    </div>
+  );
+}
+
+function AuthCard(props: { authMode: "signin" | "signup"; setAuthMode: (value: "signin" | "signup") => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; submitAuth: (event: React.FormEvent) => void; busy: boolean; error: string | null }) {
+  return <div className="mx-auto max-w-[460px] rounded border border-line bg-paper p-6 sm:p-8"><h1 className="display text-3xl text-ink">{props.authMode === "signin" ? "Welcome back" : "Create your account"}</h1><p className="mt-2 text-sm leading-relaxed text-muted">Projects and requirements are saved securely so you can return to them later.</p><form onSubmit={props.submitAuth} className="mt-7 flex flex-col gap-5"><Field label="Email" htmlFor="guided-email"><input id="guided-email" type="email" required value={props.email} onChange={(event) => props.setEmail(event.target.value)} className="w-full rounded border border-line bg-paper px-3 py-2.5 text-sm" /></Field><Field label="Password" htmlFor="guided-password" hint="At least 8 characters."><input id="guided-password" type="password" required minLength={8} value={props.password} onChange={(event) => props.setPassword(event.target.value)} className="w-full rounded border border-line bg-paper px-3 py-2.5 text-sm" /></Field>{props.error ? <p role="alert" className="text-sm text-danger">{props.error}</p> : null}<Button type="submit" disabled={props.busy}>{props.busy ? "Working..." : props.authMode === "signin" ? "Sign in" : "Create account"}</Button></form><button type="button" onClick={() => props.setAuthMode(props.authMode === "signin" ? "signup" : "signin")} className="mt-5 text-sm text-forest hover:underline">{props.authMode === "signin" ? "Need an account? Sign up" : "Already have an account? Sign in"}</button></div>;
+}
+
+function ProjectList(props: { projects: ProjectRecord[]; busy: boolean; onCreate: () => void; onOpen: (id: string) => void; onRefresh: () => void; error: string | null; orbioConnected: boolean; orbioKey: string; setOrbioKey: (value: string) => void; onConnect: () => void; onDisconnect: () => void }) {
+  return <div><div className="flex items-end justify-between gap-3"><div><h1 className="display text-3xl text-ink">Your projects</h1><p className="mt-2 text-sm text-muted">Each project keeps its own requirements, architecture and specification history.</p></div><Button onClick={props.onCreate} disabled={!props.orbioConnected}><Plus className="h-4 w-4" /> New project</Button></div><div className="mt-7 rounded border border-line bg-paper p-5"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="font-mono text-xs uppercase tracking-wide text-muted">Orbio connection</p><p className="mt-2 text-sm text-ink">{props.orbioConnected ? "Connected. Promgent will use this connection for Guided Project reasoning." : "Connect Orbio before creating a persistent project."}</p></div>{props.orbioConnected ? <Button variant="secondary" onClick={props.onDisconnect} disabled={props.busy}>Disconnect</Button> : null}</div>{!props.orbioConnected ? <div className="mt-4 flex flex-wrap gap-2"><input type="password" value={props.orbioKey} onChange={(event) => props.setOrbioKey(event.target.value)} placeholder="Orbio API key" aria-label="Orbio API key" className="min-w-[240px] flex-1 rounded border border-line bg-paper px-3 py-2.5 text-sm" /><Button onClick={props.onConnect} disabled={props.busy || !props.orbioKey.trim()}>{props.busy ? "Verifying..." : "Verify connection"}</Button></div> : null}</div>{props.error ? <p role="alert" className="mt-5 text-sm text-danger">{props.error}</p> : null}<div className="mt-8 grid gap-3">{props.projects.length ? props.projects.map((project) => <button type="button" key={project.id} onClick={() => props.onOpen(project.id)} className="rounded border border-line bg-paper p-5 text-left hover:border-lineStrong"><div className="flex items-center justify-between gap-3"><span className="font-medium text-ink">{project.title}</span><span className="font-mono text-xs text-muted">{project.status}</span></div><p className="mt-2 line-clamp-2 text-sm text-muted">{project.initialDescription}</p></button>) : <div className="rounded border border-dashed border-line p-8 text-center text-sm text-muted">No Guided Projects yet. Start with the idea you want to shape.</div>}</div><button type="button" disabled={props.busy} onClick={props.onRefresh} className="mt-5 inline-flex items-center gap-1.5 text-xs text-muted hover:text-ink"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button></div>;
+}
+
+function CreateProjectCard(props: { description: string; setDescription: (value: string) => void; modelId: string; setModelId: (value: string) => void; planningDepth: PlanningDepth; setPlanningDepth: (value: PlanningDepth) => void; budget: string; setBudget: (value: string) => void; submitProject: (event: React.FormEvent) => void; busy: boolean; error: string | null; onCancel: () => void }) {
+  return <div className="mx-auto max-w-[760px] rounded border border-line bg-paper p-6 sm:p-8"><h1 className="display text-3xl text-ink">Start a Guided Project</h1><p className="mt-2 text-sm leading-relaxed text-muted">Promgent will turn your idea into structured requirements through an adaptive conversation.</p><form onSubmit={props.submitProject} className="mt-7 flex flex-col gap-5"><Field label="What do you want to build?" htmlFor="guided-description"><textarea id="guided-description" required rows={7} value={props.description} onChange={(event) => props.setDescription(event.target.value)} placeholder="Describe the product in your own words. You can paste a website URL or mention a visual reference." className="w-full resize-y rounded border border-line bg-paper px-3 py-3 text-sm leading-relaxed" /></Field><div className="grid gap-5 sm:grid-cols-3"><Field label="Model" htmlFor="guided-model"><Select id="guided-model" value={props.modelId} onChange={(event) => props.setModelId(event.target.value)}>{MODELS.map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}</Select></Field><Field label="Planning depth" htmlFor="guided-depth"><Select id="guided-depth" value={props.planningDepth} onChange={(event) => props.setPlanningDepth(event.target.value as PlanningDepth)}><option value="fast">Fast</option><option value="balanced">Balanced</option><option value="thorough">Thorough</option></Select></Field><Field label="Project budget" htmlFor="guided-budget"><input id="guided-budget" type="number" min="0.1" step="0.5" value={props.budget} onChange={(event) => props.setBudget(event.target.value)} className="w-full rounded border border-line bg-paper px-3 py-2.5 font-mono text-sm" /></Field></div>{props.error ? <p role="alert" className="text-sm text-danger">{props.error}</p> : null}<div className="flex flex-wrap gap-3"><Button type="submit" disabled={props.busy}>{props.busy ? "Creating..." : "Start Project"}</Button><Button type="button" variant="secondary" onClick={props.onCancel}>Back</Button></div></form></div>;
+}
+
+function InterviewCard(props: { snapshot: GuidedProjectSnapshot; progress: GuidedProjectSnapshot["memory"]["completeness"] | null; message: string; setMessage: (value: string) => void; messageSource: "text" | "voice_transcript"; submitMessage: (event: React.FormEvent) => void; busy: boolean; error: string | null; recording: boolean; transcribing: boolean; onRecord: () => void; onClearVoice: () => void; onSrs: () => void; onArchitecture: () => void; onIteration: () => void }) {
+  const next = props.snapshot.interview.nextQuestion;
+  return <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]"><section className="rounded border border-line bg-paper p-5 sm:p-7"><div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs uppercase tracking-wide text-muted">Requirements interview</p><h1 className="display mt-1 text-3xl text-ink">{props.snapshot.project.title}</h1></div><span className="rounded bg-canvas px-2 py-1 font-mono text-xs text-muted">{props.snapshot.interview.status}</span></div><div className="mt-7 space-y-4">{props.snapshot.messages.length === 0 ? <div className="rounded bg-canvas p-4 text-sm leading-relaxed text-muted">Tell me more about the users, the main workflow and what a successful first version should accomplish.</div> : props.snapshot.messages.map((item) => <div key={item.id} className={item.role === "user" ? "ml-8 rounded bg-forest px-4 py-3 text-sm leading-relaxed text-white" : "mr-8 rounded bg-canvas px-4 py-3 text-sm leading-relaxed text-ink"}>{item.content}</div>)}</div><form onSubmit={props.submitMessage} className="mt-7"><textarea value={props.message} onChange={(event) => props.setMessage(event.target.value)} rows={4} disabled={props.busy || props.recording || props.transcribing} placeholder={next?.question ?? "Add another project detail..."} className="w-full resize-y rounded border border-line bg-paper px-3 py-3 text-sm leading-relaxed" />{props.messageSource === "voice_transcript" ? <p className="mt-2 text-xs text-muted">Transcript ready. Review it before sending.</p> : null}{props.error ? <p role="alert" className="mt-2 text-sm text-danger">{props.error}</p> : null}<div className="mt-3 flex flex-wrap justify-end gap-2"><button type="button" onClick={props.onRecord} disabled={props.busy || props.transcribing} className="rounded border border-line px-3 py-2 text-sm text-muted hover:text-ink">{props.recording ? "Stop recording" : props.transcribing ? "Transcribing..." : "Record voice"}</button>{props.messageSource === "voice_transcript" ? <button type="button" onClick={props.onClearVoice} disabled={props.busy} className="rounded border border-line px-3 py-2 text-sm text-muted hover:text-ink">Clear transcript</button> : null}<Button type="submit" disabled={props.busy || props.recording || props.transcribing || !props.message.trim()}>{props.busy ? "Thinking..." : "Send"}</Button></div></form></section><aside className="space-y-4"><div className="rounded border border-line bg-paper p-5"><p className="font-mono text-xs uppercase tracking-wide text-muted">Project understanding</p><p className="mt-3 text-sm leading-relaxed text-ink">{props.progress?.explanation}</p><div className="mt-4 h-2 overflow-hidden rounded bg-canvas"><div className="h-full rounded bg-forest" style={{ width: `${props.progress?.score ?? 0}%` }} /></div><p className="mt-2 font-mono text-xs text-muted">{props.progress?.score ?? 0}% · {props.progress?.level}</p>{props.progress?.criticalGaps.length ? <ul className="mt-4 space-y-2 text-xs text-muted">{props.progress.criticalGaps.map((gap) => <li key={gap}>Still exploring: {gap}</li>)}</ul> : null}</div><div className="rounded border border-line bg-paper p-5"><p className="font-mono text-xs uppercase tracking-wide text-muted">Next stage</p><div className="mt-3 flex flex-col gap-2"><Button variant="secondary" onClick={props.onArchitecture} disabled={props.busy}>Show architecture</Button><Button variant="secondary" onClick={props.onSrs} disabled={props.busy}>Draft specification</Button><Button variant="secondary" onClick={props.onIteration}>Review implementation</Button></div></div></aside></div>;
+}
+
+function SrsCard(props: { snapshot: GuidedProjectSnapshot; srs: SrsDocument; busy: boolean; onBack: () => void; onApprove: () => void; error: string | null; onIteration: () => void }) {
+  return <div className="mx-auto max-w-[820px] rounded border border-line bg-paper p-6 sm:p-8"><div className="flex items-start justify-between gap-3"><div><p className="font-mono text-xs uppercase tracking-wide text-muted">Specification draft v{props.srs.version}</p><h1 className="display mt-1 text-3xl text-ink">{props.snapshot.project.title}</h1></div><span className="rounded bg-canvas px-2 py-1 font-mono text-xs text-muted">{props.srs.status}</span></div><pre className="mt-7 max-h-[65vh] overflow-auto whitespace-pre-wrap font-sans text-sm leading-relaxed text-ink">{props.srs.content}</pre>{props.error ? <p role="alert" className="mt-4 text-sm text-danger">{props.error}</p> : null}<div className="mt-7 flex flex-wrap gap-3"><Button onClick={props.onBack} disabled={props.busy}>Continue interview</Button>{props.srs.status !== "approved" ? <Button onClick={props.onApprove} disabled={props.busy}>Approve specification</Button> : null}<Button variant="secondary" onClick={() => navigator.clipboard?.writeText(props.srs.content)}>Copy specification</Button><Button variant="secondary" onClick={props.onIteration}>Review implementation</Button></div></div>;
+}
