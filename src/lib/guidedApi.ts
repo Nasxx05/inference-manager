@@ -15,14 +15,23 @@ import type { IterationPrompt, ProjectIteration, SuggestionDiscussionMessage } f
 
 export interface GuidedUser { id: string; email?: string | null; }
 
+export class GuidedApiError extends Error {
+  readonly code?: string;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = "GuidedApiError";
+    this.code = code;
+  }
+}
+
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(endpoint(path), {
     ...init,
     credentials: "include",
     headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
   });
-  const payload = (await response.json().catch(() => null)) as { success?: boolean; data?: T; error?: { message?: string } } | null;
-  if (!response.ok || !payload?.success) throw new Error(payload?.error?.message ?? "The request could not be completed.");
+  const payload = (await response.json().catch(() => null)) as { success?: boolean; data?: T; error?: { code?: string; message?: string } } | null;
+  if (!response.ok || !payload?.success) throw new GuidedApiError(payload?.error?.message ?? "The request could not be completed.", payload?.error?.code);
   return payload.data as T;
 }
 
@@ -44,7 +53,13 @@ export function signOut(): Promise<void> {
 
 export interface OrbioBalance { available: number; total?: number; used?: number; currency: string; source: "credits" | "key"; }
 
-export interface OrbioStatus { connected: boolean; keyFingerprint?: string; status?: string; modelIds?: string[]; balance?: OrbioBalance | null; }
+export type OrbioConnectionState = "unverified" | "active" | "invalid" | "disconnected";
+
+export interface OrbioStatus { connected: boolean; keyFingerprint?: string; status: OrbioConnectionState; modelIds: string[]; balance: OrbioBalance | null; }
+
+export function isUsableOrbioStatus(status: Pick<OrbioStatus, "connected" | "status">): boolean {
+  return status.connected === true && status.status === "active";
+}
 
 export function getOrbioStatus(): Promise<OrbioStatus> {
   return call("/api/orbio/status");
@@ -69,8 +84,8 @@ export async function createProject(input: { description: string; modelId: strin
   form.append("payload", JSON.stringify(payload));
   form.append("images", image, image.name);
   const response = await fetch(endpoint("/api/projects"), { method: "POST", credentials: "include", body: form });
-  const result = (await response.json().catch(() => null)) as { success?: boolean; data?: { project: ProjectRecord; memory: ProjectMemory; interview: InterviewSession; assistantMessage: GuidedProjectSnapshot["messages"][number]; references?: ProjectReference[]; usage: ProjectUsageSummary }; error?: { message?: string } } | null;
-  if (!response.ok || !result?.success || !result.data) throw new Error(result?.error?.message ?? "The project could not be created.");
+  const result = (await response.json().catch(() => null)) as { success?: boolean; data?: { project: ProjectRecord; memory: ProjectMemory; interview: InterviewSession; assistantMessage: GuidedProjectSnapshot["messages"][number]; references?: ProjectReference[]; usage: ProjectUsageSummary }; error?: { code?: string; message?: string } } | null;
+  if (!response.ok || !result?.success || !result.data) throw new GuidedApiError(result?.error?.message ?? "The project could not be created.", result?.error?.code);
   return result.data;
 }
 

@@ -350,6 +350,10 @@ SUPABASE_SERVICE_ROLE_KEY=
 CREDENTIAL_ENCRYPTION_KEY=
 ```
 
+`CREDENTIAL_ENCRYPTION_KEY` must be one stable 32-byte value encoded as 64 hexadecimal
+characters. Configure the same value on every Render instance and deployment; changing it makes
+previously stored Orbio credentials unreadable.
+
 The user connects an Orbio key after signing in and selects a model for each project.
 `Project.selectedModel` remains authoritative for requirements extraction, acceptance criteria,
 planning, semantic repository review, suggestions, suggestion discussions, change impact and
@@ -447,7 +451,7 @@ Project inference is paid for through the user's connected Orbio key, so the bac
 npm test
 ```
 
-311 tests across 25 files. Rather than testing internals, most assert the product promise:
+323 tests across 26 files. Rather than testing internals, most assert the product promise:
 
 | Area | What's asserted |
 |---|---|

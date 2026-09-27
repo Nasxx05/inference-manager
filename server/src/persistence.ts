@@ -21,6 +21,14 @@ export interface AuthUser {
   email?: string;
 }
 
+export interface OrbioConnectionRecord {
+  userId: string;
+  encryptedKey: string;
+  keyFingerprint: string;
+  status: "unverified" | "active" | "invalid" | "disconnected";
+  lastVerifiedAt?: string;
+}
+
 export class PersistenceError extends Error {
   readonly code: string;
   readonly status: number;
@@ -153,16 +161,74 @@ export async function projectForUser(projectId: string, userId: string): Promise
   return projectFromRow(row);
 }
 
+function connectionFromRow(row: Record<string, unknown>): OrbioConnectionRecord {
+  return {
+    userId: String(row.user_id ?? ""),
+    encryptedKey: String(row.encrypted_key ?? ""),
+    keyFingerprint: String(row.key_fingerprint ?? ""),
+    status: String(row.status ?? "unverified") as OrbioConnectionRecord["status"],
+    ...(row.last_verified_at ? { lastVerifiedAt: String(row.last_verified_at) } : {}),
+  };
+}
+
+export async function readOrbioConnection(userId: string): Promise<OrbioConnectionRecord | null> {
+  const rows = await request<Record<string, unknown>[]>({
+    path: `/rest/v1/orbio_connections?select=user_id,encrypted_key,key_fingerprint,status,last_verified_at&user_id=eq.${query(userId)}&limit=1`,
+  });
+  return rows[0] ? connectionFromRow(rows[0]) : null;
+}
+
+export async function saveOrbioConnection(input: OrbioConnectionRecord): Promise<OrbioConnectionRecord> {
+  const rows = await request<Record<string, unknown>[]>({
+    path: "/rest/v1/orbio_connections?on_conflict=user_id&select=user_id,encrypted_key,key_fingerprint,status,last_verified_at",
+    method: "POST",
+    body: [{
+      user_id: input.userId,
+      encrypted_key: input.encryptedKey,
+      key_fingerprint: input.keyFingerprint,
+      status: input.status,
+      last_verified_at: input.lastVerifiedAt ?? null,
+    }],
+  });
+  const saved = rows[0] ? connectionFromRow(rows[0]) : null;
+  if (!saved || saved.userId !== input.userId || !saved.encryptedKey || saved.status !== input.status) {
+    throw new PersistenceError("PERSISTENCE_REQUEST_FAILED", "The saved Orbio connection could not be confirmed.");
+  }
+  return saved;
+}
+
+export async function updateOrbioConnectionStatus(userId: string, status: OrbioConnectionRecord["status"], lastVerifiedAt?: string): Promise<void> {
+  await request({
+    path: `/rest/v1/orbio_connections?user_id=eq.${query(userId)}`,
+    method: "PATCH",
+    body: { status, ...(lastVerifiedAt ? { last_verified_at: lastVerifiedAt } : {}) },
+  });
+}
+
+export async function deleteOrbioConnection(userId: string): Promise<void> {
+  await request({ path: `/rest/v1/orbio_connections?user_id=eq.${query(userId)}`, method: "DELETE" });
+}
+
 /** Loads a connected Orbio credential only inside the backend process. */
 export async function loadOrbioKey(userId: string): Promise<string> {
-  const rows = await request<Array<{ encrypted_key?: string; status?: string }>>({
-    path: `/rest/v1/orbio_connections?select=encrypted_key,status&user_id=eq.${query(userId)}&limit=1`,
-  });
-  const row = rows[0];
-  if (!row?.encrypted_key || row.status !== "active") {
-    throw new PersistenceError("ORBIO_NOT_CONNECTED", "Connect an active Orbio key before using the interview.", 400);
+  const row = await readOrbioConnection(userId);
+  if (!row) {
+    throw new PersistenceError("ORBIO_NOT_CONNECTED", "Connect your Orbio account before starting a project.", 400);
   }
-  return decryptOrbioKey(String(row.encrypted_key));
+  if (row.status !== "active") {
+    throw new PersistenceError("ORBIO_CONNECTION_INACTIVE", "Your saved Orbio connection is inactive. Reconnect it.", 400);
+  }
+  if (!row.encryptedKey) {
+    throw new PersistenceError("ORBIO_CREDENTIAL_UNREADABLE", "Your saved Orbio connection can no longer be read. Reconnect your Orbio key.", 400);
+  }
+  try {
+    const decrypted = decryptOrbioKey(row.encryptedKey).trim();
+    if (!decrypted) throw new Error("empty credential");
+    return decrypted;
+  } catch (error) {
+    if (error instanceof PersistenceError && error.code === "CREDENTIAL_ENCRYPTION_NOT_CONFIGURED") throw error;
+    throw new PersistenceError("ORBIO_CREDENTIAL_UNREADABLE", "Your saved Orbio connection can no longer be read. Reconnect your Orbio key.", 400);
+  }
 }
 
 export async function insertUsageEvent(input: {
@@ -500,10 +566,7 @@ export async function snapshotForUser(projectId: string, userId: string): Promis
 }
 
 export function encryptOrbioKey(value: string): string {
-  const configured = String(process.env.CREDENTIAL_ENCRYPTION_KEY ?? "").trim();
-  if (!/^[0-9a-fA-F]{64}$/.test(configured)) {
-    throw new PersistenceError("CREDENTIAL_ENCRYPTION_NOT_CONFIGURED", "CREDENTIAL_ENCRYPTION_KEY must be a 32-byte hex key.");
-  }
+  const configured = requireCredentialEncryptionKey();
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", Buffer.from(configured, "hex"), iv);
   const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
@@ -511,17 +574,28 @@ export function encryptOrbioKey(value: string): string {
 }
 
 export function decryptOrbioKey(value: string): string {
-  const configured = String(process.env.CREDENTIAL_ENCRYPTION_KEY ?? "").trim();
-  if (!/^[0-9a-fA-F]{64}$/.test(configured)) throw new PersistenceError("CREDENTIAL_ENCRYPTION_NOT_CONFIGURED", "Credential encryption is not configured.");
+  const configured = requireCredentialEncryptionKey();
   const [ivRaw, tagRaw, encryptedRaw] = value.split(".");
-  if (!ivRaw || !tagRaw || !encryptedRaw) throw new PersistenceError("CREDENTIAL_DECRYPTION_FAILED", "Stored credential could not be read.");
+  if (!ivRaw || !tagRaw || !encryptedRaw) throw new PersistenceError("ORBIO_CREDENTIAL_UNREADABLE", "Your saved Orbio connection can no longer be read. Reconnect your Orbio key.", 400);
   try {
     const decipher = createDecipheriv("aes-256-gcm", Buffer.from(configured, "hex"), Buffer.from(ivRaw, "base64url"));
     decipher.setAuthTag(Buffer.from(tagRaw, "base64url"));
     return Buffer.concat([decipher.update(Buffer.from(encryptedRaw, "base64url")), decipher.final()]).toString("utf8");
   } catch {
-    throw new PersistenceError("CREDENTIAL_DECRYPTION_FAILED", "Stored credential could not be read.");
+    throw new PersistenceError("ORBIO_CREDENTIAL_UNREADABLE", "Your saved Orbio connection can no longer be read. Reconnect your Orbio key.", 400);
   }
+}
+
+export function credentialEncryptionConfigured(): boolean {
+  return /^[0-9a-fA-F]{64}$/.test(String(process.env.CREDENTIAL_ENCRYPTION_KEY ?? "").trim());
+}
+
+export function requireCredentialEncryptionKey(): string {
+  const configured = String(process.env.CREDENTIAL_ENCRYPTION_KEY ?? "").trim();
+  if (!/^[0-9a-fA-F]{64}$/.test(configured)) {
+    throw new PersistenceError("CREDENTIAL_ENCRYPTION_NOT_CONFIGURED", "CREDENTIAL_ENCRYPTION_KEY must be a stable 32-byte key encoded as 64 hexadecimal characters.", 503);
+  }
+  return configured;
 }
 
 export function fingerprint(value: string): string {

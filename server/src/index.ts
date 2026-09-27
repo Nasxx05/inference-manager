@@ -50,11 +50,14 @@ import { selectQuestions } from "@/lib/clarifier";
 import { parseBudget, parseOptimization } from "@/lib/validation/schemas";
 import type { ClarifyingQuestion, OptimizationPreference, TaskType } from "@/types";
 import { guidedRouter } from "./guidedRoutes";
+import { credentialEncryptionConfigured, requireCredentialEncryptionKey } from "./persistence";
 
 // Must run before any env value is read below, and before PORT or the CORS
 // allow-list are captured. On the host this is a no-op: the variables already
 // exist, and the loader never overwrites them.
 const envFilesLoaded = loadLocalEnv();
+console.log(`credentialEncryptionConfigured=${credentialEncryptionConfigured()}`);
+requireCredentialEncryptionKey();
 
 const app = express();
 

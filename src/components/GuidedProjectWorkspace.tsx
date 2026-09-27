@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, LogOut, Plus, RefreshCw } from "lucide-react";
 import { MODELS } from "@/data/models";
 import type { GuidedProjectSnapshot, PlanningDepth, ProjectRecord, ProjectUsageSummary, SrsDocument } from "@/types/project";
-import { approveSrs, connectOrbio, createProject, disconnectOrbio, generateArchitecture, generateProjectPlan, generateSrs, getOrbioStatus, getSession, listProjects, loadProject, sendInterview, signIn, signOut, signUp, transcribeAudio, type GuidedUser, type OrbioBalance, type OrbioStatus } from "@/lib/guidedApi";
+import { approveSrs, connectOrbio, createProject, disconnectOrbio, generateArchitecture, generateProjectPlan, generateSrs, getOrbioStatus, getSession, isUsableOrbioStatus, listProjects, loadProject, sendInterview, signIn, signOut, signUp, transcribeAudio, GuidedApiError, type GuidedUser, type OrbioBalance, type OrbioConnectionState, type OrbioStatus } from "@/lib/guidedApi";
 import { ORBIO_ACCOUNT_URL, EXTERNAL_LINK_REL } from "@/lib/externalLinks";
 import { Button, Field, Select } from "./ui";
 import { IterationWorkspace } from "./IterationWorkspace";
@@ -39,7 +39,7 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
   const audioChunks = useRef<Blob[]>([]);
   const [busy, setBusy] = useState(false);
   const [orbioConnected, setOrbioConnected] = useState(false);
-  const [orbioConnectionStatus, setOrbioConnectionStatus] = useState<string | undefined>();
+  const [orbioConnectionStatus, setOrbioConnectionStatus] = useState<OrbioConnectionState>("disconnected");
   const [orbioKey, setOrbioKey] = useState("");
   const [orbioFingerprint, setOrbioFingerprint] = useState<string | undefined>();
   const [orbioBalance, setOrbioBalance] = useState<OrbioBalance | null>(null);
@@ -73,7 +73,7 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
 
   async function handleDisconnectOrbio() {
     setBusy(true); setError(null);
-    try { await disconnectOrbio(); applyOrbioStatus({ connected: false }); setProfileOpen(false); }
+    try { await disconnectOrbio(); applyOrbioStatus({ connected: false, status: "disconnected", modelIds: [], balance: null }); setProfileOpen(false); }
     catch (caught) { setError(caught instanceof Error ? caught.message : "Could not disconnect Orbio."); }
     finally { setBusy(false); }
   }
@@ -104,7 +104,14 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
       const created = await createProject({ description, modelId, planningDepth, budget: Number(budget), references, image: referenceImage });
       setSnapshot({ project: created.project, memory: created.memory, interview: created.interview, messages: [created.assistantMessage], references: created.references ?? [], usage: created.usage });
       setMode("interview");
-    } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not create the project."); }
+    } catch (caught) {
+      const recoveryCodes = new Set(["ORBIO_NOT_CONNECTED", "ORBIO_CONNECTION_INACTIVE", "ORBIO_CREDENTIAL_UNREADABLE", "ORBIO_KEY_EXPIRED_OR_INVALID"]);
+      if (caught instanceof GuidedApiError && caught.code && recoveryCodes.has(caught.code)) {
+        try { applyOrbioStatus(await getOrbioStatus()); } catch { applyOrbioStatus({ connected: false, status: "disconnected", modelIds: [], balance: null }); }
+        setMode("projects");
+      }
+      setError(caught instanceof Error ? caught.message : "Could not create the project.");
+    }
     finally { setBusy(false); }
   }
 
@@ -229,8 +236,8 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
   );
 }
 
-function ProfilePanel(props: { user: GuidedUser | null; connected: boolean; status?: string; fingerprint?: string; balance: OrbioBalance | null; busy: boolean; onDisconnect: () => void; onClose: () => void }) {
-  const usable = props.connected && props.status !== "invalid";
+function ProfilePanel(props: { user: GuidedUser | null; connected: boolean; status: OrbioConnectionState; fingerprint?: string; balance: OrbioBalance | null; busy: boolean; onDisconnect: () => void; onClose: () => void }) {
+  const usable = isUsableOrbioStatus(props);
   return <div className="border-b border-line bg-paper"><div className="mx-auto flex max-w-[1000px] items-start justify-between gap-6 px-5 py-5"><div><p className="font-mono text-xs uppercase tracking-wide text-muted">Profile</p><p className="mt-2 text-sm text-ink">{props.user?.email ?? "Signed-in user"}</p><p className="mt-4 text-xs uppercase tracking-wide text-muted">Orbio connection</p>{props.connected ? <><p className="mt-1 text-sm text-ink">{usable ? "Connected" : "Needs reconnection"}{props.fingerprint ? ` · ${props.fingerprint}` : ""}</p><p className="mt-3 text-xs uppercase tracking-wide text-muted">Available balance</p><p className="mt-1 font-mono text-lg text-ink">{props.balance ? `${props.balance.available.toFixed(2)} ${props.balance.currency}` : "Unavailable"}</p><Button variant="secondary" onClick={props.onDisconnect} disabled={props.busy} className="mt-4">{props.busy ? "Disconnecting..." : "Disconnect Orbio"}</Button></> : <p className="mt-1 text-sm text-muted">No Orbio key connected.</p>}</div><button type="button" onClick={props.onClose} className="text-xs text-muted hover:text-ink">Close</button></div></div>;
 }
 
@@ -238,8 +245,8 @@ function AuthCard(props: { authMode: "signin" | "signup"; setAuthMode: (value: "
   return <div className="mx-auto max-w-[460px] rounded border border-line bg-paper p-6 sm:p-8"><h1 className="display text-3xl text-ink">{props.authMode === "signin" ? "Welcome back" : "Create your account"}</h1><p className="mt-2 text-sm leading-relaxed text-muted">Projects and requirements are saved securely so you can return to them later.</p><form onSubmit={props.submitAuth} className="mt-7 flex flex-col gap-5"><Field label="Email" htmlFor="guided-email"><input id="guided-email" type="email" required value={props.email} onChange={(event) => props.setEmail(event.target.value)} className="w-full rounded border border-line bg-paper px-3 py-2.5 text-sm" /></Field><Field label="Password" htmlFor="guided-password" hint="At least 8 characters."><input id="guided-password" type="password" required minLength={8} value={props.password} onChange={(event) => props.setPassword(event.target.value)} className="w-full rounded border border-line bg-paper px-3 py-2.5 text-sm" /></Field>{props.error ? <p role="alert" className="text-sm text-danger">{props.error}</p> : null}<Button type="submit" disabled={props.busy}>{props.busy ? "Working..." : props.authMode === "signin" ? "Sign in" : "Create account"}</Button></form><button type="button" onClick={() => props.setAuthMode(props.authMode === "signin" ? "signup" : "signin")} className="mt-5 text-sm text-forest hover:underline">{props.authMode === "signin" ? "Need an account? Sign up" : "Already have an account? Sign in"}</button></div>;
 }
 
-function ProjectList(props: { projects: ProjectRecord[]; busy: boolean; onCreate: () => void; onOpen: (id: string) => void; onRefresh: () => void; error: string | null; orbioConnected: boolean; connectionStatus?: string; orbioKey: string; setOrbioKey: (value: string) => void; onConnect: () => void; onDisconnect: () => void; balance: OrbioBalance | null; fingerprint?: string }) {
-  const usable = props.orbioConnected && props.connectionStatus !== "invalid";
+function ProjectList(props: { projects: ProjectRecord[]; busy: boolean; onCreate: () => void; onOpen: (id: string) => void; onRefresh: () => void; error: string | null; orbioConnected: boolean; connectionStatus: OrbioConnectionState; orbioKey: string; setOrbioKey: (value: string) => void; onConnect: () => void; onDisconnect: () => void; balance: OrbioBalance | null; fingerprint?: string }) {
+  const usable = isUsableOrbioStatus({ connected: props.orbioConnected, status: props.connectionStatus });
   return <div><div className="flex items-end justify-between gap-3"><div><h1 className="display text-3xl text-ink">Your projects</h1><p className="mt-2 text-sm text-muted">Each project keeps its requirements, architecture, specification, implementation prompt and review history together.</p></div><Button onClick={props.onCreate} disabled={!usable}><Plus className="h-4 w-4" /> New project</Button></div><div className="mt-7 rounded border border-line bg-paper p-5"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="font-mono text-xs uppercase tracking-wide text-muted">Orbio connection</p><p className="mt-2 text-sm text-ink">{usable ? "Connected. The same connection funds this project's Promgent reasoning." : props.orbioConnected ? "The saved Orbio key needs to be reconnected." : "Connect Orbio before creating a persistent project."}</p>{props.orbioConnected ? <><p className="mt-3 font-mono text-sm text-ink">{props.balance ? `${props.balance.available.toFixed(2)} ${props.balance.currency} available` : "Balance unavailable"}</p><p className="mt-1 text-xs text-muted">Key: {props.fingerprint ?? "connected"}</p><a href={ORBIO_ACCOUNT_URL} target="_blank" rel={EXTERNAL_LINK_REL} className="mt-2 inline-block text-xs text-forest hover:underline">Open Orbio account</a></> : null}</div>{props.orbioConnected ? <Button variant="secondary" onClick={props.onDisconnect} disabled={props.busy}>Disconnect</Button> : null}</div>{!usable ? <div className="mt-4 flex flex-wrap gap-2"><input type="password" value={props.orbioKey} onChange={(event) => props.setOrbioKey(event.target.value)} placeholder="Orbio API key" aria-label="Orbio API key" className="min-w-[240px] flex-1 rounded border border-line bg-paper px-3 py-2.5 text-sm" /><Button onClick={props.onConnect} disabled={props.busy || !props.orbioKey.trim()}>{props.busy ? "Verifying..." : "Verify connection"}</Button></div> : null}</div>{props.error ? <p role="alert" className="mt-5 text-sm text-danger">{props.error}</p> : null}<div className="mt-8 grid gap-3">{props.projects.length ? props.projects.map((project) => <button type="button" key={project.id} onClick={() => props.onOpen(project.id)} className="rounded border border-line bg-paper p-5 text-left hover:border-lineStrong"><div className="flex items-center justify-between gap-3"><span className="font-medium text-ink">{project.title}</span><span className="font-mono text-xs text-muted">{project.status}</span></div><p className="mt-2 line-clamp-2 text-sm text-muted">{project.initialDescription}</p></button>) : <div className="rounded border border-dashed border-line p-8 text-center text-sm text-muted">No projects yet. Start with the idea you want to shape.</div>}</div><button type="button" disabled={props.busy} onClick={props.onRefresh} className="mt-5 inline-flex items-center gap-1.5 text-xs text-muted hover:text-ink"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button></div>;
 }
 
