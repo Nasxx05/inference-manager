@@ -45,6 +45,15 @@ export type MessageContentPart = TextPart | ImagePart;
  */
 export type MessageContent = string | MessageContentPart[];
 
+/** Credentials for one authenticated, user-funded provider request. */
+export interface ChatProviderConfig {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  timeoutMs?: number;
+  retry?: boolean;
+}
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: MessageContent;
@@ -88,7 +97,7 @@ export interface ChatRequest {
   stage: AiStage;
   /** Correlates every stage belonging to one user request. */
   requestId?: string;
-  /** Per-request credentials, used by user-funded Orbio Guided Project calls. */
+  /** Per-request credentials, used by user-funded project calls. */
   apiKey?: string;
   /** Per-request provider base, paired with `apiKey` when supplied. */
   baseUrl?: string;
@@ -96,6 +105,8 @@ export interface ChatRequest {
   timeoutMs?: number;
   /** User-funded calls opt out of retries to avoid an ambiguous double charge. */
   retry?: boolean;
+  /** Optional provider configuration for a project-owned Orbio connection. */
+  provider?: ChatProviderConfig;
 }
 
 export interface ChatResult {
@@ -211,10 +222,12 @@ function logCall(fields: LogFields): void {
 
 /** Reads config once per call. Never returns a key value to a caller that logs. */
 function config(request: ChatRequest = { messages: [], maxTokens: 1, stage: "model-list" }) {
-  const overrideKey = request.apiKey?.trim();
-  const overrideBase = request.baseUrl?.trim().replace(/\/+$/, "");
-  if (overrideKey || overrideBase) {
-    if (!overrideKey || !overrideBase || !request.model?.trim()) {
+  const provider = request.provider;
+  const overrideKey = provider?.apiKey.trim() ?? request.apiKey?.trim();
+  const overrideBase = provider?.baseUrl.trim().replace(/\/+$/, "") ?? request.baseUrl?.trim().replace(/\/+$/, "");
+  const overrideModel = provider?.model.trim() ?? request.model?.trim();
+  if (provider || overrideKey || overrideBase) {
+    if (!overrideKey || !overrideBase || !overrideModel) {
       throw new AiError(
         "BACKEND_NOT_CONFIGURED",
         "The per-request model provider configuration is incomplete.",
@@ -223,8 +236,8 @@ function config(request: ChatRequest = { messages: [], maxTokens: 1, stage: "mod
     return {
       baseUrl: overrideBase,
       apiKey: overrideKey,
-      model: request.model.trim(),
-      timeoutMs: request.timeoutMs ?? aiTimeoutMs(),
+      model: overrideModel,
+      timeoutMs: provider?.timeoutMs ?? request.timeoutMs ?? aiTimeoutMs(),
     };
   }
 
@@ -400,7 +413,7 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
  * and a retry is never triggered by a failure that cannot plausibly improve.
  */
 export async function chat(request: ChatRequest): Promise<ChatResult> {
-  if (request.retry === false) return attemptOnce(request, 1);
+  if (request.retry === false || request.provider?.retry === false) return attemptOnce(request, 1);
   try {
     return await attemptOnce(request, 1);
   } catch (error) {

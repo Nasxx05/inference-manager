@@ -1,12 +1,24 @@
+import type { PlanResult } from "@/types";
+
 /**
- * Shared domain contracts for the persistent Guided Project workflow.
+ * Shared domain contracts for the persistent Promgent project workflow.
  *
  * These types deliberately live outside the UI and backend adapters. The
  * database, interview engine and future repository-review flow all speak the
- * same language, while the existing Quick Plan contracts remain unchanged.
+ * same language, while the existing planning contracts remain reusable internally.
  */
 
 export type PlanningDepth = "fast" | "balanced" | "thorough";
+
+export interface ProjectReference {
+  id: string;
+  projectId: string;
+  type: "image" | "website" | "file";
+  source: string;
+  metadata: Record<string, unknown>;
+  analysis?: Record<string, unknown>;
+  createdAt: string;
+}
 
 export type ProjectStatus =
   | "intake"
@@ -194,4 +206,6 @@ export interface GuidedProjectSnapshot {
   messages: InterviewMessage[];
   architecture?: ArchitectureVersion;
   srs?: SrsDocument;
+  references?: ProjectReference[];
+  implementationPlan?: PlanResult;
 }

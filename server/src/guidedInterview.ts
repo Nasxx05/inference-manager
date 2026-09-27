@@ -35,7 +35,7 @@ function providerBaseUrl(): string {
     .replace(/\/+$/, "");
 }
 
-function providerModelId(selectedModel: string): string {
+export function providerModelId(selectedModel: string): string {
   const profile = getModel(selectedModel);
   return String(profile?.providerModelId ?? selectedModel).trim();
 }

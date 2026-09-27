@@ -1,7 +1,7 @@
 import type { PlanRequest } from "@/lib/planner";
 import type { PlanningDepth, ProjectMemory, ProjectRecord, SrsDocument } from "@/types/project";
 
-/** Converts an approved Guided Project handoff into the existing planner contract. */
+/** Converts an approved project handoff into the existing planner contract. */
 export function planningRequestFromApprovedSrs(input: {
   project: ProjectRecord;
   memory: ProjectMemory;

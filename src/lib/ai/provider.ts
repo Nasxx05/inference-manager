@@ -15,7 +15,7 @@
  * labeled with its real source.
  */
 
-import { chat } from "./chatClient";
+import { chat, type ChatProviderConfig } from "./chatClient";
 import { AiError, toAiError } from "./errors";
 import { aiAnalysisMaxTokens, aiModel, aiProviderConfigured, missingConfig } from "./env";
 import { extractJson } from "./json";
@@ -75,8 +75,8 @@ export { extractJson } from "./json";
  * transient faults, and at most one further attempt here if the response
  * arrives but fails validation. If it still fails, the error propagates.
  */
-export async function analyzeTask(taskDescription: string): Promise<AnalysisResult> {
-  if (!aiProviderConfigured()) {
+export async function analyzeTask(taskDescription: string, provider?: ChatProviderConfig): Promise<AnalysisResult> {
+  if (!provider && !aiProviderConfigured()) {
     throw new AiError(
       "BACKEND_NOT_CONFIGURED",
       `Promgent's model is not configured. Missing: ${missingConfig().join(", ")}.`,
@@ -94,6 +94,7 @@ export async function analyzeTask(taskDescription: string): Promise<AnalysisResu
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const result = await chat({
+        ...(provider ? { provider } : {}),
         messages,
         jsonMode: true,
         // Small and explicit: the analyser returns one compact JSON object, so

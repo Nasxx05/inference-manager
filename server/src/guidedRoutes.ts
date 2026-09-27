@@ -38,10 +38,12 @@ import {
   loadLatestSrs,
   saveIteration,
   saveIterationPrompt,
+  saveProjectPlan,
+  saveProjectReferences,
   updateProjectStatus,
   userForToken,
 } from "./persistence";
-import { runGuidedInterviewInference } from "./guidedInterview";
+import { providerModelId, runGuidedInterviewInference } from "./guidedInterview";
 import { inspectLiveProduct, inspectRepository } from "./iterationEvidence";
 import { runChangeImpactInference, runIterationPromptInference, runIterationReviewInference } from "./iterationAgent";
 import { verifyOrbioKey } from "./orbioService";
@@ -49,6 +51,9 @@ import { TranscriptionError, transcribeAudio } from "./transcription";
 import { buildTraceability, createIteration, extractChangeRequests, findingsFromTraceability, generateIterationPrompt, suggestionsForProject, summarizeIteration, technicalFindings } from "@/lib/iteration";
 import { createRequirement } from "@/lib/projectMemory/requirements";
 import type { ProjectIteration, ProjectSuggestion } from "@/types/iteration";
+import type { ProjectReference } from "@/types/project";
+import { buildPlanWithMetrics } from "@/lib/planner";
+import { planningRequestFromApprovedSrs } from "@/lib/projectMemory/plannerAdapter";
 
 const SESSION_COOKIE = "promgent_session";
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60;
@@ -76,7 +81,7 @@ function clearSession(response: express.Response): void {
 
 async function authenticatedUser(request: express.Request): Promise<AuthUser> {
   const token = cookies(request)[SESSION_COOKIE];
-  if (!token) throw new PersistenceError("AUTH_REQUIRED", "Sign in to use Guided Projects.", 401);
+  if (!token) throw new PersistenceError("AUTH_REQUIRED", "Sign in to use Promgent projects.", 401);
   try {
     return await userForToken(token);
   } catch {
@@ -113,11 +118,31 @@ function errorResponse(response: express.Response, error: unknown): void {
     return;
   }
   console.error("[guided-project] unexpected error", error instanceof Error ? error.message : "unknown");
-  response.status(500).json({ success: false, error: { code: "GUIDED_PROJECT_FAILED", message: "The Guided Project operation failed." } });
+  response.status(500).json({ success: false, error: { code: "PROJECT_OPERATION_FAILED", message: "The project operation failed." } });
 }
 
 function validDepth(value: unknown): PlanningDepth {
   return value === "fast" || value === "thorough" ? value : "balanced";
+}
+
+function referencesFromInput(projectId: string, value: unknown, now: string): ProjectReference[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 8).flatMap((item): ProjectReference[] => {
+    if (!item || typeof item !== "object") return [];
+    const raw = item as Record<string, unknown>;
+    const type = raw.type === "image" || raw.type === "website" || raw.type === "file" ? raw.type : null;
+    const source = String(raw.source ?? "").trim().slice(0, 4000);
+    if (!type || !source) return [];
+    return [{
+      id: randomUUID(),
+      projectId,
+      type,
+      source,
+      metadata: raw.metadata && typeof raw.metadata === "object" ? raw.metadata as Record<string, unknown> : {},
+      analysis: { status: "pending", note: "Reference attached at intake; analysis is tracked on the project." },
+      createdAt: now,
+    }];
+  });
 }
 
 async function recordGuidedUsage(input: {
@@ -245,8 +270,12 @@ export function guidedRouter(): express.Router {
       if (!description || description.length > 8000 || !Number.isFinite(budget) || budget <= 0) {
         throw new PersistenceError("PROJECT_VALIDATION_FAILED", "Provide a task description and a valid CREDIT budget.", 400);
       }
-      const project = createProjectRecord({ userId: user.id, id: randomUUID(), description, modelId, planningDepth: validDepth(input.planningDepth), budget });
+      const project = {
+        ...createProjectRecord({ userId: user.id, id: randomUUID(), description, modelId, planningDepth: validDepth(input.planningDepth), budget }),
+        status: "interviewing" as const,
+      };
       const memory = createInitialMemory(project);
+      const references = referencesFromInput(project.id, input.references, project.createdAt);
       const session: InterviewSession = { id: randomUUID(), projectId: project.id, planningDepth: project.planningDepth, status: "active", nextQuestion: memory.openQuestions[0], turnCount: 0, createdAt: project.createdAt, updatedAt: project.updatedAt };
       const inference = await runGuidedInterviewInference({ apiKey: await loadOrbioKey(user.id), project, memory, opening: true });
       const assistantMessage = {
@@ -261,10 +290,11 @@ export function guidedRouter(): express.Router {
       await insertProject(project);
       await saveMemory(memory);
       await insertRequirements(project.id, memory.requirements);
+      await saveProjectReferences(references);
       await insertInterviewSession(session);
       await insertMessage(assistantMessage);
       await recordGuidedUsage({ userId: user.id, projectId: project.id, model: inference.model, requestId: inference.requestId, usage: inference.usage });
-      response.status(201).json({ success: true, data: { project, memory, interview: session, assistantMessage } });
+      response.status(201).json({ success: true, data: { project, memory, interview: session, assistantMessage, references } });
     } catch (error) { errorResponse(response, error); }
   });
 
@@ -311,6 +341,7 @@ export function guidedRouter(): express.Router {
       if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
       const document = generateSrs({ memory });
       await saveSrs(document);
+      await updateProjectStatus(project.id, "srs_ready");
       response.json({ success: true, data: document });
     } catch (error) { errorResponse(response, error); }
   });
@@ -321,6 +352,32 @@ export function guidedRouter(): express.Router {
       await projectForUser(request.params.projectId, user.id);
       await approveSrs(request.params.projectId, request.params.srsId);
       response.json({ success: true, data: { approvedSrsId: request.params.srsId } });
+    } catch (error) { errorResponse(response, error); }
+  });
+
+  /** Runs the existing planner inside the canonical project lifecycle. */
+  router.post("/projects/:projectId/plan", async (request, response) => {
+    try {
+      const user = await authenticatedUser(request);
+      const project = await projectForUser(request.params.projectId, user.id);
+      const snapshot = await snapshotForUser(project.id, user.id);
+      const srs = await loadLatestSrs(project.id);
+      if (!srs || srs.status !== "approved") {
+        throw new PersistenceError("SRS_APPROVAL_REQUIRED", "Approve the current SRS before generating the implementation prompt.", 400);
+      }
+      const provider = {
+        apiKey: await loadOrbioKey(user.id),
+        baseUrl: String(process.env.ORBIO_BASE_URL ?? process.env.AGENTFUND_AI_BASE_URL ?? "").trim().replace(/\/+$/, ""),
+        model: providerModelId(project.selectedModel),
+        retry: false,
+      };
+      if (!provider.baseUrl) throw new PersistenceError("ORBIO_NOT_CONFIGURED", "ORBIO_BASE_URL is not configured.");
+      const planRequest = planningRequestFromApprovedSrs({ project, memory: snapshot.memory, srs });
+      const built = await buildPlanWithMetrics({ ...planRequest, aiProvider: provider });
+      await saveProjectPlan(project.id, srs.id, built.plan);
+      await updateProjectStatus(project.id, "implementation");
+      await recordGuidedUsage({ userId: user.id, projectId: project.id, phase: "planning", model: built.plan.agentModel ?? provider.model, requestId: built.requestId ?? built.plan.id });
+      response.json({ success: true, data: { plan: built.plan, projectId: project.id } });
     } catch (error) { errorResponse(response, error); }
   });
 

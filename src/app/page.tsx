@@ -1,5 +1,5 @@
-import { Workspace } from "@/components/Workspace";
+import { ProjectWorkspace } from "@/components/GuidedProjectWorkspace";
 
 export default function Page() {
-  return <Workspace />;
+  return <ProjectWorkspace />;
 }

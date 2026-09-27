@@ -1,4 +1,4 @@
-import { createHash, createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createHash, createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
 import type {
   ArchitectureVersion,
   GuidedProjectSnapshot,
@@ -7,7 +7,9 @@ import type {
   ProjectMemory,
   ProjectRecord,
   SrsDocument,
+  ProjectReference,
 } from "@/types/project";
+import type { PlanResult } from "@/types";
 import type { IterationPrompt, ProjectIteration } from "@/types/iteration";
 
 export interface AuthUser {
@@ -46,7 +48,7 @@ function requireConfigured(): void {
   if (!persistenceConfigured()) {
     throw new PersistenceError(
       "PERSISTENCE_NOT_CONFIGURED",
-      "Guided Projects require SUPABASE_URL, SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY.",
+      "Persistent projects require SUPABASE_URL, SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY.",
     );
   }
 }
@@ -298,6 +300,64 @@ export async function saveSrs(document: SrsDocument): Promise<void> {
   });
 }
 
+export async function saveProjectReferences(references: ProjectReference[]): Promise<void> {
+  if (!references.length) return;
+  await request({
+    path: "/rest/v1/project_references?on_conflict=id",
+    method: "POST",
+    body: references.map((reference) => ({
+      id: reference.id,
+      project_id: reference.projectId,
+      type: reference.type,
+      source: reference.source,
+      analysis: reference.analysis ?? {},
+      metadata: reference.metadata,
+      created_at: reference.createdAt,
+    })),
+  });
+}
+
+export async function loadProjectReferences(projectId: string): Promise<ProjectReference[]> {
+  const rows = await request<Record<string, unknown>[]>({
+    path: `/rest/v1/project_references?select=*&project_id=eq.${query(projectId)}&order=created_at.asc`,
+  });
+  return rows.map((row) => ({
+    id: String(row.id),
+    projectId: String(row.project_id),
+    type: row.type as ProjectReference["type"],
+    source: String(row.source),
+    metadata: row.metadata && typeof row.metadata === "object" ? row.metadata as Record<string, unknown> : {},
+    analysis: row.analysis && typeof row.analysis === "object" ? row.analysis as Record<string, unknown> : {},
+    createdAt: String(row.created_at),
+  }));
+}
+
+export async function saveProjectPlan(projectId: string, srsId: string, plan: PlanResult): Promise<void> {
+  await request({
+    path: "/rest/v1/generated_prompts",
+    method: "POST",
+    body: [{
+      // PlanResult ids are UI/history ids, while this table's primary key is UUID.
+      id: randomUUID(),
+      project_id: projectId,
+      srs_document_id: srsId,
+      kind: "implementation",
+      iteration: 1,
+      prompt: plan.prompt,
+      data: plan,
+      created_at: plan.createdAt,
+    }],
+  });
+}
+
+export async function loadLatestProjectPlan(projectId: string): Promise<PlanResult | undefined> {
+  const rows = await request<Record<string, unknown>[]>({
+    path: `/rest/v1/generated_prompts?select=data&project_id=eq.${query(projectId)}&kind=eq.implementation&order=created_at.desc&limit=1`,
+  });
+  const data = rows[0]?.data;
+  return data && typeof data === "object" ? data as PlanResult : undefined;
+}
+
 export async function approveSrs(projectId: string, srsId: string): Promise<void> {
   await request({
     path: `/rest/v1/srs_documents?id=eq.${query(srsId)}&project_id=eq.${query(projectId)}`,
@@ -340,11 +400,21 @@ export async function snapshotForUser(projectId: string, userId: string): Promis
   const messages = await request<Record<string, unknown>[]>({
     path: `/rest/v1/interview_messages?select=*&project_id=eq.${query(projectId)}&order=created_at.asc`,
   });
+  const [references, implementationPlan, architecture, srs] = await Promise.all([
+    loadProjectReferences(projectId),
+    loadLatestProjectPlan(projectId),
+    loadLatestArchitecture(projectId),
+    loadLatestSrs(projectId),
+  ]);
   return {
     project,
     memory,
     interview: session,
     messages: messages.map(messageFromRow),
+    references,
+    ...(implementationPlan ? { implementationPlan } : {}),
+    ...(architecture ? { architecture } : {}),
+    ...(srs ? { srs } : {}),
   };
 }
 

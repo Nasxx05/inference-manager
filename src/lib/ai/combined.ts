@@ -23,7 +23,7 @@
  * rather than degrading the prompt.
  */
 
-import { chat } from "./chatClient";
+import { chat, type ChatProviderConfig } from "./chatClient";
 import { AiError, toAiError } from "./errors";
 import { aiCombinedMaxTokens, aiProviderConfigured, missingConfig } from "./env";
 import {
@@ -340,8 +340,8 @@ function parseCombined(raw: unknown): {
  * transient failures are retried once inside `chat()`, and never stack with the
  * repair attempt — so the maximum is two sends, never three.
  */
-export async function generatePlan(input: CombinedInput): Promise<CombinedResult> {
-  if (!aiProviderConfigured()) {
+export async function generatePlan(input: CombinedInput, provider?: ChatProviderConfig): Promise<CombinedResult> {
+  if (!provider && !aiProviderConfigured()) {
     throw new AiError(
       "BACKEND_NOT_CONFIGURED",
       `Promgent's model is not configured. Missing: ${missingConfig().join(", ")}.`,
@@ -358,6 +358,7 @@ export async function generatePlan(input: CombinedInput): Promise<CombinedResult
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const result = await chat({
+        ...(provider ? { provider } : {}),
         messages,
         jsonMode: true,
         maxTokens: aiCombinedMaxTokens(),

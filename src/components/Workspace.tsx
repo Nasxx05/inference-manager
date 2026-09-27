@@ -22,7 +22,6 @@ import { PromptEditor } from "./PromptEditor";
 import { TaskForm, validateAttachment, type Attachment, type TaskFormValues } from "./TaskForm";
 import { Button } from "./ui";
 import { GeneratingScreen } from "./GeneratingScreen";
-import { GuidedProjectWorkspace } from "./GuidedProjectWorkspace";
 
 /** Builds a multipart body only when there is an image to attach. */
 function formDataFor(
@@ -123,7 +122,6 @@ export function Workspace() {
    * has typed or the result they are looking at.
    */
   const [howToUseOpen, setHowToUseOpen] = useState(false);
-  const [guidedProjectOpen, setGuidedProjectOpen] = useState(false);
 
   useEffect(() => {
     setHistory(readHistory());
@@ -350,10 +348,6 @@ export function Workspace() {
   const showClarifying = clarifying && questions !== null;
   const editing = state === "editing";
 
-  if (guidedProjectOpen) {
-    return <GuidedProjectWorkspace onBack={() => setGuidedProjectOpen(false)} />;
-  }
-
   return (
     <div className="flex min-h-screen flex-col">
       <header className="sticky top-0 z-40 border-b border-line bg-canvas">
@@ -387,13 +381,6 @@ export function Workspace() {
             >
               <PlayCircle aria-hidden="true" className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">How to Use</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setGuidedProjectOpen(true)}
-              className="inline-flex items-center gap-1.5 rounded border border-line bg-paper px-2.5 py-1.5 text-xs text-muted transition-colors hover:border-lineStrong hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-forest"
-            >
-              Guided Project
             </button>
             <a
               href={BUY_CREDITS_URL}

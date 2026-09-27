@@ -109,9 +109,9 @@ app.use(express.raw({ type: ["audio/webm", "audio/ogg", "audio/wav", "audio/mpeg
  */
 app.use(express.raw({ type: "multipart/form-data", limit: "12mb" }));
 
-// Persistent Guided Project endpoints. Quick Plan routes below remain
-// available without an account for backward compatibility; Guided Projects
-// enforce authentication inside the router before touching project state.
+// Persistent project endpoints. The legacy planner routes remain available
+// for backward-compatible API clients; project routes enforce authentication
+// before touching persistent state.
 app.use("/api", guidedRouter());
 
 /**

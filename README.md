@@ -1,12 +1,12 @@
-# PROMGENT
+# Promgent
 
-**Know what your AI budget can accomplish before you spend it.**
+Promgent is an AI software-engineering agent that guides a project from idea and requirements
+through implementation review and iterative improvement. It turns an idea into structured
+requirements, architecture, an SRS and an implementation handoff, then compares the externally
+built product against the agreed specification.
 
-Describe what you want to build, choose a target model, a quality preference and a CREDIT budget.
-Promgent tells you how much work that really is, whether your model can handle it, whether your
-budget supports it, and what to cut if it doesn't — then gives you the prompt to run yourself.
-
-Promgent never executes your task. It plans it, prices it, and hands you the prompt.
+Promgent does not execute the user's application. The user builds with an external coding agent
+and returns the repository or live product to Promgent for review.
 
 ---
 
@@ -16,40 +16,59 @@ Promgent never executes your task. It plans it, prices it, and hands you the pro
 
 ---
 
-## How Promgent works
+## Unified project lifecycle
 
 ```mermaid
 flowchart TD
-    A[User] --> B[Promgent UI]
-    B --> C[Text + Optional Image + Website URL]
-    C --> D[Reference Processing]
-    D --> E[Render Backend]
-    E --> F[Orbio Gateway]
-    F --> G[Internal AI Model]
-    G --> H[Task + Reference Understanding]
-    H --> I[Existing Planning Engine]
-    I --> J[Model Selection]
-    J --> K[Final Canonical Scope]
-    K --> L[Cost + Feasibility]
-    L --> M[Reference-Aware Model-Specific Prompt]
-    M --> N[Copy Prompt]
-    N --> O[User Executes Elsewhere]
+    A[User] --> B[Promgent Account]
+    B --> C[Project Intake]
+    C --> C1[Text]
+    C --> C2[Voice transcript]
+    C --> C3[Images and URLs]
+    C --> C4[Model, depth and CREDIT budget]
+    C1 --> D[One persistent Project]
+    C2 --> D
+    C3 --> D
+    C4 --> D
+    D --> E[Requirements Agent]
+    E --> F[Structured Project Memory]
+    F --> G[Requirements + Architecture + Acceptance Criteria]
+    G --> H[SRS review and approval]
+    H --> I[Existing Promgent planning engine]
+    I --> J[Implementation prompt]
+    J --> K[External coding agent]
+    K --> L[GitHub repository / live product]
+    L --> M[Promgent review]
+    M --> N[Traceability + findings + suggestions]
+    N --> O[User decisions]
+    O --> P[Updated memory, SRS and architecture]
+    P --> J
 ```
 
-Quick Plan uses Promgent's internal AI model through the Orbio Gateway to reason about the user's
-task and compile a model-specific prompt. Quick Plan does not require the user to connect an Orbio
-key or execute the task through Promgent. Guided Projects are the persistent workflow and use the
-connected user's Orbio key for their requirements interview; they still only plan the work and do
-not execute implementation.
+There is one primary **New Project** flow. The former task planner is an internal subsystem used
+after SRS approval; it is not a second product or a separate project history.
 
 | Layer | Where | Notes |
 |---|---|---|
 | Frontend | Vercel | Static UI. Holds no credentials. |
-| Backend | Render | Owns the internal key and temporarily decrypts connected user keys for Guided Project inference. |
-| Orbio Gateway | `AGENTFUND_AI_BASE_URL` | OpenAI-compatible API used by the backend. |
-| Internal AI model | `AGENTFUND_AI_MODEL` | Configurable through server environment variables. |
+| Backend | Render | Authenticates users, owns project persistence and makes user-key-funded Orbio calls. |
+| Orbio Gateway | `ORBIO_BASE_URL` | OpenAI-compatible inference API connected by the user. |
+| Project model | `Project.selectedModel` | Remains authoritative for requirements, planning, prompt generation and review. |
 | Final task execution | **Outside Promgent** | The user runs the copied prompt themselves. |
-| User CREDIT field | Planning budget | A number the user types — **not a wallet balance**. |
+| Project CREDIT budget | Project setting | One budget and usage ledger across the lifecycle; it is not a wallet balance. |
+
+### The user flow
+
+```mermaid
+flowchart LR
+    A[Idea] --> B[Requirements]
+    B --> C[Specification]
+    C --> D[Implementation prompt]
+    D --> E[Build externally]
+    E --> F[Promgent review]
+    F --> G[Improve]
+    G --> E
+```
 
 ---
 
@@ -299,14 +318,13 @@ prompt may be copied to a model that never sees the original image or URL:
 The prompt is instructed to produce an **original** implementation inspired by the reference, not
 to copy proprietary copy, logos or assets.
 
-## How Orbio powers the internal agent
+## How Orbio powers a project
 
-Promgent's internal task-analysis and prompt-compilation agent runs through the **Orbio Gateway**,
-using the builder's Orbio API key configured **server-side on Render**. This describes Quick Plan;
-Guided Project interview calls use the connected user's key instead.
-
-Quick Plan does not require the user to connect an Orbio account. Guided Projects do require a
-connected key because their interview inference is billed directly to that user's Orbio account.
+Orbio provides the inference infrastructure. The user connects one Orbio key to their account and
+selects a model available through that connection. Promgent uses that connection for the same
+project's requirements, SRS, planning, prompt generation and review calls unless the user changes
+the project model explicitly. Provider-reported usage is written to the project usage ledger; the
+provider remains authoritative for the actual charge.
 
 ```text
 Promgent (Vercel)
@@ -418,7 +436,7 @@ Key invariants:
 
 ### Abuse protection
 
-The internal model is paid for by the builder's key, so the backend is bounded:
+Project inference is paid for through the user's connected Orbio key, so the backend is bounded:
 
 - IP rate limit: 8 plan requests/minute, 40/hour (configurable)
 - Clarify rate limit: 60/minute
@@ -519,38 +537,33 @@ These are current, not aspirational:
 
 ## Notes and limits
 
-## Guided Projects
+## Project workspace and API
 
-Promgent now has the foundation of a second, persistent workflow alongside the
-existing lightweight Quick Plan experience. Guided Projects are designed for
-longer software projects: an authenticated user can create a project, choose a
-planning depth and model, persist structured project memory, continue an
-adaptive requirements interview, generate a Mermaid architecture view, and
-draft a versioned software requirements specification.
+The persistent project workspace is the primary application. An authenticated
+user creates one project, connects one Orbio account, and carries the same
+project through intake, requirements, SRS approval, planning, implementation
+handoff and review. The browser is not the source of truth; Supabase-backed
+project records are.
 
-The Guided Project state is designed around Supabase Auth/PostgreSQL with
-ownership-enforced tables and RLS policies. The browser never becomes the
-source of truth for project state. The existing Quick Plan route remains
-available and does not require an account, preserving the original product
-experience during this migration.
-
-The first Guided Project endpoints are:
+The project endpoints are:
 
 - `/api/auth/*` for account sessions
 - `/api/projects` for persistent project creation and listing
 - `/api/projects/:id/interview` for structured interview turns
 - `/api/projects/:id/architecture` for Mermaid architecture versions
 - `/api/projects/:id/srs` for draft SRS generation
+- `/api/projects/:id/plan` for the existing planner's implementation handoff
 - `/api/projects/:id/iterations` for persistent implementation-review cycles
 - `/api/projects/:id/iterations/:iterationId/review` for repository/live-product evidence review
 - iteration decision endpoints for findings, changes and suggestions
 - `/api/projects/:id/iterations/:iterationId/generate-prompt` for the next implementation prompt
 
-Apply [`server/migrations/001_guided_projects.sql`](/Users/user/promgent/server/migrations/001_guided_projects.sql) and
+Apply [`server/migrations/001_guided_projects.sql`](/Users/user/promgent/server/migrations/001_guided_projects.sql),
 [`server/migrations/002_project_iterations.sql`](/Users/user/promgent/server/migrations/002_project_iterations.sql)
+and [`server/migrations/003_unified_project_lifecycle.sql`](/Users/user/promgent/server/migrations/003_unified_project_lifecycle.sql)
 to a Supabase project and configure the Supabase and credential-encryption
 variables from [`.env.example`](/Users/user/promgent/.env.example) before using
-the Guided Project flow locally. The raw Orbio key is verified server-side,
+the project flow locally. The raw Orbio key is verified server-side,
 encrypted before persistence, and never returned to the browser or included in
 model context.
 
@@ -603,6 +616,7 @@ implemented.
   unit; Promgent uses it as the planning primitive for estimates, not as a payment rail.
 - Estimates are planning ranges. Actual external cost depends on the model, token usage,
   iterations, tools and execution environment.
-- Quick Plan has no wallet or Orbio account connection. Guided Projects use a
-  connected user Orbio key for their interview inference. Promgent still does
-  not execute implementation prompts or operate an agent marketplace.
+- Persistent project inference uses the connected user's Orbio key, with
+  retries disabled for user-funded calls to avoid ambiguous duplicate charges.
+  Promgent still does not execute implementation prompts or operate an agent
+  marketplace.

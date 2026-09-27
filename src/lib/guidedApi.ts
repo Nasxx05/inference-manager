@@ -7,7 +7,9 @@ import type {
   ProjectMemory,
   ProjectRecord,
   SrsDocument,
+  ProjectReference,
 } from "@/types/project";
+import type { PlanResult } from "@/types";
 import type { IterationPrompt, ProjectIteration } from "@/types/iteration";
 
 export interface GuidedUser { id: string; email?: string | null; }
@@ -55,8 +57,12 @@ export function listProjects(): Promise<ProjectRecord[]> {
   return call("/api/projects");
 }
 
-export function createProject(input: { description: string; modelId: string; planningDepth: PlanningDepth; budget: number }): Promise<{ project: ProjectRecord; memory: ProjectMemory; interview: InterviewSession; assistantMessage: GuidedProjectSnapshot["messages"][number] }> {
+export function createProject(input: { description: string; modelId: string; planningDepth: PlanningDepth; budget: number; references?: Array<Pick<ProjectReference, "type" | "source" | "metadata">> }): Promise<{ project: ProjectRecord; memory: ProjectMemory; interview: InterviewSession; assistantMessage: GuidedProjectSnapshot["messages"][number]; references?: ProjectReference[] }> {
   return call("/api/projects", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function generateProjectPlan(projectId: string): Promise<{ plan: PlanResult; projectId: string }> {
+  return call(`/api/projects/${encodeURIComponent(projectId)}/plan`, { method: "POST" });
 }
 
 export function loadProject(projectId: string): Promise<GuidedProjectSnapshot> {

@@ -14,7 +14,7 @@
  * tailored, based on the target model's declared capabilities.
  */
 
-import { chat } from "./chatClient";
+import { chat, type ChatProviderConfig } from "./chatClient";
 import { AiError, toAiError } from "./errors";
 import { aiPromptMaxTokens, aiProviderConfigured, missingConfig } from "./env";
 import { acceptablePrompt, missingPromptConcepts, stripFences, trimToStart } from "./prompt";
@@ -244,10 +244,11 @@ type Attempt =
       contentLevel: boolean;
     };
 
-async function attempt(input: PromptDraftInput): Promise<Attempt> {
+async function attempt(input: PromptDraftInput, provider?: ChatProviderConfig): Promise<Attempt> {
   let result;
   try {
     result = await chat({
+      ...(provider ? { provider } : {}),
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: userMessage(input) },
@@ -309,21 +310,21 @@ async function attempt(input: PromptDraftInput): Promise<Attempt> {
  * Throws `AiError` when no usable prompt can be produced: the caller reports a
  * real failure rather than returning a degraded prompt.
  */
-export async function generatePrompt(input: PromptDraftInput): Promise<PromptResult> {
-  if (!aiProviderConfigured()) {
+export async function generatePrompt(input: PromptDraftInput, provider?: ChatProviderConfig): Promise<PromptResult> {
+  if (!provider && !aiProviderConfigured()) {
     throw new AiError(
       "BACKEND_NOT_CONFIGURED",
       `Promgent's model is not configured. Missing: ${missingConfig().join(", ")}.`,
     );
   }
 
-  const first = await attempt(input);
+  const first = await attempt(input, provider);
   if (first.ok) return first.result;
   // Transport-level failures were already retried once inside chat(). Retrying
   // them here would make an outage cost twice as much and take twice as long.
   if (!first.contentLevel) throw first.error;
 
-  const second = await attempt(input);
+  const second = await attempt(input, provider);
   if (second.ok) return second.result;
   throw second.error;
 }

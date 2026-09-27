@@ -26,6 +26,7 @@
 
 import { AUTO_MODEL_ID, MODELS, findModelOrThrow } from "@/data/models";
 import { generatePlan } from "@/lib/ai/combined";
+import type { ChatProviderConfig } from "@/lib/ai/chatClient";
 import { aiCombinedEnabled } from "@/lib/ai/env";
 import { analyzeTask } from "@/lib/ai/provider";
 import { AiError } from "@/lib/ai/errors";
@@ -92,6 +93,8 @@ export interface PlanRequest {
    * keep it anyway, so the UI can show the override honestly.
    */
   keepSelectedModel?: boolean;
+  /** Optional authenticated provider connection for project-scoped planning. */
+  aiProvider?: ChatProviderConfig;
 }
 
 /** How the plan was produced, so latency and behaviour can be attributed. */
@@ -248,6 +251,7 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     clarifyingQuestions = [],
     clarifyingResponses = {},
     keepSelectedModel = false,
+    aiProvider,
   } = request;
 
   const started = Date.now();
@@ -518,7 +522,7 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
             deferred: excludedRequirements(finalScope).map((unit) => unit.name),
           },
           ...(referenceBrief ? { referenceBrief } : {}),
-        });
+        }, aiProvider);
         route = "combined";
         agentModel = combined.model;
         requestId = combined.requestId;
@@ -538,7 +542,7 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
     }
 
     const parsedStart = Date.now();
-    const analysisResult = await analyzeTask(taskDescription);
+    const analysisResult = await analyzeTask(taskDescription, aiProvider);
     parseDurationMs += Date.now() - parsedStart;
     const firstAnalysis = analysisResult.analysis;
     agentModel = analysisResult.model;
@@ -568,7 +572,7 @@ export async function buildPlanWithMetrics(request: PlanRequest): Promise<PlanBu
         deferred: excludedRequirements(finalScope).map((unit) => unit.name),
       },
       ...(referenceBrief ? { referenceBrief } : {}),
-    });
+    }, aiProvider);
     llmDurationMs += generated.durationMs;
     providerDurationMs = generated.providerDurationMs ?? providerDurationMs;
     llmCalls += 1;
