@@ -2,7 +2,7 @@ import type { InterviewMessage, InterviewSession, ProjectMemory } from "@/types/
 import { nextBestQuestion, refreshQuestionBacklog } from "./backlog";
 import { calculateCompleteness } from "./completeness";
 import { detectContradictions } from "./contradictions";
-import { createRequirement } from "./requirements";
+import { validateInterviewProposal } from "./proposals";
 
 export interface InterviewTurnResult {
   memory: ProjectMemory;
@@ -22,6 +22,7 @@ export function applyInterviewTurn(input: {
   content: string;
   source?: InterviewMessage["source"];
   assistantContent?: string;
+  structuredProposal?: unknown;
   now?: string;
 }): InterviewTurnResult {
   const now = input.now ?? new Date().toISOString();
@@ -36,24 +37,15 @@ export function applyInterviewTurn(input: {
     createdAt: now,
   };
 
-  const candidate = createRequirement({
-    projectId: input.memory.projectId,
-    description: content,
-    category: "core_functionality",
-    priority: "medium",
-    required: true,
-    source: "user",
-    sourceMessageId: userMessage.id,
-    status: "confirmed",
-    confidence: "high",
-    now,
-  });
-  const requirements = input.memory.requirements.some((item) => item.id === candidate.id)
-    ? input.memory.requirements
-    : [...input.memory.requirements, candidate];
+  const proposal = validateInterviewProposal({ raw: input.structuredProposal, memory: input.memory, userContent: content, sourceMessageId: userMessage.id, now });
   const draft: Omit<ProjectMemory, "completeness"> = {
     ...input.memory,
-    requirements,
+    requirements: proposal.requirements,
+    acceptanceCriteria: proposal.acceptanceCriteria,
+    users: [...new Set([...input.memory.users, ...proposal.users])],
+    assumptions: [...new Set([...input.memory.assumptions, ...proposal.assumptions])],
+    designPreferences: [...new Set([...input.memory.designPreferences, ...proposal.designPreferences])],
+    technicalConstraints: [...new Set([...input.memory.technicalConstraints, ...proposal.technicalConstraints])],
     version: input.memory.version + 1,
     updatedAt: now,
   };

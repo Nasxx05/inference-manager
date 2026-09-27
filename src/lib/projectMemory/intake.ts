@@ -8,6 +8,7 @@ import type {
 import { calculateCompleteness } from "./completeness";
 import { refreshQuestionBacklog } from "./backlog";
 import { createRequirement } from "./requirements";
+import { splitAtomicRequirements } from "./proposals";
 
 function titleFromDescription(description: string): string {
   const clean = description.trim().replace(/\s+/g, " ");
@@ -28,6 +29,18 @@ function initialRequirements(project: ProjectRecord): Requirement[] {
       status: "confirmed",
       confidence: "high",
     }),
+    ...splitAtomicRequirements(project.initialDescription).filter((description) => description !== project.initialDescription.trim()).map((description) =>
+      createRequirement({
+        projectId: project.id,
+        description,
+        category: "core_functionality",
+        type: "functional",
+        priority: "high",
+        source: "user",
+        status: "confirmed",
+        confidence: "high",
+      }),
+    ),
     ...analysis.phases.slice(0, 4).map((phase) =>
       createRequirement({
         projectId: project.id,

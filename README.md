@@ -276,9 +276,9 @@ validates the **actual bytes** against magic-byte signatures — a client-suppli
 a claim — and rejects a declared type that disagrees with the file. Images are held in memory for
 the request and never written to disk, so there is no image storage to operate or leak.
 
-Image understanding requires a configured multimodal model (`AGENTFUND_AI_MULTIMODAL_MODEL`). When
-none is configured, Promgent fails with a clear `REFERENCE_ANALYSIS_FAILED` error rather than
-claiming to have understood an image it cannot see.
+Image understanding uses the project's selected Orbio model. When that model does not support
+image input, Promgent fails clearly rather than switching models or claiming to have understood an
+image it cannot see. The legacy standalone planner may still use `AGENTFUND_AI_MULTIMODAL_MODEL`.
 
 ### Website URLs
 
@@ -343,40 +343,34 @@ Task Intelligence
 Set on Render (never in the browser, never logged, never returned by any endpoint):
 
 ```env
-AGENTFUND_AI_API_KEY=
-AGENTFUND_AI_BASE_URL=https://api.orbio.so/api/v1
-AGENTFUND_AI_MODEL=
+ORBIO_BASE_URL=https://api.orbio.so/api/v1
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+CREDENTIAL_ENCRYPTION_KEY=
 ```
 
-The provider layer is **model-agnostic**. The base URL, key and model all come from the
-environment; no model is hard-coded. Orbio's gateway is OpenAI-compatible and relays to the named
-model, so switching `AGENTFUND_AI_MODEL` is enough to change the internal model — no code change,
-and no model-specific business logic anywhere in the planner.
-
-> The `AGENTFUND_AI_*` prefix is kept for deployed-environment compatibility. It is configuration,
-> not branding.
+The user connects an Orbio key after signing in and selects a model for each project.
+`Project.selectedModel` remains authoritative for requirements extraction, acceptance criteria,
+planning, semantic repository review, suggestions, suggestion discussions, change impact and
+iteration prompts. The encrypted key is decrypted only for a user-funded backend request.
+`AGENTFUND_AI_*`/legacy `AI_*` variables remain only for the legacy planner endpoints and the
+separate voice-transcription infrastructure; they do not override a persistent project's model.
 
 ---
 
 ## Powered by Orbio
 
-Promgent's internal task-planning agent runs through the **Orbio inference
-gateway**. Promgent uses Orbio's model access to analyze tasks and compile
-prompts, while keeping execution under the user's control.
+Promgent's project intelligence runs through the **Orbio inference gateway** using the signed-in
+user's encrypted connection and the model selected on that project.
 
-**Promgent plans. The user executes.** No wallet is connected, and Promgent never
-runs the final prompt.
+**Promgent plans. The user executes.** Promgent never runs the final implementation prompt.
 
 ### Getting CREDIT
 
-CREDIT is Orbio's tokenized inference unit. Promgent uses it as a planning
-primitive — the **Planning Budget** field is a number the user types, and it is
-not read from any wallet — but the actual inference users spend when they run a
-prompt elsewhere is topped up on Orbio.
-
-The header's **Buy Credits** link opens https://orbio.so in a new tab
-(`rel="noopener noreferrer"`), so Promgent itself never handles payment,
-accounts or balances.
+CREDIT remains the project's planning budget and usage-ledger unit. The dashboard also reads the
+connected Orbio key's provider balance server-side and displays it separately; Promgent never
+returns the raw key or handles top-up payments.
 
 ---
 
@@ -385,8 +379,8 @@ accounts or balances.
 | Layer | Where | Responsibility |
 |---|---|---|
 | Frontend | Vercel (Next.js) | UI only. Holds no credentials. |
-| Backend | Render (Express) | Owns the LLM credentials; does the slow work. |
-| Internal provider | Orbio Gateway | Task analysis + prompt generation. |
+| Backend | Render (Express) | Auth, persistence orchestration, validation and user-key-funded inference. |
+| Project provider | Orbio Gateway | Runs `Project.selectedModel` for the canonical project lifecycle. |
 
 The browser calls the backend directly, because writing a prompt takes long enough that a
 serverless function would time out first.
@@ -453,7 +447,7 @@ Project inference is paid for through the user's connected Orbio key, so the bac
 npm test
 ```
 
-288 tests across 19 files. Rather than testing internals, most assert the product promise:
+311 tests across 25 files. Rather than testing internals, most assert the product promise:
 
 | Area | What's asserted |
 |---|---|
@@ -467,8 +461,8 @@ npm test
 | Original wording | Full task costs more than its compressed summary |
 | Scope optimizer | Iteratively converges toward the budget without ever increasing it |
 | Malformed output | Empty, absurd and NaN-bearing responses never crash or produce NaN |
-| Model switching | `AGENTFUND_AI_MODEL` changes require no code change |
-| Buy Credits | Opens Orbio in a new tab with `noopener noreferrer`, and leaks nothing |
+| Model continuity | The selected project model is used throughout project reasoning |
+| Orbio account | Balance/account links open safely and no credential reaches the browser |
 | How to Use dialog | Embeds the walkthrough; closes on Escape; restores focus and scrolling |
 | Dialog isolation | Opening and closing never clears input and never submits |
 
@@ -483,9 +477,11 @@ NEXT_PUBLIC_BACKEND_URL=https://your-backend.onrender.com
 
 **Backend (Render)**
 ```env
-AGENTFUND_AI_API_KEY=
-AGENTFUND_AI_BASE_URL=https://api.orbio.so/api/v1
-AGENTFUND_AI_MODEL=
+ORBIO_BASE_URL=https://api.orbio.so/api/v1
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+CREDENTIAL_ENCRYPTION_KEY=
 AGENTFUND_AI_MAX_TOKENS=4500
 AGENTFUND_AI_TIMEOUT_MS=90000
 ALLOWED_ORIGINS=https://promgent.vercel.app
@@ -493,7 +489,8 @@ ALLOWED_ORIGINS=https://promgent.vercel.app
 
 Health endpoints: `/health`, `/health/ai`, `/health/ai/test`. None return secrets.
 
-To change the internal model, set `AGENTFUND_AI_MODEL` and restart. Nothing else is required.
+The user changes a persistent project's selected model through the project flow. Environment model
+variables do not silently reroute project reasoning.
 
 ---
 
@@ -501,9 +498,8 @@ To change the internal model, set `AGENTFUND_AI_MODEL` and restart. Nothing else
 
 Accuracy matters more than confidence, so the limits are stated plainly:
 
-- **An internal AI model is required.** Task analysis and prompt generation go
-  through the configured model. Without `AGENTFUND_AI_*` set, planning fails —
-  there is no offline mode that produces real plans.
+- **A connected Orbio key and concrete project model are required.** Project reasoning fails
+  clearly rather than silently falling back to a hidden model.
 - **Model and pricing data is curated static MVP data.** It is a small set of
   model *family* profiles, not a live catalogue and not a complete list of any
   provider's models. Capability scores are Promgent's internal suitability
@@ -525,8 +521,8 @@ These are current, not aspirational:
   for URL references; only structure and metadata are.
 - **Pages that block automated access may not be analyzable.** Bot protection, CAPTCHAs and
   authenticated pages will fail with a structured error.
-- **Image analysis depends on the configured multimodal model.** Without
-  `AGENTFUND_AI_MULTIMODAL_MODEL`, image references cannot be analyzed.
+- **Image analysis depends on the selected project model supporting image input.** Promgent does
+  not silently switch to another model when vision is unavailable.
 - **Visual interpretation is an AI analysis and may contain uncertainty.** It is recorded, not
   hidden, but it is not ground truth.
 - **Promgent does not guarantee pixel-perfect reproduction.** The output is planning guidance.
@@ -558,11 +554,12 @@ The project endpoints are:
 - iteration decision endpoints for findings, changes and suggestions
 - `/api/projects/:id/iterations/:iterationId/generate-prompt` for the next implementation prompt
 
-Apply [`server/migrations/001_guided_projects.sql`](/Users/user/promgent/server/migrations/001_guided_projects.sql),
-[`server/migrations/002_project_iterations.sql`](/Users/user/promgent/server/migrations/002_project_iterations.sql)
-and [`server/migrations/003_unified_project_lifecycle.sql`](/Users/user/promgent/server/migrations/003_unified_project_lifecycle.sql)
+Apply [`server/migrations/001_guided_projects.sql`](server/migrations/001_guided_projects.sql),
+[`server/migrations/002_project_iterations.sql`](server/migrations/002_project_iterations.sql),
+[`server/migrations/003_unified_project_lifecycle.sql`](server/migrations/003_unified_project_lifecycle.sql)
+and [`server/migrations/004_intelligence_completeness.sql`](server/migrations/004_intelligence_completeness.sql)
 to a Supabase project and configure the Supabase and credential-encryption
-variables from [`.env.example`](/Users/user/promgent/.env.example) before using
+variables from [`.env.example`](.env.example) before using
 the project flow locally. The raw Orbio key is verified server-side,
 encrypted before persistence, and never returned to the browser or included in
 model context.
@@ -603,17 +600,16 @@ flowchart TD
     I --> B
 ```
 
-Known limits remain: private GitHub OAuth/App access, uploaded screenshot
-analysis, background review jobs, full discussion transcripts, external
-implementation usage snapshots, and runtime execution testing are not yet
-implemented.
+Known limits remain: private GitHub OAuth/App access, background review workers, external
+implementation usage snapshots, and runtime execution testing are not yet implemented. Uploaded
+screenshots are analyzed only when the selected project model supports image input; source review
+still does not prove runtime behavior.
 
 - Model pricing and capability scores are **static configuration, not live data**, and capability
   scores are heuristics rather than benchmarks. The registry is structured so both can be replaced
   with live provider data.
-- The **Planning Budget** is a number the user enters. It is not an Orbio balance and is
-  not read from any wallet or billing system. CREDIT is Orbio's tokenized inference
-  unit; Promgent uses it as the planning primitive for estimates, not as a payment rail.
+- The **Planning Budget** is a number the user enters. It is distinct from the provider-reported
+  Orbio balance shown on the account dashboard.
 - Estimates are planning ranges. Actual external cost depends on the model, token usage,
   iterations, tools and execution environment.
 - Persistent project inference uses the connected user's Orbio key, with

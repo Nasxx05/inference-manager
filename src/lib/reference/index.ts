@@ -11,7 +11,7 @@
  */
 
 import { AiError } from "@/lib/ai/errors";
-import { analyzeImageReference, analyzeWebsiteReference } from "./referenceAnalyzer";
+import { analyzeImageReference, analyzeWebsiteReference, type ReferenceProvider } from "./referenceAnalyzer";
 import { normalizeReferences } from "./normalizer";
 import type { ReferenceAnalysis, ReferenceInput } from "./types";
 
@@ -50,6 +50,7 @@ export async function processReferences(input: {
   images?: { buffer: Buffer; mimeType?: string; filename?: string }[];
   urls?: string[];
   requestId?: string;
+  provider?: ReferenceProvider;
 }): Promise<ReferencesResult> {
   const started = Date.now();
 
@@ -76,12 +77,12 @@ export async function processReferences(input: {
     // One analysis per reference, cached in `analyses` for the whole request.
     if (reference.type === "image") {
       analyses.push(
-        await analyzeImageReference(reference, imageIndex, input.requestId),
+        await analyzeImageReference(reference, imageIndex, input.requestId, input.provider),
       );
       imageIndex += 1;
     } else {
       analyses.push(
-        await analyzeWebsiteReference(reference.url, websiteIndex, input.requestId),
+        await analyzeWebsiteReference(reference.url, websiteIndex, input.requestId, input.provider),
       );
       websiteIndex += 1;
     }

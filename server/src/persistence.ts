@@ -9,10 +9,12 @@ import type {
   SrsDocument,
   ProjectReference,
   ProjectUsageSummary,
+  AcceptanceCriterion,
 } from "@/types/project";
 import type { PlanResult } from "@/types";
-import type { IterationPrompt, ProjectIteration } from "@/types/iteration";
+import type { IterationPrompt, ProjectIteration, ScreenshotArtifact, SuggestionDiscussionMessage } from "@/types/iteration";
 import { MODELS } from "@/data/models";
+import { structuredAcceptanceCriteria } from "@/lib/projectMemory/proposals";
 
 export interface AuthUser {
   id: string;
@@ -286,6 +288,20 @@ export async function saveIterationPrompt(prompt: IterationPrompt): Promise<void
   });
 }
 
+export async function saveSuggestionDiscussionMessage(message: SuggestionDiscussionMessage): Promise<void> {
+  await request({ path: "/rest/v1/suggestion_discussions?on_conflict=id", method: "POST", body: [{ id: message.id, suggestion_id: message.suggestionId, iteration_id: message.iterationId, project_id: message.projectId, role: message.role, content: message.content, created_at: message.createdAt }] });
+}
+
+export async function saveScreenshotArtifacts(artifacts: ScreenshotArtifact[]): Promise<void> {
+  if (!artifacts.length) return;
+  await request({ path: "/rest/v1/screenshot_artifacts?on_conflict=id", method: "POST", body: artifacts.map((item) => ({ id: item.id, iteration_id: item.iterationId, project_id: item.projectId, filename: item.filename, mime_type: item.mimeType, analysis: item.analysis, created_at: item.createdAt })) });
+}
+
+export async function loadSuggestionDiscussion(suggestionId: string, projectId: string): Promise<SuggestionDiscussionMessage[]> {
+  const rows = await request<Record<string, unknown>[]>({ path: `/rest/v1/suggestion_discussions?select=*&suggestion_id=eq.${query(suggestionId)}&project_id=eq.${query(projectId)}&order=created_at.asc` });
+  return rows.map((row) => ({ id: String(row.id), suggestionId: String(row.suggestion_id), iterationId: String(row.iteration_id), projectId: String(row.project_id), role: row.role as "user" | "assistant", content: String(row.content), createdAt: String(row.created_at) }));
+}
+
 export async function loadLatestSrs(projectId: string): Promise<SrsDocument | undefined> {
   const rows = await request<Record<string, unknown>[]>({ path: `/rest/v1/srs_documents?select=*&project_id=eq.${query(projectId)}&order=version.desc&limit=1` });
   const row = rows[0];
@@ -321,6 +337,15 @@ export async function insertRequirements(projectId: string, requirements: Projec
   });
 }
 
+export async function insertAcceptanceCriteria(projectId: string, criteria: AcceptanceCriterion[]): Promise<void> {
+  if (!criteria.length) return;
+  await request({
+    path: "/rest/v1/acceptance_criteria?on_conflict=id",
+    method: "POST",
+    body: criteria.map((item) => ({ id: item.id, project_id: projectId, requirement_id: item.requirementId, description: item.description, source: item.source, source_message_id: item.sourceMessageId ?? null, status: item.status, confidence: item.confidence, version: item.version, created_at: item.createdAt, updated_at: item.updatedAt })),
+  });
+}
+
 export async function saveMemory(memory: ProjectMemory): Promise<void> {
   await request({
     path: "/rest/v1/project_memory?on_conflict=project_id",
@@ -333,7 +358,9 @@ export async function loadMemory(projectId: string): Promise<ProjectMemory | nul
   const rows = await request<Array<{ memory?: ProjectMemory }>>({
     path: `/rest/v1/project_memory?select=memory&project_id=eq.${query(projectId)}&limit=1`,
   });
-  return rows[0]?.memory ?? null;
+  const memory = rows[0]?.memory ?? null;
+  if (!memory) return null;
+  return { ...memory, acceptanceCriteria: structuredAcceptanceCriteria(memory) };
 }
 
 export async function saveArchitecture(version: ArchitectureVersion): Promise<void> {

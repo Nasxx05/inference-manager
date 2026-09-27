@@ -11,7 +11,7 @@ import type {
   ProjectUsageSummary,
 } from "@/types/project";
 import type { PlanResult } from "@/types";
-import type { IterationPrompt, ProjectIteration } from "@/types/iteration";
+import type { IterationPrompt, ProjectIteration, SuggestionDiscussionMessage } from "@/types/iteration";
 
 export interface GuidedUser { id: string; email?: string | null; }
 
@@ -62,8 +62,16 @@ export function listProjects(): Promise<ProjectRecord[]> {
   return call("/api/projects");
 }
 
-export function createProject(input: { description: string; modelId: string; planningDepth: PlanningDepth; budget: number; references?: Array<Pick<ProjectReference, "type" | "source" | "metadata">> }): Promise<{ project: ProjectRecord; memory: ProjectMemory; interview: InterviewSession; assistantMessage: GuidedProjectSnapshot["messages"][number]; references?: ProjectReference[]; usage: ProjectUsageSummary }> {
-  return call("/api/projects", { method: "POST", body: JSON.stringify(input) });
+export async function createProject(input: { description: string; modelId: string; planningDepth: PlanningDepth; budget: number; references?: Array<Pick<ProjectReference, "type" | "source" | "metadata">>; image?: File | null }): Promise<{ project: ProjectRecord; memory: ProjectMemory; interview: InterviewSession; assistantMessage: GuidedProjectSnapshot["messages"][number]; references?: ProjectReference[]; usage: ProjectUsageSummary }> {
+  if (!input.image) return call("/api/projects", { method: "POST", body: JSON.stringify(input) });
+  const form = new FormData();
+  const { image, ...payload } = input;
+  form.append("payload", JSON.stringify(payload));
+  form.append("images", image, image.name);
+  const response = await fetch(endpoint("/api/projects"), { method: "POST", credentials: "include", body: form });
+  const result = (await response.json().catch(() => null)) as { success?: boolean; data?: { project: ProjectRecord; memory: ProjectMemory; interview: InterviewSession; assistantMessage: GuidedProjectSnapshot["messages"][number]; references?: ProjectReference[]; usage: ProjectUsageSummary }; error?: { message?: string } } | null;
+  if (!response.ok || !result?.success || !result.data) throw new Error(result?.error?.message ?? "The project could not be created.");
+  return result.data;
 }
 
 export function generateProjectPlan(projectId: string): Promise<{ plan: PlanResult; projectId: string }> {
@@ -106,12 +114,29 @@ export function loadIteration(projectId: string, iterationId: string): Promise<P
   return call(`/api/projects/${encodeURIComponent(projectId)}/iterations/${encodeURIComponent(iterationId)}`);
 }
 
-export function reviewIteration(projectId: string, iterationId: string, input: { repositoryUrl?: string; liveUrl?: string; text?: string; voiceTranscript?: string; screenshotIds?: string[] }): Promise<ProjectIteration> {
-  return call(`/api/projects/${encodeURIComponent(projectId)}/iterations/${encodeURIComponent(iterationId)}/review`, { method: "POST", body: JSON.stringify(input) });
+export async function reviewIteration(projectId: string, iterationId: string, input: { repositoryUrl?: string; liveUrl?: string; text?: string; voiceTranscript?: string; forceReview?: boolean; screenshotFiles?: File[] }): Promise<ProjectIteration> {
+  const path = `/api/projects/${encodeURIComponent(projectId)}/iterations/${encodeURIComponent(iterationId)}/review`;
+  if (!input.screenshotFiles?.length) return call(path, { method: "POST", body: JSON.stringify(input) });
+  const form = new FormData();
+  const { screenshotFiles, ...payload } = input;
+  form.append("payload", JSON.stringify(payload));
+  screenshotFiles.slice(0, 4).forEach((file) => form.append("images", file, file.name));
+  const response = await fetch(endpoint(path), { method: "POST", credentials: "include", body: form });
+  const result = (await response.json().catch(() => null)) as { success?: boolean; data?: ProjectIteration; error?: { message?: string } } | null;
+  if (!response.ok || !result?.success || !result.data) throw new Error(result?.error?.message ?? "The implementation review failed.");
+  return result.data;
 }
 
 export function decideIterationSuggestion(projectId: string, iterationId: string, suggestionId: string, decision: "accept" | "reject" | "defer" | "discuss"): Promise<ProjectIteration> {
   return call(`/api/projects/${encodeURIComponent(projectId)}/iterations/${encodeURIComponent(iterationId)}/suggestions/${encodeURIComponent(suggestionId)}/decision`, { method: "POST", body: JSON.stringify({ decision }) });
+}
+
+export function getSuggestionDiscussion(projectId: string, iterationId: string, suggestionId: string): Promise<SuggestionDiscussionMessage[]> {
+  return call(`/api/projects/${encodeURIComponent(projectId)}/iterations/${encodeURIComponent(iterationId)}/suggestions/${encodeURIComponent(suggestionId)}/discussion`);
+}
+
+export function sendSuggestionDiscussion(projectId: string, iterationId: string, suggestionId: string, content: string): Promise<{ iteration: ProjectIteration; messages: SuggestionDiscussionMessage[] }> {
+  return call(`/api/projects/${encodeURIComponent(projectId)}/iterations/${encodeURIComponent(iterationId)}/suggestions/${encodeURIComponent(suggestionId)}/discussion`, { method: "POST", body: JSON.stringify({ content }) });
 }
 
 export function decideIterationFinding(projectId: string, iterationId: string, findingId: string, decision: "accept" | "reject" | "defer"): Promise<ProjectIteration> {

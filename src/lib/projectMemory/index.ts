@@ -7,5 +7,6 @@ export * from "./gaps";
 export * from "./intake";
 export * from "./interview";
 export * from "./plannerAdapter";
+export * from "./proposals";
 export * from "./requirements";
 export * from "./srs";

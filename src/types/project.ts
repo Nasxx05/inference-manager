@@ -66,6 +66,20 @@ export type RequirementSource = "user" | "ai_inferred" | "reference" | "system";
 
 export type RequirementStatus = "inferred" | "proposed" | "confirmed" | "rejected" | "superseded";
 
+export interface AcceptanceCriterion {
+  id: string;
+  projectId: string;
+  requirementId: string;
+  description: string;
+  source: RequirementSource;
+  sourceMessageId?: string;
+  status: RequirementStatus;
+  confidence: "low" | "medium" | "high";
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type RequirementArea =
   | "purpose"
   | "users"
@@ -161,7 +175,8 @@ export interface ProjectMemory {
   openQuestions: QuestionBacklogItem[];
   designPreferences: string[];
   technicalConstraints: string[];
-  acceptanceCriteria: string[];
+  /** Legacy projects may still contain strings; persistence normalizes them on read. */
+  acceptanceCriteria: Array<AcceptanceCriterion | string>;
   completeness: CompletenessResult;
   version: number;
   updatedAt: string;

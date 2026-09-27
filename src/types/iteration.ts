@@ -1,4 +1,4 @@
-import type { ArchitectureVersion, ProjectMemory, Requirement, SrsDocument } from "./project";
+import type { AcceptanceCriterion, ArchitectureVersion, ProjectMemory, Requirement, SrsDocument } from "./project";
 
 export type IterationStatus =
   | "draft"
@@ -35,6 +35,10 @@ export interface RepositorySnapshot {
   relevantFiles: string[];
   structuralSummary: string;
   evidenceText: string;
+  previousCommitSha?: string;
+  changedFiles?: string[];
+  comparisonUrl?: string;
+  unchanged?: boolean;
   status: "reviewed" | "unavailable" | "partial";
   error?: string;
 }
@@ -63,6 +67,16 @@ export interface IterationInput {
   createdAt: string;
 }
 
+export interface ScreenshotArtifact {
+  id: string;
+  iterationId: string;
+  projectId: string;
+  filename: string;
+  mimeType: string;
+  analysis: Record<string, unknown>;
+  createdAt: string;
+}
+
 export interface ChangeRequest {
   id: string;
   iterationId: string;
@@ -88,6 +102,16 @@ export interface ReviewEvidence {
   userMessageId?: string;
   explanation: string;
   confidence: "low" | "medium" | "high";
+  verification?: "source" | "live" | "inferred";
+}
+
+export interface AcceptanceCriterionTrace {
+  criterionId: string;
+  description: string;
+  status: TraceabilityStatus;
+  evidenceIds: string[];
+  explanation: string;
+  confidence: "low" | "medium" | "high";
 }
 
 export interface TraceabilityRecord {
@@ -97,7 +121,7 @@ export interface TraceabilityRecord {
   requirementId: string;
   requirementDescription: string;
   status: TraceabilityStatus;
-  acceptanceCriteria: string[];
+  acceptanceCriteria: AcceptanceCriterionTrace[];
   evidenceIds: string[];
   explanation: string;
   confidence: "low" | "medium" | "high";
@@ -110,6 +134,7 @@ export interface ReviewFinding {
   type: FindingType;
   severity: "low" | "medium" | "high" | "critical";
   title: string;
+  category?: "security" | "reliability" | "performance" | "accessibility" | "maintainability" | "architecture" | "error_handling" | "configuration";
   description: string;
   plainLanguage?: string;
   requirementIds: string[];
@@ -117,6 +142,7 @@ export interface ReviewFinding {
   evidenceIds: string[];
   confidence: "low" | "medium" | "high";
   impact: string;
+  recommendedDirection?: string;
   implementationComplexity: ImpactLevel;
   architectureAffected: boolean;
   specificationAffected: boolean;
@@ -137,6 +163,16 @@ export interface ProjectSuggestion {
   requirementsAffected: string[];
   confidence: "low" | "medium" | "high";
   status: "proposed" | "discussing" | "accepted" | "rejected" | "deferred";
+  createdAt: string;
+}
+
+export interface SuggestionDiscussionMessage {
+  id: string;
+  suggestionId: string;
+  iterationId: string;
+  projectId: string;
+  role: "user" | "assistant";
+  content: string;
   createdAt: string;
 }
 
@@ -191,11 +227,13 @@ export interface ProjectIteration {
   input?: IterationInput;
   repositorySnapshot?: RepositorySnapshot;
   liveProductSnapshot?: LiveProductSnapshot;
+  screenshotArtifacts?: ScreenshotArtifact[];
   changeRequests: ChangeRequest[];
   findings: ReviewFinding[];
   evidence: ReviewEvidence[];
   traceability: TraceabilityRecord[];
   suggestions: ProjectSuggestion[];
+  discussions?: SuggestionDiscussionMessage[];
   decisions: ProjectDecision[];
   report?: IterationReport;
   generatedPrompt?: IterationPrompt;
@@ -209,6 +247,7 @@ export interface IterationContext {
   project: { id: string; title: string; selectedModel: string; planningDepth: string };
   memory: ProjectMemory;
   requirements: Requirement[];
+  acceptanceCriteria: AcceptanceCriterion[];
   srs?: SrsDocument;
   architecture?: ArchitectureVersion;
 }

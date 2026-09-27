@@ -1,11 +1,14 @@
 import type { IterationPrompt, ProjectIteration } from "@/types/iteration";
 import type { ArchitectureVersion, ProjectMemory, SrsDocument } from "@/types/project";
+import { structuredAcceptanceCriteria } from "@/lib/projectMemory/proposals";
 
 export function generateIterationPrompt(input: { iteration: ProjectIteration; memory: ProjectMemory; srs?: SrsDocument; architecture?: ArchitectureVersion; now?: string }): IterationPrompt {
   const acceptedFindings = input.iteration.findings.filter((item) => item.status === "accepted");
   const acceptedChanges = input.iteration.changeRequests.filter((item) => item.status === "accepted");
-  const acceptedSuggestions = input.iteration.suggestions.filter((item) => item.status === "accepted");
+  const acceptedSuggestions = input.iteration.suggestions.filter((item) => item.status === "accepted" && !acceptedChanges.some((change) => change.id.includes(item.id)));
   const rejected = input.iteration.suggestions.filter((item) => item.status === "rejected").map((item) => item.title);
+  const acceptedEvidenceIds = new Set(acceptedFindings.flatMap((item) => item.evidenceIds));
+  const acceptedEvidence = input.iteration.evidence.filter((item) => acceptedEvidenceIds.has(item.id)).map((item) => `${item.repositoryFile ?? item.liveUrl ?? item.type}: ${item.explanation}`);
   const kind = acceptedChanges.length && acceptedFindings.length ? "mixed" : acceptedChanges.length || acceptedSuggestions.length ? "enhancement" : "correction";
   const list = (items: string[]) => items.length ? items.map((item) => `- ${item}`).join("\n") : "- None approved.";
   const prompt = [
@@ -27,8 +30,11 @@ export function generateIterationPrompt(input: { iteration: ProjectIteration; me
     "## Required fixes",
     list(acceptedFindings.map((item) => `${item.title}: ${item.description}`)),
     "",
+    "## Relevant reviewed evidence",
+    list(acceptedEvidence),
+    "",
     "## Acceptance criteria",
-    list(input.memory.acceptanceCriteria),
+    list(structuredAcceptanceCriteria(input.memory).filter((item) => item.status === "confirmed").map((item) => `${item.id} (${item.requirementId}): ${item.description}`)),
     "",
     "## Instructions",
     "- Inspect the existing repository first and preserve working functionality.",

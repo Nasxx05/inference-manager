@@ -41,7 +41,10 @@ function redact(value: string): string {
   return value
     .replace(/-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/g, "[REDACTED_PRIVATE_KEY]")
     .replace(/\b(sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,})\b/g, "[REDACTED_TOKEN]")
-    .replace(/(api[_-]?key|secret|password|token)\s*[:=]\s*["']?[^\s"']{8,}/gi, "$1=[REDACTED_SECRET]");
+    .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[REDACTED_JWT]")
+    .replace(/\bAKIA[A-Z0-9]{16}\b/g, "[REDACTED_AWS_KEY]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]{12,}/gi, "Bearer [REDACTED_TOKEN]")
+    .replace(/(api[_-]?key|service[_-]?role|secret|password|token|database[_-]?url|private[_-]?key)\s*[:=]\s*["']?[^\s"']{8,}/gi, "$1=[REDACTED_SECRET]");
 }
 
 function relevant(path: string): boolean {
@@ -50,7 +53,21 @@ function relevant(path: string): boolean {
     || /(^|\/)(package\.json|Dockerfile|docker-compose\.yml|README|\.env\.example)$/i.test(path);
 }
 
-export async function inspectRepository(repositoryUrl: string): Promise<RepositorySnapshot> {
+function searchTerms(values: string[]): Set<string> {
+  return new Set(values.join(" ").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((term) => term.length >= 4).slice(0, 120));
+}
+
+function rankFile(path: string, terms: Set<string>, changed: Set<string>): number {
+  const lower = path.toLowerCase();
+  let score = changed.has(path) ? 100 : 0;
+  if (/(^|\/)(package\.json|readme|dockerfile|.*schema.*|.*migration.*|.*route.*|.*page.*|.*app.*|.*main.*|.*index.*)$/i.test(path)) score += 25;
+  if (/(test|spec|__tests__)/i.test(path)) score += 18;
+  if (/(auth|payment|database|schema|route|api|middleware|config)/i.test(path)) score += 12;
+  for (const term of terms) if (lower.includes(term)) score += 4;
+  return score;
+}
+
+export async function inspectRepository(repositoryUrl: string, options: { previousCommitSha?: string; requirementText?: string[] } = {}): Promise<RepositorySnapshot> {
   const { owner, name } = githubParts(repositoryUrl);
   const base = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
   const metadata = await githubJson<{ default_branch?: string }>(base);
@@ -60,7 +77,18 @@ export async function inspectRepository(repositoryUrl: string): Promise<Reposito
   if (!commitSha) throw new PersistenceError("REPOSITORY_FETCH_FAILED", "GitHub did not return a commit for the default branch.", 502);
   const tree = await githubJson<{ truncated?: boolean; tree?: Array<{ path?: string; type?: string; size?: number }> }>(`${base}/git/trees/${encodeURIComponent(commitSha)}?recursive=1`);
   const files = (tree.tree ?? []).filter((item) => item.type === "blob" && item.path).map((item) => ({ path: String(item.path), size: Number(item.size ?? 0) }));
-  const selected = files.filter((item) => relevant(item.path)).sort((a, b) => (a.path.includes("package.json") ? -1 : b.path.includes("package.json") ? 1 : a.path.localeCompare(b.path))).slice(0, MAX_RELEVANT_FILES);
+  let changedFiles: string[] = [];
+  let comparisonUrl: string | undefined;
+  if (options.previousCommitSha && options.previousCommitSha !== commitSha) {
+    try {
+      const comparison = await githubJson<{ html_url?: string; files?: Array<{ filename?: string }> }>(`${base}/compare/${encodeURIComponent(options.previousCommitSha)}...${encodeURIComponent(commitSha)}`);
+      changedFiles = (comparison.files ?? []).map((item) => String(item.filename ?? "")).filter(Boolean).slice(0, 300);
+      comparisonUrl = String(comparison.html_url ?? "") || undefined;
+    } catch { /* A compare failure falls back to a bounded full snapshot. */ }
+  }
+  const changed = new Set(changedFiles);
+  const terms = searchTerms(options.requirementText ?? []);
+  const selected = files.filter((item) => relevant(item.path)).sort((a, b) => rankFile(b.path, terms, changed) - rankFile(a.path, terms, changed) || a.path.localeCompare(b.path)).slice(0, MAX_RELEVANT_FILES);
   const chunks: string[] = [`Repository: ${owner}/${name}`, `Branch: ${branch}`, `Commit: ${commitSha}`, `File count: ${files.length}${tree.truncated ? " (GitHub tree was truncated)" : ""}`, "Relevant files:", ...selected.map((item) => `- ${item.path}${item.size ? ` (${item.size} bytes)` : ""}`)];
   let remaining = MAX_EVIDENCE_CHARS - chunks.join("\n").length;
   for (const file of selected) {
@@ -74,7 +102,7 @@ export async function inspectRepository(repositoryUrl: string): Promise<Reposito
       remaining -= safe.length + file.path.length + 60;
     } catch { /* One inaccessible file must not discard the repository review. */ }
   }
-  return { repositoryUrl, owner, name, branch, commitSha, reviewedAt: new Date().toISOString(), fileCount: files.length, relevantFiles: selected.map((item) => item.path), structuralSummary: chunks.slice(0, 6).join("\n"), evidenceText: chunks.join("\n").slice(0, MAX_EVIDENCE_CHARS), status: "reviewed" };
+  return { repositoryUrl, owner, name, branch, commitSha, ...(options.previousCommitSha ? { previousCommitSha: options.previousCommitSha } : {}), ...(changedFiles.length ? { changedFiles } : {}), ...(comparisonUrl ? { comparisonUrl } : {}), unchanged: Boolean(options.previousCommitSha && options.previousCommitSha === commitSha), reviewedAt: new Date().toISOString(), fileCount: files.length, relevantFiles: selected.map((item) => item.path), structuralSummary: chunks.slice(0, 6).join("\n"), evidenceText: chunks.join("\n").slice(0, MAX_EVIDENCE_CHARS), status: "reviewed" };
 }
 
 export async function inspectLiveProduct(url: string): Promise<LiveProductSnapshot> {

@@ -28,6 +28,12 @@ import { extractJson } from "@/lib/ai/json";
 import { inspectWebsite, type WebsiteInspection } from "./websiteInspector";
 import type { ImageReferenceInput, ReferenceAnalysis, ReferenceType } from "./types";
 
+export interface ReferenceProvider {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+}
+
 const ANALYSIS_SYSTEM = `You analyse a design reference for Promgent, a task-planning tool.
 
 You are NOT writing the final prompt. You are producing a structured understanding of a
@@ -151,8 +157,9 @@ export function buildImageMessage(input: {
 async function analyzeWithModel(
   messages: ChatMessage[],
   requestId?: string,
+  provider?: ReferenceProvider,
 ): Promise<unknown> {
-  if (!aiProviderConfigured()) {
+  if (!provider && !aiProviderConfigured()) {
     throw new AiError(
       "BACKEND_NOT_CONFIGURED",
       `Promgent's model is not configured. Missing: ${missingConfig().join(", ")}.`,
@@ -167,7 +174,7 @@ async function analyzeWithModel(
     stage: "reference-analysis",
     // A multimodal model is used when one is configured; otherwise the default
     // planning model answers, which is correct for text-only website input.
-    ...(aiMultimodalConfigured() ? { model: aiMultimodalModel() } : {}),
+    ...(provider ? { apiKey: provider.apiKey, baseUrl: provider.baseUrl, model: provider.model, retry: false } : aiMultimodalConfigured() ? { model: aiMultimodalModel() } : {}),
     ...(requestId ? { requestId } : {}),
   });
 
@@ -192,8 +199,9 @@ export async function analyzeImageReference(
   image: ImageReferenceInput,
   index: number,
   requestId?: string,
+  provider?: ReferenceProvider,
 ): Promise<ReferenceAnalysis> {
-  if (!aiMultimodalConfigured()) {
+  if (!provider && !aiMultimodalConfigured()) {
     throw new AiError(
       "REFERENCE_ANALYSIS_FAILED",
       "Image references need a multimodal model. Set AGENTFUND_AI_MULTIMODAL_MODEL on the backend.",
@@ -208,7 +216,7 @@ export async function analyzeImageReference(
     "patterns, and any interaction or animation cues that are visually apparent.\n\n" +
     `Return JSON in this exact shape:\n${ANALYSIS_SHAPE}`;
 
-  const raw = await analyzeWithModel(buildImageMessage({ prompt, image }), requestId);
+  const raw = await analyzeWithModel(buildImageMessage({ prompt, image }), requestId, provider);
   return normalize(raw, `ref:image:${index}`, "image", true, "multimodal image analysis");
 }
 
@@ -223,12 +231,13 @@ export async function analyzeWebsiteReference(
   url: string,
   index: number,
   requestId?: string,
+  provider?: ReferenceProvider,
 ): Promise<ReferenceAnalysis> {
   const inspection = await inspectWebsite(url);
   if (!inspection.ok) {
     throw new AiError(inspection.code, inspection.message);
   }
-  return analyzeInspection(inspection, index, requestId);
+  return analyzeInspection(inspection, index, requestId, provider);
 }
 
 /** Analyzes an already-inspected page. Separated so it is testable. */
@@ -236,6 +245,7 @@ export async function analyzeInspection(
   inspection: Extract<WebsiteInspection, { ok: true }>,
   index: number,
   requestId?: string,
+  provider?: ReferenceProvider,
 ): Promise<ReferenceAnalysis> {
   // `screenshot` is typed `false` today because no renderer is wired up. It is
   // read rather than assumed, so flipping the inspector to produce real
@@ -267,6 +277,7 @@ export async function analyzeInspection(
       { role: "user", content: prompt },
     ],
     requestId,
+    provider,
   );
 
   const analysis = normalize(

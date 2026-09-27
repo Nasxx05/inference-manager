@@ -7,7 +7,7 @@ import type {
   ReviewFinding,
   TraceabilityRecord,
 } from "@/types/iteration";
-import type { ProjectRecord, Requirement } from "@/types/project";
+import type { AcceptanceCriterion, ProjectRecord, Requirement } from "@/types/project";
 
 function stableHash(value: string): string {
   let hash = 2166136261;
@@ -103,6 +103,7 @@ function terms(text: string): string[] {
 export function buildTraceability(input: {
   iteration: ProjectIteration;
   requirements: Requirement[];
+  acceptanceCriteria?: AcceptanceCriterion[];
   evidenceText: string;
   hasRepository: boolean;
   now?: string;
@@ -132,7 +133,16 @@ export function buildTraceability(input: {
     }
     if (input.hasRepository) evidence.push({ id: evidenceId, type: "repository_structure", explanation: hits.length ? `Matched terms: ${hits.join(", ")}.` : "No matching terms found.", confidence: ratio >= 0.55 ? "medium" : "low" });
     const confidence: TraceabilityRecord["confidence"] = input.hasRepository ? "medium" : "low";
-    return { id: `trace_${input.iteration.id}_${requirement.id}`, iterationId: input.iteration.id, projectId: input.iteration.projectId, requirementId: requirement.id, requirementDescription: requirement.description, status, acceptanceCriteria: [], evidenceIds: input.hasRepository ? [evidenceId] : [], explanation, confidence };
+    const criterionTraces = (input.acceptanceCriteria ?? []).filter((criterion) => criterion.requirementId === requirement.id && criterion.status !== "rejected" && criterion.status !== "superseded").map((criterion) => {
+      const criterionWords = terms(criterion.description).slice(0, 12);
+      const criterionHits = criterionWords.filter((word) => corpus.includes(word));
+      const criterionRatio = criterionWords.length ? criterionHits.length / criterionWords.length : 0;
+      const criterionStatus = !input.hasRepository ? "cannot_verify" as const : criterionRatio >= 0.55 ? "cannot_verify" as const : criterionRatio >= 0.2 ? "partially_satisfied" as const : "missing" as const;
+      return { criterionId: criterion.id, description: criterion.description, status: criterionStatus, evidenceIds: input.hasRepository ? [evidenceId] : [], explanation: criterionRatio >= 0.55 ? "Related source implementation was found, but observable runtime behavior was not tested." : criterionRatio >= 0.2 ? "Some related source evidence was found, but this criterion is incomplete or ambiguous." : input.hasRepository ? "No implementation evidence for this criterion was found in the bounded review." : "No repository evidence was provided.", confidence: input.hasRepository ? "low" as const : "low" as const };
+    });
+    if (criterionTraces.some((criterion) => criterion.status === "missing" || criterion.status === "partially_satisfied")) status = status === "missing" ? "missing" : "partially_satisfied";
+    else if (criterionTraces.length && criterionTraces.every((criterion) => criterion.status === "cannot_verify") && status === "satisfied") status = "cannot_verify";
+    return { id: `trace_${input.iteration.id}_${requirement.id}`, iterationId: input.iteration.id, projectId: input.iteration.projectId, requirementId: requirement.id, requirementDescription: requirement.description, status, acceptanceCriteria: criterionTraces, evidenceIds: input.hasRepository ? [evidenceId] : [], explanation, confidence };
   });
   return { traceability, evidence };
 }
@@ -149,7 +159,7 @@ export function findingsFromTraceability(input: { iteration: ProjectIteration; t
     description: item.explanation,
     plainLanguage: item.status === "missing" ? "This agreed capability was not found in the reviewed source evidence." : "Part of this agreed capability may exist, but the review could not confirm the complete workflow.",
     requirementIds: [item.requirementId],
-    acceptanceCriteriaIds: [],
+    acceptanceCriteriaIds: item.acceptanceCriteria.filter((criterion) => criterion.status === "missing" || criterion.status === "partially_satisfied" || criterion.status === "conflicting").map((criterion) => criterion.criterionId),
     evidenceIds: item.evidenceIds,
     confidence: item.confidence,
     impact: "The approved project state may not be fully implemented.",

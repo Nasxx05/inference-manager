@@ -1,4 +1,5 @@
 import type { ProjectMemory, Requirement } from "@/types/project";
+import { structuredAcceptanceCriteria } from "./proposals";
 
 function list(items: string[], empty = "None recorded."): string {
   return items.length ? items.map((item) => `- ${item}`).join("\n") : empty;
@@ -24,6 +25,8 @@ export function buildProjectContext(memory: ProjectMemory, currentMessage: strin
     list(memory.completeness.criticalGaps),
     "Design preferences:",
     list(memory.designPreferences),
+    "Acceptance criteria:",
+    list(structuredAcceptanceCriteria(memory).map((item) => `[${item.status}] ${item.requirementId}: ${item.description}`)),
     "Current user response:",
     currentMessage.trim(),
   ].join("\n");
