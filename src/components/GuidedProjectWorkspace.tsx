@@ -8,6 +8,7 @@ import { approveSrs, connectOrbio, createProject, disconnectOrbio, generateArchi
 import { ORBIO_ACCOUNT_URL, EXTERNAL_LINK_REL } from "@/lib/externalLinks";
 import { Button, Field, Select } from "./ui";
 import { IterationWorkspace } from "./IterationWorkspace";
+import { PromgentLogo } from "./PromgentLogo";
 
 type Mode = "loading" | "auth" | "projects" | "create" | "interview" | "srs" | "implementation" | "iteration";
 
@@ -209,7 +210,7 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
         <div className="mx-auto flex max-w-[1180px] items-center justify-between gap-3 px-5 py-3.5">
           <div className="flex items-center gap-3">
             {onBack ? <button type="button" onClick={onBack} className="inline-flex items-center gap-1.5 text-sm text-muted hover:text-ink"><ArrowLeft className="h-4 w-4" /> Promgent</button> : null}
-            <span className="font-mono text-sm font-medium">Promgent Project</span>
+            <span className="inline-flex items-center gap-2 font-mono text-sm font-medium"><PromgentLogo size={30} priority /> Promgent Project</span>
           </div>
           {mode !== "auth" && mode !== "loading" ? <div className="flex items-center gap-4">{snapshot ? <span className="font-mono text-xs text-muted">{snapshot.usage.remaining.toFixed(2)} CREDIT remaining</span> : null}<button type="button" onClick={() => setProfileOpen((current) => !current)} className="text-xs text-muted hover:text-ink">Profile</button><button type="button" onClick={() => { void signOut().finally(() => setMode("auth")); }} className="inline-flex items-center gap-1.5 text-xs text-muted hover:text-ink"><LogOut className="h-3.5 w-3.5" /> Sign out</button></div> : null}
         </div>

@@ -19,6 +19,7 @@ import { ClarifyingQuestions } from "./ClarifyingQuestions";
 import { HistoryPanel } from "./HistoryPanel";
 import { HowToUseModal } from "./HowToUseModal";
 import { PromptEditor } from "./PromptEditor";
+import { PromgentLogo } from "./PromgentLogo";
 import { TaskForm, validateAttachment, type Attachment, type TaskFormValues } from "./TaskForm";
 import { Button } from "./ui";
 import { GeneratingScreen } from "./GeneratingScreen";
@@ -364,7 +365,7 @@ export function Workspace() {
                 Edit Task
               </button>
             ) : null}
-            <span className="font-mono text-sm font-medium tracking-tight">Promgent</span>
+            <span className="inline-flex items-center gap-2 font-mono text-sm font-medium tracking-tight"><PromgentLogo size={30} priority /> Promgent</span>
           </div>
 
           <div className="flex items-center gap-2">

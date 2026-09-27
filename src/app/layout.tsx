@@ -5,6 +5,12 @@ export const metadata: Metadata = {
   title: "Promgent — Budget-aware AI task planner",
   description:
     "Describe what you want to build, choose your model and budget, and Promgent creates a realistic execution plan and optimized prompt for the task.",
+  applicationName: "Promgent",
+  icons: {
+    icon: [{ url: "/promgent-icon.png", type: "image/png", sizes: "192x192" }],
+    shortcut: "/promgent-icon.png",
+    apple: [{ url: "/promgent-icon.png", type: "image/png", sizes: "192x192" }],
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
