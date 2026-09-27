@@ -20,6 +20,24 @@ export interface ProjectReference {
   createdAt: string;
 }
 
+export interface ProjectUsageEvent {
+  phase: string;
+  source: "promgent" | "external_snapshot";
+  model?: string;
+  cost: number;
+  estimated: boolean;
+  createdAt: string;
+}
+
+export interface ProjectUsageSummary {
+  budget: number;
+  used: number;
+  remaining: number;
+  events: ProjectUsageEvent[];
+  estimated: boolean;
+  updatedAt: string;
+}
+
 export type ProjectStatus =
   | "intake"
   | "interviewing"
@@ -208,4 +226,5 @@ export interface GuidedProjectSnapshot {
   srs?: SrsDocument;
   references?: ProjectReference[];
   implementationPlan?: PlanResult;
+  usage: ProjectUsageSummary;
 }

@@ -8,6 +8,9 @@
 /** Where users top up the CREDIT they spend on planning. */
 export const BUY_CREDITS_URL = "https://orbio.so";
 
+/** Orbio owns the provider wallet and account balance. */
+export const ORBIO_ACCOUNT_URL = "https://orbio.so/account";
+
 /** The walkthrough embedded in the "How to use" dialog. */
 export const HOW_TO_USE_VIDEO_ID = "lX3L2aQozeA";
 export const HOW_TO_USE_VIDEO_EMBED_URL = `https://www.youtube-nocookie.com/embed/${HOW_TO_USE_VIDEO_ID}`;

@@ -8,6 +8,7 @@ import type {
   ProjectRecord,
   SrsDocument,
   ProjectReference,
+  ProjectUsageSummary,
 } from "@/types/project";
 import type { PlanResult } from "@/types";
 import type { IterationPrompt, ProjectIteration } from "@/types/iteration";
@@ -57,7 +58,7 @@ export function listProjects(): Promise<ProjectRecord[]> {
   return call("/api/projects");
 }
 
-export function createProject(input: { description: string; modelId: string; planningDepth: PlanningDepth; budget: number; references?: Array<Pick<ProjectReference, "type" | "source" | "metadata">> }): Promise<{ project: ProjectRecord; memory: ProjectMemory; interview: InterviewSession; assistantMessage: GuidedProjectSnapshot["messages"][number]; references?: ProjectReference[] }> {
+export function createProject(input: { description: string; modelId: string; planningDepth: PlanningDepth; budget: number; references?: Array<Pick<ProjectReference, "type" | "source" | "metadata">> }): Promise<{ project: ProjectRecord; memory: ProjectMemory; interview: InterviewSession; assistantMessage: GuidedProjectSnapshot["messages"][number]; references?: ProjectReference[]; usage: ProjectUsageSummary }> {
   return call("/api/projects", { method: "POST", body: JSON.stringify(input) });
 }
 
@@ -70,7 +71,11 @@ export function loadProject(projectId: string): Promise<GuidedProjectSnapshot> {
 }
 
 export function sendInterview(projectId: string, content: string, source: "text" | "voice_transcript" = "text") {
-  return call<{ memory: ProjectMemory; session: InterviewSession; userMessage: GuidedProjectSnapshot["messages"][number]; assistantMessage: GuidedProjectSnapshot["messages"][number] }>(`/api/projects/${encodeURIComponent(projectId)}/interview`, { method: "POST", body: JSON.stringify({ content, source }) });
+  return call<{ memory: ProjectMemory; session: InterviewSession; userMessage: GuidedProjectSnapshot["messages"][number]; assistantMessage: GuidedProjectSnapshot["messages"][number]; usage: ProjectUsageSummary }>(`/api/projects/${encodeURIComponent(projectId)}/interview`, { method: "POST", body: JSON.stringify({ content, source }) });
+}
+
+export function getProjectUsage(projectId: string): Promise<ProjectUsageSummary> {
+  return call(`/api/projects/${encodeURIComponent(projectId)}/usage`);
 }
 
 export function generateArchitecture(projectId: string): Promise<ArchitectureVersion> {

@@ -25,6 +25,7 @@ import {
   loadMemory,
   persistenceConfigured,
   projectForUser,
+  projectUsageForUser,
   saveArchitecture,
   saveMemory,
   saveProjectSession,
@@ -294,13 +295,20 @@ export function guidedRouter(): express.Router {
       await insertInterviewSession(session);
       await insertMessage(assistantMessage);
       await recordGuidedUsage({ userId: user.id, projectId: project.id, model: inference.model, requestId: inference.requestId, usage: inference.usage });
-      response.status(201).json({ success: true, data: { project, memory, interview: session, assistantMessage, references } });
+      response.status(201).json({ success: true, data: { project, memory, interview: session, assistantMessage, references, usage: await projectUsageForUser(project.id, user.id) } });
     } catch (error) { errorResponse(response, error); }
   });
 
   router.get("/projects/:projectId", async (request, response) => {
     try { response.json({ success: true, data: await snapshotForUser(request.params.projectId, (await authenticatedUser(request)).id) }); }
     catch (error) { errorResponse(response, error); }
+  });
+
+  router.get("/projects/:projectId/usage", async (request, response) => {
+    try {
+      const user = await authenticatedUser(request);
+      response.json({ success: true, data: await projectUsageForUser(request.params.projectId, user.id) });
+    } catch (error) { errorResponse(response, error); }
   });
 
   router.post("/projects/:projectId/interview", async (request, response) => {
@@ -317,7 +325,7 @@ export function guidedRouter(): express.Router {
       await insertRequirements(snapshot.project.id, result.memory.requirements);
       await saveProjectSession(result.session);
       await recordGuidedUsage({ userId: user.id, projectId: snapshot.project.id, model: inference.model, requestId: inference.requestId, usage: inference.usage });
-      response.json({ success: true, data: result });
+      response.json({ success: true, data: { ...result, usage: await projectUsageForUser(snapshot.project.id, user.id) } });
     } catch (error) { errorResponse(response, error); }
   });
 

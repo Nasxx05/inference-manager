@@ -8,9 +8,11 @@ import type {
   ProjectRecord,
   SrsDocument,
   ProjectReference,
+  ProjectUsageSummary,
 } from "@/types/project";
 import type { PlanResult } from "@/types";
 import type { IterationPrompt, ProjectIteration } from "@/types/iteration";
+import { MODELS } from "@/data/models";
 
 export interface AuthUser {
   id: string;
@@ -168,6 +170,7 @@ export async function insertUsageEvent(input: {
   model?: string;
   inputTokens?: number;
   outputTokens?: number;
+  cost?: number;
   requestId?: string;
 }): Promise<void> {
   await request({
@@ -181,10 +184,59 @@ export async function insertUsageEvent(input: {
       model: input.model ?? null,
       input_tokens: input.inputTokens ?? null,
       output_tokens: input.outputTokens ?? null,
-      cost: null,
+      cost: input.cost ?? null,
       request_id: input.requestId ?? null,
     }],
   });
+}
+
+function usageCost(row: Record<string, unknown>): { cost: number; estimated: boolean } {
+  const recorded = Number(row.cost);
+  if (Number.isFinite(recorded)) return { cost: Math.max(0, recorded), estimated: false };
+
+  const inputTokens = Number(row.input_tokens);
+  const outputTokens = Number(row.output_tokens);
+  const modelId = String(row.model ?? "").trim();
+  const model = MODELS.find((candidate) => candidate.id === modelId || candidate.providerModelId === modelId);
+  if (!model || (!Number.isFinite(inputTokens) && !Number.isFinite(outputTokens))) {
+    return { cost: 0, estimated: true };
+  }
+
+  const inputCost = Number.isFinite(inputTokens) ? (Math.max(0, inputTokens) / 1_000_000) * model.inputPrice : 0;
+  const outputCost = Number.isFinite(outputTokens) ? (Math.max(0, outputTokens) / 1_000_000) * model.outputPrice : 0;
+  return { cost: Number((inputCost + outputCost).toFixed(6)), estimated: true };
+}
+
+async function loadProjectUsage(projectId: string, userId: string, budget: number): Promise<ProjectUsageSummary> {
+  const rows = await request<Record<string, unknown>[]>({
+    path: `/rest/v1/usage_events?select=phase,source,model,input_tokens,output_tokens,cost,created_at&project_id=eq.${query(projectId)}&user_id=eq.${query(userId)}&order=created_at.asc`,
+  });
+  const events = rows.map((row) => {
+    const calculated = usageCost(row);
+    return {
+      phase: String(row.phase ?? "unknown"),
+      source: row.source === "external_snapshot" ? "external_snapshot" as const : "promgent" as const,
+      ...(row.model ? { model: String(row.model) } : {}),
+      cost: calculated.cost,
+      estimated: calculated.estimated,
+      createdAt: String(row.created_at ?? new Date(0).toISOString()),
+    };
+  });
+  const used = Number(events.reduce((total, event) => total + event.cost, 0).toFixed(6));
+  const normalizedBudget = Math.max(0, Number(budget) || 0);
+  return {
+    budget: normalizedBudget,
+    used,
+    remaining: Number(Math.max(0, normalizedBudget - used).toFixed(6)),
+    events,
+    estimated: events.some((event) => event.estimated),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export async function projectUsageForUser(projectId: string, userId: string): Promise<ProjectUsageSummary> {
+  const project = await projectForUser(projectId, userId);
+  return loadProjectUsage(project.id, userId, project.creditBudget);
 }
 
 export async function listIterations(projectId: string): Promise<ProjectIteration[]> {
@@ -400,11 +452,12 @@ export async function snapshotForUser(projectId: string, userId: string): Promis
   const messages = await request<Record<string, unknown>[]>({
     path: `/rest/v1/interview_messages?select=*&project_id=eq.${query(projectId)}&order=created_at.asc`,
   });
-  const [references, implementationPlan, architecture, srs] = await Promise.all([
+  const [references, implementationPlan, architecture, srs, usage] = await Promise.all([
     loadProjectReferences(projectId),
     loadLatestProjectPlan(projectId),
     loadLatestArchitecture(projectId),
     loadLatestSrs(projectId),
+    loadProjectUsage(projectId, userId, project.creditBudget),
   ]);
   return {
     project,
@@ -415,6 +468,7 @@ export async function snapshotForUser(projectId: string, userId: string): Promis
     ...(implementationPlan ? { implementationPlan } : {}),
     ...(architecture ? { architecture } : {}),
     ...(srs ? { srs } : {}),
+    usage,
   };
 }
 
