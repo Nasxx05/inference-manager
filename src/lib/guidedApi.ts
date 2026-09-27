@@ -42,11 +42,15 @@ export function signOut(): Promise<void> {
   return call("/api/auth/signout", { method: "POST" });
 }
 
-export function getOrbioStatus(): Promise<{ connected: boolean; keyFingerprint?: string; status?: string }> {
+export interface OrbioBalance { available: number; total?: number; used?: number; currency: string; source: "credits" | "key"; }
+
+export interface OrbioStatus { connected: boolean; keyFingerprint?: string; status?: string; modelIds?: string[]; balance?: OrbioBalance | null; }
+
+export function getOrbioStatus(): Promise<OrbioStatus> {
   return call("/api/orbio/status");
 }
 
-export function connectOrbio(apiKey: string): Promise<{ connected: boolean; keyFingerprint: string }> {
+export function connectOrbio(apiKey: string): Promise<OrbioStatus> {
   return call("/api/orbio/connect", { method: "POST", body: JSON.stringify({ apiKey }) });
 }
 

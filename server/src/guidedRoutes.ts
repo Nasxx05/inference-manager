@@ -47,7 +47,7 @@ import {
 import { providerModelId, runGuidedInterviewInference } from "./guidedInterview";
 import { inspectLiveProduct, inspectRepository } from "./iterationEvidence";
 import { runChangeImpactInference, runIterationPromptInference, runIterationReviewInference } from "./iterationAgent";
-import { verifyOrbioKey } from "./orbioService";
+import { getOrbioBalance, verifyOrbioKey } from "./orbioService";
 import { TranscriptionError, transcribeAudio } from "./transcription";
 import { buildTraceability, createIteration, extractChangeRequests, findingsFromTraceability, generateIterationPrompt, suggestionsForProject, summarizeIteration, technicalFindings } from "@/lib/iteration";
 import { createRequirement } from "@/lib/projectMemory/requirements";
@@ -242,9 +242,9 @@ export function guidedRouter(): express.Router {
     try {
       const user = await authenticatedUser(request);
       const key = String(body(request).apiKey ?? "").trim();
-      await verifyOrbioKey(key);
+      const verified = await verifyOrbioKey(key);
       await saveConnection(user.id, encryptOrbioKey(key), fingerprint(key));
-      response.json({ success: true, data: { connected: true, keyFingerprint: fingerprint(key) } });
+      response.json({ success: true, data: { connected: true, keyFingerprint: fingerprint(key), modelIds: verified.modelIds, balance: await getOrbioBalance(key) } });
     } catch (error) { errorResponse(response, error); }
   });
 
@@ -583,14 +583,24 @@ export function guidedRouter(): express.Router {
   return router;
 }
 
-async function fetchConnectionStatus(userId: string): Promise<{ connected: boolean; keyFingerprint?: string; status?: string }> {
+async function fetchConnectionStatus(userId: string): Promise<{ connected: boolean; keyFingerprint?: string; status?: string; modelIds?: string[]; balance?: Awaited<ReturnType<typeof getOrbioBalance>> }> {
   const base = String(process.env.SUPABASE_URL ?? "").trim().replace(/\/+$/, "");
   const key = String(process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
   if (!base || !key) throw new PersistenceError("PERSISTENCE_NOT_CONFIGURED", "Persistence is not configured.");
   const response = await fetch(`${base}/rest/v1/orbio_connections?select=key_fingerprint,status&user_id=eq.${encodeURIComponent(userId)}&limit=1`, { headers: { apikey: key, Authorization: `Bearer ${key}` } });
   if (!response.ok) throw new PersistenceError("PERSISTENCE_REQUEST_FAILED", "Could not read the Orbio connection.");
   const rows = (await response.json()) as Array<{ key_fingerprint?: string; status?: string }>;
-  return rows[0] ? { connected: true, keyFingerprint: rows[0].key_fingerprint, status: rows[0].status } : { connected: false };
+  if (!rows[0]) return { connected: false };
+  const baseStatus = { connected: true, keyFingerprint: rows[0].key_fingerprint, status: rows[0].status } as const;
+  try {
+    const orbioKey = await loadOrbioKey(userId);
+    const verified = await verifyOrbioKey(orbioKey);
+    return { ...baseStatus, modelIds: verified.modelIds, balance: await getOrbioBalance(orbioKey) };
+  } catch {
+    // Keep the profile/disconnect controls available even if a previously
+    // saved key has expired or the provider is temporarily unavailable.
+    return { ...baseStatus, status: "invalid", modelIds: [], balance: null };
+  }
 }
 
 async function saveConnection(userId: string, encryptedKey: string, keyFingerprint: string): Promise<void> {

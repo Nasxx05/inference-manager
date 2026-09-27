@@ -93,7 +93,7 @@ app.use(
       const normalized = origin.trim().replace(/\/+$/, "");
       return callback(null, allowList.includes(normalized));
     },
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type"],
   }),
 );
