@@ -1,4 +1,5 @@
 import type { InterviewMessage, InterviewSession, ProjectMemory } from "@/types/project";
+import { createUuid } from "@/lib/ids";
 import { nextBestQuestion, refreshQuestionBacklog } from "./backlog";
 import { calculateCompleteness } from "./completeness";
 import { detectContradictions } from "./contradictions";
@@ -24,11 +25,13 @@ export function applyInterviewTurn(input: {
   assistantContent?: string;
   structuredProposal?: unknown;
   now?: string;
+  generateId?: () => string;
 }): InterviewTurnResult {
   const now = input.now ?? new Date().toISOString();
+  const generateId = input.generateId ?? createUuid;
   const content = input.content.trim();
   const userMessage: InterviewMessage = {
-    id: `message_${Date.now().toString(36)}_user`,
+    id: generateId(),
     projectId: input.memory.projectId,
     sessionId: input.session.id,
     role: "user",
@@ -63,7 +66,7 @@ export function applyInterviewTurn(input: {
       ? "Thanks — I have enough information to prepare the project specification. You can review it now or continue refining the details."
       : "Thanks — I’ve added that to the project understanding. What else should the first version accomplish?";
   const assistantMessage: InterviewMessage = {
-    id: `message_${Date.now().toString(36)}_assistant`,
+    id: generateId(),
     projectId: input.memory.projectId,
     sessionId: input.session.id,
     role: "assistant",

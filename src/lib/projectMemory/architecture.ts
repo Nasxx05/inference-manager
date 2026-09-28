@@ -37,12 +37,16 @@ export function architectureForMemory(input: {
   const version = previous ? (changed ? previous.version + 1 : previous.version) : 1;
 
   return {
-    id: `architecture_${memory.projectId}_${(previous?.version ?? 0) + (changed ? 1 : 0)}`,
+    id: `architecture_${memory.projectId}_${version}`,
     projectId: memory.projectId,
     version,
     diagramSource,
     summary,
-    reasonForChange: changed ? "The structured project memory changed the system boundaries." : "Initial architecture derived from project memory.",
+    reasonForChange: !previous
+      ? "Initial architecture derived from project memory."
+      : changed
+        ? "The structured project memory changed the system boundaries."
+        : "The system boundaries are unchanged from the previous architecture.",
     createdAt: input.now ?? new Date().toISOString(),
   };
 }

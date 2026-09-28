@@ -36,7 +36,7 @@ export function generateSrs(input: {
     section("6. Data and Integration Requirements", `${requirementsByType(requirements, "data", input.memory)}\n\n${requirementsByType(requirements, "integration", input.memory)}`),
     section("7. Security Requirements", requirementsByType(requirements, "security", input.memory)),
     section("8. Design and UX Requirements", `${requirementsByType(requirements, "design", input.memory)}\n\nPreferences:\n${input.memory.designPreferences.map((item) => `- ${item}`).join("\n")}`),
-    section("9. Architecture", input.architecture?.summary ?? "Architecture has not been approved yet."),
+    section("9. Architecture", input.architecture?.summary ?? "Architecture has not been generated yet."),
     section("10. Acceptance Criteria", structuredAcceptanceCriteria(input.memory).map((item) => `- **${item.id}** → ${item.requirementId} [${item.status}]: ${item.description}`).join("\n")),
     section("11. Assumptions, Risks and Open Issues", `Assumptions:\n${input.memory.assumptions.map((item) => `- ${item}`).join("\n")}\n\nRisks:\n${input.memory.risks.map((item) => `- ${item}`).join("\n")}\n\nOpen issues:\n${input.memory.completeness.criticalGaps.map((item) => `- ${item}`).join("\n")}`),
   ].join("\n");

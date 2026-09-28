@@ -17,10 +17,12 @@ export interface GuidedUser { id: string; email?: string | null; }
 
 export class GuidedApiError extends Error {
   readonly code?: string;
-  constructor(message: string, code?: string) {
+  readonly requestId?: string;
+  constructor(message: string, code?: string, requestId?: string) {
     super(message);
     this.name = "GuidedApiError";
     this.code = code;
+    this.requestId = requestId;
   }
 }
 
@@ -30,8 +32,8 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
     credentials: "include",
     headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
   });
-  const payload = (await response.json().catch(() => null)) as { success?: boolean; data?: T; error?: { code?: string; message?: string } } | null;
-  if (!response.ok || !payload?.success) throw new GuidedApiError(payload?.error?.message ?? "The request could not be completed.", payload?.error?.code);
+  const payload = (await response.json().catch(() => null)) as { success?: boolean; data?: T; error?: { code?: string; message?: string; requestId?: string } } | null;
+  if (!response.ok || !payload?.success) throw new GuidedApiError(payload?.error?.message ?? "The request could not be completed.", payload?.error?.code, payload?.error?.requestId);
   return payload.data as T;
 }
 
@@ -184,7 +186,10 @@ export function updateIterationStatus(projectId: string, iterationId: string, st
 
 export async function transcribeAudio(blob: Blob): Promise<string> {
   const response = await fetch(endpoint("/api/transcribe"), { method: "POST", credentials: "include", headers: { "Content-Type": blob.type || "audio/webm" }, body: blob });
-  const payload = (await response.json().catch(() => null)) as { success?: boolean; data?: { text?: string }; error?: { message?: string } } | null;
-  if (!response.ok || !payload?.success || !payload.data?.text) throw new Error(payload?.error?.message ?? "Voice transcription failed.");
+  const payload = (await response.json().catch(() => null)) as { success?: boolean; data?: { text?: string }; error?: { code?: string; message?: string; requestId?: string } } | null;
+  if (!response.ok || !payload?.success || !payload.data?.text) {
+    const reference = payload?.error?.requestId ? ` Reference: ${payload.error.requestId}.` : "";
+    throw new GuidedApiError(`Voice transcription is temporarily unavailable.${reference}`, payload?.error?.code, payload?.error?.requestId);
+  }
   return payload.data.text;
 }

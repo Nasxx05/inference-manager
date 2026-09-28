@@ -41,6 +41,7 @@ import {
   listIterations,
   loadLatestArchitecture,
   loadLatestSrs,
+  persistInterviewTurnAtomic,
   saveIteration,
   saveIterationPrompt,
   saveSuggestionDiscussionMessage,
@@ -436,27 +437,19 @@ export function guidedRouter(): express.Router {
       const result = applyInterviewTurn({ memory: state.memory, session: state.interview, content, source: body(request).source === "voice_transcript" ? "voice_transcript" : "text", assistantContent: inference.assistantContent, structuredProposal: inference.structuredProposal });
       let persistenceMs = 0;
       let usageMs = 0;
-      await Promise.all([
-        (async () => {
-          const started = Date.now();
-          await Promise.all([
-            insertMessage(result.userMessage),
-            insertMessage(result.assistantMessage),
-            saveMemory(result.memory),
-            (async () => {
-              await insertRequirements(state.project.id, result.memory.requirements);
-              await insertAcceptanceCriteria(state.project.id, structuredAcceptanceCriteria(result.memory));
-            })(),
-            saveProjectSession(result.session),
-          ]);
-          persistenceMs = Date.now() - started;
-        })(),
-        (async () => {
-          const started = Date.now();
-          await recordGuidedUsage({ userId: user.id, projectId: state.project.id, model: inference.model, requestId: inference.requestId, usage: inference.usage });
-          usageMs = Date.now() - started;
-        })(),
-      ]);
+      const persistenceStarted = Date.now();
+      await persistInterviewTurnAtomic({
+        userId: user.id,
+        projectId: state.project.id,
+        userMessage: result.userMessage,
+        assistantMessage: result.assistantMessage,
+        memory: result.memory,
+        session: result.session,
+      });
+      persistenceMs = Date.now() - persistenceStarted;
+      const usageStarted = Date.now();
+      await recordGuidedUsage({ userId: user.id, projectId: state.project.id, model: inference.model, requestId: inference.requestId, usage: inference.usage });
+      usageMs = Date.now() - usageStarted;
       const totalMs = Date.now() - perfStarted;
       const overheadMs = Math.max(0, totalMs - providerMs);
       logPerf("interview", inference.requestId || perfRequestId, { authMs, databaseReadMs, credentialMs, providerMs, providerReportedMs: inference.providerDurationMs ?? "-", persistenceMs, usageMs, finishReason: inference.finishReason ?? "-", totalMs });
@@ -469,10 +462,14 @@ export function guidedRouter(): express.Router {
     try {
       const user = await authenticatedUser(request);
       await projectForUser(request.params.projectId, user.id);
-      const memory = await loadMemory(request.params.projectId);
+      const [memory, previous] = await Promise.all([
+        loadMemory(request.params.projectId),
+        loadLatestArchitecture(request.params.projectId),
+      ]);
       if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
-      const architecture = architectureForMemory({ memory });
-      await saveArchitecture(architecture);
+      const generated = architectureForMemory({ memory, previous });
+      const architecture = previous && generated.diagramSource === previous.diagramSource ? previous : generated;
+      if (architecture !== previous) await saveArchitecture(architecture);
       response.json({ success: true, data: architecture });
     } catch (error) { errorResponse(response, error); }
   });
@@ -481,9 +478,13 @@ export function guidedRouter(): express.Router {
     try {
       const user = await authenticatedUser(request);
       const project = await projectForUser(request.params.projectId, user.id);
-      const memory = await loadMemory(project.id);
+      const [memory, architecture, previous] = await Promise.all([
+        loadMemory(project.id),
+        loadLatestArchitecture(project.id),
+        loadLatestSrs(project.id),
+      ]);
       if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
-      const document = generateSrs({ memory });
+      const document = generateSrs({ memory, architecture, version: (previous?.version ?? 0) + 1 });
       await saveSrs(document);
       await updateProjectStatus(project.id, "srs_ready");
       response.json({ success: true, data: document });
@@ -494,6 +495,11 @@ export function guidedRouter(): express.Router {
     try {
       const user = await authenticatedUser(request);
       await projectForUser(request.params.projectId, user.id);
+      const memory = await loadMemory(request.params.projectId);
+      if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
+      if (memory.completeness.level !== "ready") {
+        throw new PersistenceError("SPECIFICATION_INCOMPLETE", "Resolve the critical requirements gaps before approving this specification.", 400);
+      }
       await approveSrs(request.params.projectId, request.params.srsId);
       response.json({ success: true, data: { approvedSrsId: request.params.srsId } });
     } catch (error) { errorResponse(response, error); }
@@ -764,10 +770,13 @@ export function guidedRouter(): express.Router {
       await insertAcceptanceCriteria(project.id, structuredAcceptanceCriteria(memory));
       const latestSrs = await loadLatestSrs(project.id);
       const latestArchitecture = await loadLatestArchitecture(project.id);
-      const nextSrs = generateSrs({ memory, architecture: latestArchitecture, version: (latestSrs?.version ?? 0) + 1, now });
-      const nextArchitecture = architectureForMemory({ memory, previous: latestArchitecture, now });
+      const generatedArchitecture = architectureForMemory({ memory, previous: latestArchitecture, now });
+      const nextArchitecture = latestArchitecture && generatedArchitecture.diagramSource === latestArchitecture.diagramSource
+        ? latestArchitecture
+        : generatedArchitecture;
+      const nextSrs = generateSrs({ memory, architecture: nextArchitecture, version: (latestSrs?.version ?? 0) + 1, now });
       await saveSrs(nextSrs);
-      if (!latestArchitecture || nextArchitecture.id !== latestArchitecture.id) await saveArchitecture(nextArchitecture);
+      if (nextArchitecture !== latestArchitecture) await saveArchitecture(nextArchitecture);
       const updated: ProjectIteration = { ...iteration, resultingSrsVersionId: nextSrs.id, resultingArchitectureVersionId: nextArchitecture.id, report: iteration.report ? { ...iteration.report, modelSummary: impact.summary } : iteration.report, status: "changes_approved", updatedAt: now };
       await saveIteration(updated);
       await recordGuidedUsage({ userId: user.id, projectId: project.id, phase: "change_impact", model: impact.model, requestId: impact.requestId, usage: impact.usage });

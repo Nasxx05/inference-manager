@@ -94,10 +94,17 @@ async function request<T>(input: {
     payload = raw;
   }
   if (!response.ok) {
-    const message = typeof payload === "object" && payload !== null && "message" in payload
+    const diagnostic = typeof payload === "object" && payload !== null && "message" in payload
       ? String((payload as { message?: unknown }).message)
       : "The persistence service rejected the request.";
-    throw new PersistenceError("PERSISTENCE_REQUEST_FAILED", message, response.status);
+    console.error(`[persistence] method=${input.method ?? "GET"} path=${input.path} status=${response.status} detail=${diagnostic.slice(0, 500)}`);
+    throw new PersistenceError(
+      "PERSISTENCE_REQUEST_FAILED",
+      input.path.startsWith("/rest/v1/")
+        ? "The persistence service could not complete the request."
+        : "The authentication service could not complete the request.",
+      response.status,
+    );
   }
   return payload as T;
 }
@@ -410,6 +417,52 @@ export async function insertAcceptanceCriteria(projectId: string, criteria: Acce
     method: "POST",
     body: criteria.map((item) => ({ id: item.id, project_id: projectId, requirement_id: item.requirementId, description: item.description, source: item.source, source_message_id: item.sourceMessageId ?? null, status: item.status, confidence: item.confidence, version: item.version, created_at: item.createdAt, updated_at: item.updatedAt })),
   });
+}
+
+export async function persistInterviewTurnAtomic(input: {
+  userId: string;
+  projectId: string;
+  userMessage: InterviewMessage;
+  assistantMessage: InterviewMessage;
+  memory: ProjectMemory;
+  session: InterviewSession;
+}): Promise<void> {
+  try {
+    await request({
+      path: "/rest/v1/rpc/persist_interview_turn",
+      method: "POST",
+      body: {
+        p_user_id: input.userId,
+        p_project_id: input.projectId,
+        p_user_message: messageToRow(input.userMessage),
+        p_assistant_message: messageToRow(input.assistantMessage),
+        p_memory: input.memory,
+        p_memory_version: input.memory.version,
+        p_requirements: input.memory.requirements.map((item) => requirementToRow(input.projectId, item)),
+        p_acceptance_criteria: structuredAcceptanceCriteria(input.memory).map((item) => ({
+          id: item.id,
+          project_id: input.projectId,
+          requirement_id: item.requirementId,
+          description: item.description,
+          source: item.source,
+          source_message_id: item.sourceMessageId ?? null,
+          status: item.status,
+          confidence: item.confidence,
+          version: item.version,
+          created_at: item.createdAt,
+          updated_at: item.updatedAt,
+        })),
+        p_session: sessionToRow(input.session),
+      },
+    });
+  } catch (error) {
+    console.error("[interview-persistence] atomic turn failed", error instanceof Error ? error.message : "unknown");
+    throw new PersistenceError(
+      "INTERVIEW_PERSISTENCE_FAILED",
+      "Promgent could not save this interview response. Your previous project state was preserved.",
+      503,
+    );
+  }
 }
 
 export async function saveMemory(memory: ProjectMemory): Promise<void> {

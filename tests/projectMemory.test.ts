@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { UUID_V4_PATTERN } from "@/lib/ids";
 import {
   applyInterviewTurn,
   architectureForMemory,
@@ -46,6 +47,9 @@ describe("guided project memory", () => {
     expect(result.session.turnCount).toBe(1);
     expect(result.userMessage.role).toBe("user");
     expect(result.assistantMessage.role).toBe("assistant");
+    expect(result.userMessage.id).toMatch(UUID_V4_PATTERN);
+    expect(result.assistantMessage.id).toMatch(UUID_V4_PATTERN);
+    expect(result.userMessage.id).not.toBe(result.assistantMessage.id);
   });
 
   it("detects contradictory requirements without resolving them silently", () => {
@@ -68,11 +72,31 @@ describe("guided project memory", () => {
     expect(architecture.summary).toContain("application");
   });
 
+  it("reuses an unchanged architecture version and advances a changed one", () => {
+    const memory = createInitialMemory(project());
+    const first = architectureForMemory({ memory, now: "2026-01-01T00:00:00.000Z" });
+    const unchanged = architectureForMemory({ memory, previous: first, now: "2026-01-02T00:00:00.000Z" });
+    expect(unchanged.version).toBe(first.version);
+    expect(unchanged.id).toBe(first.id);
+
+    const changedMemory = { ...memory, requirements: memory.requirements.map((item, index) => index ? item : { ...item, description: `${item.description} Accept payment at checkout.` }) };
+    const changed = architectureForMemory({ memory: changedMemory, previous: first });
+    expect(changed.version).toBe(first.version + 1);
+    expect(changed.id).not.toBe(first.id);
+  });
+
   it("builds an SRS with stable requirement identifiers", () => {
     const memory = createInitialMemory(project());
     const document = generateSrs({ memory });
     expect(document.content).toContain("Software Requirements Specification");
     expect(document.requirementIds).toContain(memory.requirements[0]!.id);
+  });
+
+  it("includes the latest architecture or the explicit not-generated state", () => {
+    const memory = createInitialMemory(project());
+    expect(generateSrs({ memory }).content).toContain("Architecture has not been generated yet.");
+    const architecture = architectureForMemory({ memory });
+    expect(generateSrs({ memory, architecture }).content).toContain(architecture.summary);
   });
 
   it("marks a memory ready only when its selected depth is satisfied", () => {
