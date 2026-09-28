@@ -226,7 +226,7 @@ export function guidedRouter(): express.Router {
       const text = await transcribeAudio({ buffer, mimeType: String(request.headers["content-type"] ?? "audio/webm") });
       response.json({ success: true, data: { text } });
     } catch (error) {
-      if (error instanceof TranscriptionError) response.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+      if (error instanceof TranscriptionError) response.status(error.status).json({ success: false, error: { code: error.code, message: error.message, requestId: error.requestId } });
       else errorResponse(response, error);
     }
   });

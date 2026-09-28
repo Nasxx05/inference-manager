@@ -348,6 +348,13 @@ SUPABASE_URL=
 SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 CREDENTIAL_ENCRYPTION_KEY=
+
+# Separate voice transcription configuration (never inherited from chat)
+TRANSCRIPTION_URL=https://api.orbio.so/api/v1/audio/transcriptions
+TRANSCRIPTION_API_KEY=
+TRANSCRIPTION_MODEL=openai/whisper-large-v3-turbo
+TRANSCRIPTION_REQUEST_MODE=json_base64
+TRANSCRIPTION_TIMEOUT_MS=60000
 ```
 
 `CREDENTIAL_ENCRYPTION_KEY` must be one stable 32-byte value encoded as 64 hexadecimal
