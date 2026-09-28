@@ -16,6 +16,8 @@ function memoryService(input: {
     providerKeys.push(key);
     return { modelIds: ["openai/gpt-4o"] };
   });
+  let epoch = 1_000;
+  let balanceCalls = 0;
   const service = createOrbioConnectionService({
     read: async (userId) => rows.get(userId) ?? null,
     save: async (record) => { rows.set(record.userId, { ...record }); return { ...record }; },
@@ -26,11 +28,12 @@ function memoryService(input: {
     remove: async (userId) => { rows.delete(userId); },
     ...(input.decrypt ? { decrypt: input.decrypt } : {}),
     verify,
-    balance: async () => ({ available: 12.5, currency: "CREDIT", source: "credits" }),
+    balance: async () => { balanceCalls += 1; return { available: 12.5, currency: "CREDIT", source: "credits" }; },
     requireEncryption: () => process.env.CREDENTIAL_ENCRYPTION_KEY!,
     now: () => "2026-09-27T12:00:00.000Z",
+    epochNow: () => epoch,
   });
-  return { service, rows, providerKeys };
+  return { service, rows, providerKeys, get balanceCalls() { return balanceCalls; }, advance(ms: number) { epoch += ms; } };
 }
 
 beforeEach(() => { process.env.CREDENTIAL_ENCRYPTION_KEY = KEY_A; });
@@ -39,6 +42,7 @@ afterEach(() => {
   delete process.env.SUPABASE_URL;
   delete process.env.SUPABASE_ANON_KEY;
   delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  delete process.env.ORBIO_STATUS_CACHE_MS;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -49,7 +53,7 @@ describe("Orbio persisted credential lifecycle", () => {
     expect(() => requireCredentialEncryptionKey()).toThrowError(expect.objectContaining({ code: "CREDENTIAL_ENCRYPTION_NOT_CONFIGURED" }));
   });
 
-  it("saves, reloads, decrypts and reverifies before reporting active", async () => {
+  it("connects with one remote verification and confirms persisted decryption locally", async () => {
     const { service, rows, providerKeys } = memoryService();
     const result = await service.connect("user-1", "orbio-secret");
 
@@ -57,7 +61,7 @@ describe("Orbio persisted credential lifecycle", () => {
     expect(saved?.status).toBe("active");
     expect(saved?.encryptedKey).not.toContain("orbio-secret");
     expect(decryptOrbioKey(saved!.encryptedKey)).toBe("orbio-secret");
-    expect(providerKeys).toEqual(["orbio-secret", "orbio-secret"]);
+    expect(providerKeys).toEqual(["orbio-secret"]);
     expect(result).toMatchObject({ modelIds: ["openai/gpt-4o"], balance: { available: 12.5 } });
   });
 
@@ -89,15 +93,15 @@ describe("Orbio persisted credential lifecycle", () => {
 
   it("keeps missing, inactive and unreadable states distinct", async () => {
     const missing = memoryService();
-    await expect(missing.service.getVerified("missing-user")).rejects.toMatchObject({ code: "ORBIO_NOT_CONNECTED" });
+    await expect(missing.service.loadCredentialForInference("missing-user")).rejects.toMatchObject({ code: "ORBIO_NOT_CONNECTED" });
 
     const inactive = memoryService();
     inactive.rows.set("user-2", { userId: "user-2", encryptedKey: "cipher", keyFingerprint: "fp", status: "unverified" });
-    await expect(inactive.service.getVerified("user-2")).rejects.toMatchObject({ code: "ORBIO_CONNECTION_INACTIVE" });
+    await expect(inactive.service.loadCredentialForInference("user-2")).rejects.toMatchObject({ code: "ORBIO_CONNECTION_INACTIVE" });
 
     const unreadable = memoryService({ decrypt: () => { throw new PersistenceError("ORBIO_CREDENTIAL_UNREADABLE", "unreadable", 400); } });
     unreadable.rows.set("user-3", { userId: "user-3", encryptedKey: "cipher", keyFingerprint: "fp", status: "active" });
-    await expect(unreadable.service.getVerified("user-3")).rejects.toMatchObject({ code: "ORBIO_CREDENTIAL_UNREADABLE" });
+    await expect(unreadable.service.loadCredentialForInference("user-3")).rejects.toMatchObject({ code: "ORBIO_CREDENTIAL_UNREADABLE" });
   });
 
   it("marks a saved connection invalid when Orbio rejects its decrypted key", async () => {
@@ -106,7 +110,7 @@ describe("Orbio persisted credential lifecycle", () => {
     await seeded.service.connect("user-4", "orbio-secret");
     rows.set("user-4", seeded.rows.get("user-4")!);
 
-    await expect(service.getVerified("user-4")).rejects.toMatchObject({ code: "ORBIO_KEY_EXPIRED_OR_INVALID" });
+    await expect(service.verifyConnection("user-4")).rejects.toMatchObject({ code: "ORBIO_KEY_EXPIRED_OR_INVALID" });
     expect(rows.get("user-4")?.status).toBe("invalid");
   });
 
@@ -117,7 +121,7 @@ describe("Orbio persisted credential lifecycle", () => {
     second.rows.set("user-5", first.rows.get("user-5")!);
 
     const status = await second.service.status("user-5");
-    expect(status).toMatchObject({ connected: true, status: "active", balance: { available: 12.5 } });
+    expect(status).toMatchObject({ connected: true, status: "active", balance: null });
   });
 
   it("returns unreadable rather than not-connected when the encryption key changes", async () => {
@@ -127,7 +131,39 @@ describe("Orbio persisted credential lifecycle", () => {
     second.rows.set("user-6", first.rows.get("user-6")!);
     process.env.CREDENTIAL_ENCRYPTION_KEY = KEY_B;
 
-    await expect(second.service.getVerified("user-6")).rejects.toMatchObject({ code: "ORBIO_CREDENTIAL_UNREADABLE" });
+    await expect(second.service.loadCredentialForInference("user-6")).rejects.toMatchObject({ code: "ORBIO_CREDENTIAL_UNREADABLE" });
+  });
+
+  it("loads inference credentials without model verification or balance lookup", async () => {
+    const fixture = memoryService();
+    await fixture.service.connect("user-hot", "orbio-secret");
+    fixture.providerKeys.length = 0;
+    const priorBalanceCalls = fixture.balanceCalls;
+
+    await expect(fixture.service.loadCredentialForInference("user-hot")).resolves.toMatchObject({ apiKey: "orbio-secret" });
+    expect(fixture.providerKeys).toEqual([]);
+    expect(fixture.balanceCalls).toBe(priorBalanceCalls);
+  });
+
+  it("uses safe cached status until its TTL expires", async () => {
+    process.env.ORBIO_STATUS_CACHE_MS = "120000";
+    const fixture = memoryService();
+    await fixture.service.connect("user-cache", "orbio-secret");
+    fixture.providerKeys.length = 0;
+
+    const cached = await fixture.service.status("user-cache");
+    expect(cached).not.toHaveProperty("apiKey");
+    expect(JSON.stringify(cached)).not.toContain("orbio-secret");
+    expect(fixture.providerKeys).toEqual([]);
+
+    const balanceCallsBeforeRefresh = fixture.balanceCalls;
+    fixture.advance(120001);
+    await fixture.service.status("user-cache");
+    expect(fixture.providerKeys).toEqual(["orbio-secret"]);
+    expect(fixture.balanceCalls).toBe(balanceCallsBeforeRefresh);
+    await fixture.service.balance("user-cache", true);
+    expect(fixture.balanceCalls).toBe(balanceCallsBeforeRefresh + 1);
+    delete process.env.ORBIO_STATUS_CACHE_MS;
   });
 });
 

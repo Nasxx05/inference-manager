@@ -10,6 +10,9 @@ export interface GuidedInterviewInference {
   structuredProposal: unknown;
   model: string;
   requestId: string;
+  durationMs: number;
+  providerDurationMs?: number;
+  finishReason?: string | null;
   usage?: {
     inputTokens?: number;
     outputTokens?: number;
@@ -56,11 +59,12 @@ export function providerModelId(selectedModel: string): string {
   return String(profile?.providerModelId ?? selectedModel).trim();
 }
 
-function maxTokens(): number {
-  const configured = Number(process.env.ORBIO_INTERVIEW_MAX_TOKENS ?? 700);
+function maxTokens(depth: ProjectRecord["planningDepth"]): number {
+  const dynamic = depth === "fast" ? 450 : depth === "thorough" ? 850 : 650;
+  const configured = Number(process.env.ORBIO_INTERVIEW_MAX_TOKENS);
   return Number.isFinite(configured) && configured > 0
-    ? Math.min(Math.round(configured), 1200)
-    : 700;
+    ? Math.min(dynamic, Math.round(configured), 1200)
+    : dynamic;
 }
 
 function parsedResponse(content: string): { assistantContent: string; structuredProposal: unknown } {
@@ -108,7 +112,7 @@ export async function runGuidedInterviewInference(input: {
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: `${direction}\n\n${context}` },
     ],
-    maxTokens: maxTokens(),
+    maxTokens: maxTokens(input.project.planningDepth),
     temperature: 0.2,
     jsonMode: true,
     stage: "guided-interview",
@@ -120,6 +124,9 @@ export async function runGuidedInterviewInference(input: {
     ...parsed,
     model: result.model,
     requestId: result.requestId,
+    durationMs: result.durationMs,
+    providerDurationMs: result.providerDurationMs,
+    finishReason: result.finishReason,
     usage: result.usage
       ? { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens }
       : undefined,

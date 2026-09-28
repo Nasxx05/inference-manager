@@ -60,6 +60,7 @@ console.log(`credentialEncryptionConfigured=${credentialEncryptionConfigured()}`
 requireCredentialEncryptionKey();
 
 const app = express();
+const SERVER_STARTED_AT = new Date();
 
 const PORT = Number(process.env.PORT ?? 10000);
 const MAX_QUESTIONS = 12;
@@ -308,7 +309,13 @@ function logStage(
 app.get("/health", (_request, response) => {
   response.json({
     success: true,
-    data: { ...backendHealth(), budgets: { ...tokenBudgets(), combined: aiCombinedMaxTokens() } },
+    data: {
+      ...backendHealth(),
+      budgets: { ...tokenBudgets(), combined: aiCombinedMaxTokens() },
+      startedAt: SERVER_STARTED_AT.toISOString(),
+      uptimeSeconds: Math.floor((Date.now() - SERVER_STARTED_AT.getTime()) / 1000),
+      version: String(process.env.RENDER_GIT_COMMIT ?? process.env.GIT_COMMIT ?? "unknown").slice(0, 12),
+    },
   });
 });
 

@@ -25,6 +25,7 @@ import {
   insertAcceptanceCriteria,
   insertUsageEvent,
   listProjects,
+  loadInterviewStateForUser,
   loadMemory,
   persistenceConfigured,
   projectForUser,
@@ -53,7 +54,8 @@ import {
 import { providerModelId, runGuidedInterviewInference } from "./guidedInterview";
 import { inspectLiveProduct, inspectRepository } from "./iterationEvidence";
 import { runChangeImpactInference, runIterationPromptInference, runIterationReviewInference, runSuggestionDiscussionInference, runSuggestionScopeInference } from "./iterationAgent";
-import { connectOrbioConnection, disconnectOrbioConnection, getOrbioConnectionStatus, getVerifiedOrbioConnection } from "./orbioConnectionService";
+import { connectOrbioConnection, disconnectOrbioConnection, getOrbioBalanceForUser, getOrbioConnectionStatus, loadOrbioCredentialForInference, verifyOrbioConnection } from "./orbioConnectionService";
+import { runOrbioInference } from "./orbioInference";
 import { TranscriptionError, transcribeAudio } from "./transcription";
 import { buildTraceability, createIteration, extractChangeRequests, findingsFromTraceability, generateIterationPrompt, suggestionsForProject, summarizeIteration, technicalFindings } from "@/lib/iteration";
 import type { ProjectIteration, ProjectSuggestion } from "@/types/iteration";
@@ -66,6 +68,11 @@ import { MultipartError, parseMultipart } from "./multipart";
 
 const SESSION_COOKIE = "promgent_session";
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60;
+
+function logPerf(route: string, requestId: string, fields: Record<string, number | string>): void {
+  const details = Object.entries(fields).map(([key, value]) => `${key}=${value}`).join(" ");
+  console.info(`[perf] requestId=${requestId} route=${route} ${details}`);
+}
 
 function cookies(request: express.Request): Record<string, string> {
   const header = String(request.headers.cookie ?? "");
@@ -181,6 +188,7 @@ function projectReferencesFromAnalysis(projectId: string, inputs: ReferenceInput
 async function processSelectedModelReferences(input: Parameters<typeof processReferences>[0]) {
   try { return await processReferences(input); }
   catch (error) {
+    if (error instanceof AiError && error.code === "AI_AUTH_FAILED") throw error;
     if (input.images?.length && error instanceof AiError) throw new PersistenceError("MODEL_VISION_UNAVAILABLE", "The selected project model could not analyze the supplied image. Choose a vision-capable Orbio model; Promgent will not silently switch models.", 400);
     throw error;
   }
@@ -276,6 +284,21 @@ export function guidedRouter(): express.Router {
     } catch (error) { errorResponse(response, error); }
   });
 
+  router.post("/orbio/status/refresh", async (request, response) => {
+    try {
+      const user = await authenticatedUser(request);
+      const connection = await verifyOrbioConnection(user.id);
+      response.json({ success: true, data: { connected: true, status: "active", keyFingerprint: connection.fingerprint, modelIds: connection.modelIds, balance: connection.balance } });
+    } catch (error) { errorResponse(response, error); }
+  });
+
+  router.get("/orbio/balance", async (request, response) => {
+    try {
+      const user = await authenticatedUser(request);
+      response.json({ success: true, data: await getOrbioBalanceForUser(user.id) });
+    } catch (error) { errorResponse(response, error); }
+  });
+
   router.post("/orbio/connect", async (request, response) => {
     try {
       const user = await authenticatedUser(request);
@@ -299,8 +322,12 @@ export function guidedRouter(): express.Router {
   });
 
   router.post("/projects", async (request, response) => {
+    const perfStarted = Date.now();
+    const perfRequestId = randomUUID();
     try {
+      const authStarted = Date.now();
       const user = await authenticatedUser(request);
+      const authMs = Date.now() - authStarted;
       const parsedRequest = projectRequestInput(request);
       const input = parsedRequest.input;
       const description = String(input.description ?? "").trim();
@@ -309,9 +336,11 @@ export function guidedRouter(): express.Router {
       if (!description || description.length > 8000 || !Number.isFinite(budget) || budget <= 0) {
         throw new PersistenceError("PROJECT_VALIDATION_FAILED", "Provide a task description and a valid CREDIT budget.", 400);
       }
-      // Resolve once per request, then reuse this exact persisted credential
-      // for reference analysis and the opening Requirements Agent call.
-      const connection = await getVerifiedOrbioConnection(user.id);
+      // Resolve once per request, then reuse this exact locally decrypted
+      // credential. No /models or balance request is on the inference path.
+      const credentialStarted = Date.now();
+      const connection = await loadOrbioCredentialForInference(user.id);
+      const credentialMs = Date.now() - credentialStarted;
       const project = {
         ...createProjectRecord({ userId: user.id, id: randomUUID(), description, modelId, planningDepth: validDepth(input.planningDepth), budget }),
         status: "interviewing" as const,
@@ -320,14 +349,18 @@ export function guidedRouter(): express.Router {
       const declaredReferences = Array.isArray(input.references) ? input.references : [];
       const urls = declaredReferences.flatMap((item) => item && typeof item === "object" && (item as { type?: unknown }).type === "website" ? [String((item as { source?: unknown }).source ?? "").trim()] : []).filter(Boolean);
       const referenceRequestId = randomUUID();
-      const referenceResult = await processSelectedModelReferences({ taskDescription: description, images: parsedRequest.images, urls, requestId: referenceRequestId, provider: { apiKey: connection.apiKey, baseUrl: String(process.env.ORBIO_BASE_URL ?? process.env.AGENTFUND_AI_BASE_URL ?? "").trim().replace(/\/+$/, ""), model: providerModelId(project.selectedModel) } });
+      const referenceStarted = Date.now();
+      const referenceResult = await runOrbioInference(user.id, () => processSelectedModelReferences({ taskDescription: description, images: parsedRequest.images, urls, requestId: referenceRequestId, provider: { apiKey: connection.apiKey, baseUrl: String(process.env.ORBIO_BASE_URL ?? process.env.AGENTFUND_AI_BASE_URL ?? "").trim().replace(/\/+$/, ""), model: providerModelId(project.selectedModel) } }), connection);
+      const referenceMs = Date.now() - referenceStarted;
       if (!referenceResult.ok) throw referenceError(referenceResult.code, referenceResult.message);
       const analyzedReferences = projectReferencesFromAnalysis(project.id, referenceResult.references, referenceResult.analyses, project.createdAt);
       const legacyReferences = referenceResult.references.length ? [] : referencesFromInput(project.id, input.references, project.createdAt);
       const references = [...analyzedReferences, ...legacyReferences];
       if (referenceResult.analyses.length) memory = { ...memory, designPreferences: [...new Set([...memory.designPreferences, ...referenceResult.analyses.map((analysis) => `Reference observation (${analysis.type}, ${analysis.visual ? "visual" : "structure only"}): ${analysis.summary}`)])], version: memory.version + 1, updatedAt: project.createdAt };
       const session: InterviewSession = { id: randomUUID(), projectId: project.id, planningDepth: project.planningDepth, status: "active", nextQuestion: memory.openQuestions[0], turnCount: 0, createdAt: project.createdAt, updatedAt: project.updatedAt };
-      const inference = await runGuidedInterviewInference({ apiKey: connection.apiKey, project, memory, opening: true });
+      const inferenceStarted = Date.now();
+      const inference = await runOrbioInference(user.id, () => runGuidedInterviewInference({ apiKey: connection.apiKey, project, memory, opening: true }), connection);
+      const interviewInferenceMs = Date.now() - inferenceStarted;
       const intakeProposal = validateInterviewProposal({ raw: inference.structuredProposal, memory, userContent: description, sourceMessageId: `intake:${project.id}`, now: project.createdAt });
       const intakeDraft = { ...memory, requirements: intakeProposal.requirements, acceptanceCriteria: intakeProposal.acceptanceCriteria, users: [...new Set([...memory.users, ...intakeProposal.users])], assumptions: [...new Set([...memory.assumptions, ...intakeProposal.assumptions])], designPreferences: [...new Set([...memory.designPreferences, ...intakeProposal.designPreferences])], technicalConstraints: [...new Set([...memory.technicalConstraints, ...intakeProposal.technicalConstraints])], version: memory.version + 1, updatedAt: project.createdAt };
       const intakeConflicts = detectContradictions(intakeDraft);
@@ -343,16 +376,30 @@ export function guidedRouter(): express.Router {
         source: "system" as const,
         createdAt: project.createdAt,
       };
+      const persistenceStarted = Date.now();
+      // The project is the foreign-key root. Its independent children can be
+      // stored concurrently after it exists; the message waits for its session.
       await insertProject(project);
-      await saveMemory(memory);
-      await insertRequirements(project.id, memory.requirements);
-      await insertAcceptanceCriteria(project.id, structuredAcceptanceCriteria(memory));
-      await saveProjectReferences(references);
-      await insertInterviewSession(session);
+      await Promise.all([
+        saveMemory(memory),
+        (async () => {
+          await insertRequirements(project.id, memory.requirements);
+          await insertAcceptanceCriteria(project.id, structuredAcceptanceCriteria(memory));
+        })(),
+        saveProjectReferences(references),
+        insertInterviewSession(session),
+      ]);
       await insertMessage(assistantMessage);
-      await recordGuidedUsage({ userId: user.id, projectId: project.id, model: inference.model, requestId: inference.requestId, usage: inference.usage });
-      if (referenceResult.analyses.length) await recordGuidedUsage({ userId: user.id, projectId: project.id, phase: "reference_analysis", model: providerModelId(project.selectedModel), requestId: referenceRequestId });
-      response.status(201).json({ success: true, data: { project, memory, interview: session, assistantMessage, references, usage: await projectUsageForUser(project.id, user.id) } });
+      const persistenceMs = Date.now() - persistenceStarted;
+      const usageStarted = Date.now();
+      await Promise.all([
+        recordGuidedUsage({ userId: user.id, projectId: project.id, model: inference.model, requestId: inference.requestId, usage: inference.usage }),
+        ...(referenceResult.analyses.length ? [recordGuidedUsage({ userId: user.id, projectId: project.id, phase: "reference_analysis", model: providerModelId(project.selectedModel), requestId: referenceRequestId })] : []),
+      ]);
+      const usage = await projectUsageForUser(project.id, user.id);
+      const usageMs = Date.now() - usageStarted;
+      logPerf("create_project", perfRequestId, { authMs, credentialMs, referenceMs, interviewInferenceMs, providerMs: inference.durationMs, persistenceMs, usageMs, totalMs: Date.now() - perfStarted });
+      response.status(201).json({ success: true, data: { project, memory, interview: session, assistantMessage, references, usage } });
     } catch (error) { errorResponse(response, error); }
   });
 
@@ -369,21 +416,52 @@ export function guidedRouter(): express.Router {
   });
 
   router.post("/projects/:projectId/interview", async (request, response) => {
+    const perfStarted = Date.now();
+    const perfRequestId = randomUUID();
     try {
+      const authStarted = Date.now();
       const user = await authenticatedUser(request);
-      const snapshot = await snapshotForUser(request.params.projectId, user.id);
+      const authMs = Date.now() - authStarted;
+      let databaseReadMs = 0;
+      let credentialMs = 0;
+      const [state, credential] = await Promise.all([
+        (async () => { const started = Date.now(); const value = await loadInterviewStateForUser(request.params.projectId, user.id); databaseReadMs = Date.now() - started; return value; })(),
+        (async () => { const started = Date.now(); const value = await loadOrbioCredentialForInference(user.id); credentialMs = Date.now() - started; return value; })(),
+      ]);
       const content = String(body(request).content ?? "").trim();
       if (!content || content.length > 8000) throw new PersistenceError("INTERVIEW_VALIDATION_FAILED", "Enter a response before sending it.", 400);
-      const inference = await runGuidedInterviewInference({ apiKey: (await getVerifiedOrbioConnection(user.id)).apiKey, project: snapshot.project, memory: snapshot.memory, userContent: content });
-      const result = applyInterviewTurn({ memory: snapshot.memory, session: snapshot.interview, content, source: body(request).source === "voice_transcript" ? "voice_transcript" : "text", assistantContent: inference.assistantContent, structuredProposal: inference.structuredProposal });
-      await insertMessage(result.userMessage);
-      await insertMessage(result.assistantMessage);
-      await saveMemory(result.memory);
-      await insertRequirements(snapshot.project.id, result.memory.requirements);
-      await insertAcceptanceCriteria(snapshot.project.id, structuredAcceptanceCriteria(result.memory));
-      await saveProjectSession(result.session);
-      await recordGuidedUsage({ userId: user.id, projectId: snapshot.project.id, model: inference.model, requestId: inference.requestId, usage: inference.usage });
-      response.json({ success: true, data: { ...result, usage: await projectUsageForUser(snapshot.project.id, user.id) } });
+      const providerStarted = Date.now();
+      const inference = await runOrbioInference(user.id, () => runGuidedInterviewInference({ apiKey: credential.apiKey, project: state.project, memory: state.memory, userContent: content }), credential);
+      const providerMs = Date.now() - providerStarted;
+      const result = applyInterviewTurn({ memory: state.memory, session: state.interview, content, source: body(request).source === "voice_transcript" ? "voice_transcript" : "text", assistantContent: inference.assistantContent, structuredProposal: inference.structuredProposal });
+      let persistenceMs = 0;
+      let usageMs = 0;
+      await Promise.all([
+        (async () => {
+          const started = Date.now();
+          await Promise.all([
+            insertMessage(result.userMessage),
+            insertMessage(result.assistantMessage),
+            saveMemory(result.memory),
+            (async () => {
+              await insertRequirements(state.project.id, result.memory.requirements);
+              await insertAcceptanceCriteria(state.project.id, structuredAcceptanceCriteria(result.memory));
+            })(),
+            saveProjectSession(result.session),
+          ]);
+          persistenceMs = Date.now() - started;
+        })(),
+        (async () => {
+          const started = Date.now();
+          await recordGuidedUsage({ userId: user.id, projectId: state.project.id, model: inference.model, requestId: inference.requestId, usage: inference.usage });
+          usageMs = Date.now() - started;
+        })(),
+      ]);
+      const totalMs = Date.now() - perfStarted;
+      const overheadMs = Math.max(0, totalMs - providerMs);
+      logPerf("interview", inference.requestId || perfRequestId, { authMs, databaseReadMs, credentialMs, providerMs, providerReportedMs: inference.providerDurationMs ?? "-", persistenceMs, usageMs, finishReason: inference.finishReason ?? "-", totalMs });
+      if (process.env.NODE_ENV !== "production") response.setHeader("Server-Timing", `auth;dur=${authMs}, db;dur=${databaseReadMs}, credential;dur=${credentialMs}, provider;dur=${providerMs}, persistence;dur=${persistenceMs}, total;dur=${totalMs}`);
+      response.json({ success: true, data: { ...result, timing: { providerInferenceMs: providerMs, promgentOverheadMs: overheadMs } } });
     } catch (error) { errorResponse(response, error); }
   });
 
@@ -426,20 +504,24 @@ export function guidedRouter(): express.Router {
     try {
       const user = await authenticatedUser(request);
       const project = await projectForUser(request.params.projectId, user.id);
-      const snapshot = await snapshotForUser(project.id, user.id);
-      const srs = await loadLatestSrs(project.id);
+      const [memory, srs, credential] = await Promise.all([
+        loadMemory(project.id),
+        loadLatestSrs(project.id),
+        loadOrbioCredentialForInference(user.id),
+      ]);
+      if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
       if (!srs || srs.status !== "approved") {
         throw new PersistenceError("SRS_APPROVAL_REQUIRED", "Approve the current SRS before generating the implementation prompt.", 400);
       }
       const provider = {
-        apiKey: (await getVerifiedOrbioConnection(user.id)).apiKey,
+        apiKey: credential.apiKey,
         baseUrl: String(process.env.ORBIO_BASE_URL ?? process.env.AGENTFUND_AI_BASE_URL ?? "").trim().replace(/\/+$/, ""),
         model: providerModelId(project.selectedModel),
         retry: false,
       };
       if (!provider.baseUrl) throw new PersistenceError("ORBIO_NOT_CONFIGURED", "ORBIO_BASE_URL is not configured.");
-      const planRequest = planningRequestFromApprovedSrs({ project, memory: snapshot.memory, srs });
-      const built = await buildPlanWithMetrics({ ...planRequest, aiProvider: provider });
+      const planRequest = planningRequestFromApprovedSrs({ project, memory, srs });
+      const built = await runOrbioInference(user.id, () => buildPlanWithMetrics({ ...planRequest, aiProvider: provider }), credential);
       await saveProjectPlan(project.id, srs.id, built.plan);
       await updateProjectStatus(project.id, "implementation");
       await recordGuidedUsage({ userId: user.id, projectId: project.id, phase: "planning", model: built.plan.agentModel ?? provider.model, requestId: built.requestId ?? built.plan.id });
@@ -481,6 +563,8 @@ export function guidedRouter(): express.Router {
   });
 
   router.post("/projects/:projectId/iterations/:iterationId/review", async (request, response) => {
+    const perfStarted = Date.now();
+    const perfRequestId = randomUUID();
     try {
       const user = await authenticatedUser(request);
       const project = await projectForUser(request.params.projectId, user.id);
@@ -495,18 +579,27 @@ export function guidedRouter(): express.Router {
       const voiceTranscript = String(inputBody.voiceTranscript ?? "").trim() || undefined;
       const forceReview = inputBody.forceReview === true;
       if (!repositoryUrl && !liveUrl && !text && !voiceTranscript && !parsedReview.images.length) throw new PersistenceError("ITERATION_INPUT_REQUIRED", "Provide a repository, live URL, screenshot, or review feedback before analyzing.", 400);
-      const connection = await getVerifiedOrbioConnection(user.id);
+      const stateStarted = Date.now();
+      const [connection, memory, allIterations] = await Promise.all([
+        loadOrbioCredentialForInference(user.id),
+        loadMemory(project.id),
+        listIterations(project.id),
+      ]);
+      if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
+      const databaseReadMs = Date.now() - stateStarted;
       const analyzing: ProjectIteration = { ...current, status: "analyzing", updatedAt: new Date().toISOString() };
-      const snapshot = await snapshotForUser(project.id, user.id);
-      const memory = snapshot.memory;
-      const allIterations = await listIterations(project.id);
       const previousCommitSha = [...allIterations].filter((item) => item.id !== current.id && item.repositorySnapshot?.commitSha).sort((a, b) => b.sequenceNumber - a.sequenceNumber)[0]?.repositorySnapshot?.commitSha;
       const screenshotRequestId = randomUUID();
+      const evidenceStarted = Date.now();
+      let repositoryFetchMs = 0;
+      let liveInspectionMs = 0;
+      let screenshotAnalysisMs = 0;
       const [repoResult, liveResult, screenshotResult] = await Promise.all([
-        repositoryUrl ? inspectRepository(repositoryUrl, { previousCommitSha, requirementText: memory.requirements.map((item) => item.description) }).then((value) => ({ ok: true as const, value })).catch((error) => ({ ok: false as const, error })) : Promise.resolve(undefined),
-        liveUrl ? inspectLiveProduct(liveUrl).then((value) => ({ ok: true as const, value })).catch((error) => ({ ok: false as const, error })) : Promise.resolve(undefined),
-        parsedReview.images.length ? processSelectedModelReferences({ taskDescription: `Implementation screenshots for ${project.title}`, images: parsedReview.images, requestId: screenshotRequestId, provider: { apiKey: connection.apiKey, baseUrl: String(process.env.ORBIO_BASE_URL ?? process.env.AGENTFUND_AI_BASE_URL ?? "").trim().replace(/\/+$/, ""), model: providerModelId(project.selectedModel) } }) : Promise.resolve(undefined),
+        repositoryUrl ? (async () => { const started = Date.now(); try { return { ok: true as const, value: await inspectRepository(repositoryUrl, { previousCommitSha, requirementText: memory.requirements.map((item) => item.description) }) }; } catch (error) { return { ok: false as const, error }; } finally { repositoryFetchMs = Date.now() - started; } })() : Promise.resolve(undefined),
+        liveUrl ? (async () => { const started = Date.now(); try { return { ok: true as const, value: await inspectLiveProduct(liveUrl) }; } catch (error) { return { ok: false as const, error }; } finally { liveInspectionMs = Date.now() - started; } })() : Promise.resolve(undefined),
+        parsedReview.images.length ? (async () => { const started = Date.now(); try { return await runOrbioInference(user.id, () => processSelectedModelReferences({ taskDescription: `Implementation screenshots for ${project.title}`, images: parsedReview.images, requestId: screenshotRequestId, provider: { apiKey: connection.apiKey, baseUrl: String(process.env.ORBIO_BASE_URL ?? process.env.AGENTFUND_AI_BASE_URL ?? "").trim().replace(/\/+$/, ""), model: providerModelId(project.selectedModel) } }), connection); } finally { screenshotAnalysisMs = Date.now() - started; } })() : Promise.resolve(undefined),
       ]);
+      const evidenceTotalMs = Date.now() - evidenceStarted;
       const now = new Date().toISOString();
       const repositorySnapshot = repoResult?.ok ? repoResult.value : repositoryUrl ? { repositoryUrl, reviewedAt: now, fileCount: 0, relevantFiles: [], structuralSummary: "Repository could not be inspected.", evidenceText: "", status: "unavailable" as const, error: repoResult?.error instanceof Error ? repoResult.error.message : "Repository could not be inspected." } : undefined;
       const liveProductSnapshot = liveResult?.ok ? liveResult.value : liveUrl ? { url: liveUrl, inspectedAt: now, status: "unavailable" as const, error: liveResult?.error instanceof Error ? liveResult.error.message : "Live product could not be inspected." } : undefined;
@@ -526,8 +619,11 @@ export function guidedRouter(): express.Router {
       let report = summarizeIteration({ traceability: trace.traceability, findings: [...traceFindings, ...userFindings], suggestions });
       const reviewed: ProjectIteration = { ...analyzing, status: "review_ready", input: { id: `input_${current.id}`, iterationId: current.id, projectId: project.id, ...(text ? { text } : {}), ...(voiceTranscript ? { voiceTranscript } : {}), screenshotIds: screenshotArtifacts.map((item) => item.id), ...(repositoryUrl ? { repositoryUrl } : {}), ...(liveUrl ? { liveUrl } : {}), createdAt: now }, ...(repositorySnapshot ? { repositorySnapshot } : {}), ...(liveProductSnapshot ? { liveProductSnapshot } : {}), ...(screenshotArtifacts.length ? { screenshotArtifacts } : {}), changeRequests, findings: [...traceFindings, ...userFindings, ...technicalFindings({ iteration: current, evidenceText, now })], evidence: trace.evidence, traceability: trace.traceability, suggestions, reviewedAt: now, report, updatedAt: now };
       if (screenshotArtifacts.length) await recordGuidedUsage({ userId: user.id, projectId: project.id, phase: "screenshot_analysis", model: providerModelId(project.selectedModel), requestId: screenshotRequestId });
+      let semanticReviewMs = 0;
       try {
-        const inference = await runIterationReviewInference({ apiKey: connection.apiKey, project, memory, iteration: reviewed, history: allIterations.filter((item) => item.id !== current.id) });
+        const semanticStarted = Date.now();
+        const inference = await runOrbioInference(user.id, () => runIterationReviewInference({ apiKey: connection.apiKey, project, memory, iteration: reviewed, history: allIterations.filter((item) => item.id !== current.id) }), connection);
+        semanticReviewMs = Date.now() - semanticStarted;
         const semanticFindings = findingsFromTraceability({ iteration: current, traceability: inference.traceability, now });
         reviewed.traceability = inference.traceability;
         reviewed.evidence = inference.evidence;
@@ -537,9 +633,13 @@ export function guidedRouter(): express.Router {
         reviewed.report = report;
         await recordGuidedUsage({ userId: user.id, projectId: project.id, phase: "semantic_review", model: inference.model, requestId: inference.requestId, usage: inference.usage });
       } catch (error) {
+        if (error instanceof PersistenceError && error.code === "ORBIO_KEY_EXPIRED_OR_INVALID") throw error;
         console.error("[guided-project] review synthesis failed", error instanceof Error ? error.message : "unknown");
       }
+      const persistenceStarted = Date.now();
       await saveIteration(reviewed);
+      const persistenceMs = Date.now() - persistenceStarted;
+      logPerf("repository_review", perfRequestId, { databaseReadMs, repositoryFetchMs, liveInspectionMs, screenshotAnalysisMs, evidenceTotalMs, semanticReviewMs, persistenceMs, totalMs: Date.now() - perfStarted });
       response.json({ success: true, data: reviewed });
     } catch (error) { errorResponse(response, error); }
   });
@@ -563,7 +663,9 @@ export function guidedRouter(): express.Router {
         const messages = await loadSuggestionDiscussion(suggestion.id, project.id);
         let changes: Array<{ description: string; rationale?: string }> = [{ description: `${suggestion.title}: ${suggestion.description}`, rationale: suggestion.rationale }];
         if (messages.length) {
-          const scoped = await runSuggestionScopeInference({ apiKey: (await getVerifiedOrbioConnection(user.id)).apiKey, project, memory: (await snapshotForUser(project.id, user.id)).memory, suggestion, messages });
+          const [credential, memory] = await Promise.all([loadOrbioCredentialForInference(user.id), loadMemory(project.id)]);
+          if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
+          const scoped = await runOrbioInference(user.id, () => runSuggestionScopeInference({ apiKey: credential.apiKey, project, memory, suggestion, messages }), credential);
           changes = scoped.changes;
           await recordGuidedUsage({ userId: user.id, projectId: project.id, phase: "suggestion_scope", model: scoped.model, requestId: scoped.requestId, usage: scoped.usage });
         }
@@ -595,14 +697,18 @@ export function guidedRouter(): express.Router {
       const messages = await loadSuggestionDiscussion(suggestion.id, project.id);
       const now = new Date().toISOString();
       const userMessage = { id: randomUUID(), suggestionId: suggestion.id, iterationId: iteration.id, projectId: project.id, role: "user" as const, content, createdAt: now };
-      const inference = await runSuggestionDiscussionInference({ apiKey: (await getVerifiedOrbioConnection(user.id)).apiKey, project, memory: (await snapshotForUser(project.id, user.id)).memory, suggestion, messages, userMessage: content });
+      const [credential, memory] = await Promise.all([loadOrbioCredentialForInference(user.id), loadMemory(project.id)]);
+      if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
+      const inference = await runOrbioInference(user.id, () => runSuggestionDiscussionInference({ apiKey: credential.apiKey, project, memory, suggestion, messages, userMessage: content }), credential);
       const assistantMessage = { id: randomUUID(), suggestionId: suggestion.id, iterationId: iteration.id, projectId: project.id, role: "assistant" as const, content: inference.assistantMessage, createdAt: new Date().toISOString() };
-      await saveSuggestionDiscussionMessage(userMessage);
-      await saveSuggestionDiscussionMessage(assistantMessage);
       const discussion = [...messages, userMessage, assistantMessage];
       const updated = { ...iteration, status: "discussing" as const, suggestions: iteration.suggestions.map((item) => item.id === suggestion.id ? { ...item, status: "discussing" as const } : item), discussions: [...(iteration.discussions ?? []).filter((item) => item.suggestionId !== suggestion.id), ...discussion], updatedAt: assistantMessage.createdAt };
-      await saveIteration(updated);
-      await recordGuidedUsage({ userId: user.id, projectId: project.id, phase: "suggestion_discussion", model: inference.model, requestId: inference.requestId, usage: inference.usage });
+      await Promise.all([
+        saveSuggestionDiscussionMessage(userMessage),
+        saveSuggestionDiscussionMessage(assistantMessage),
+        saveIteration(updated),
+        recordGuidedUsage({ userId: user.id, projectId: project.id, phase: "suggestion_discussion", model: inference.model, requestId: inference.requestId, usage: inference.usage }),
+      ]);
       response.json({ success: true, data: { iteration: updated, messages: discussion } });
     } catch (error) { errorResponse(response, error); }
   });
@@ -643,15 +749,16 @@ export function guidedRouter(): express.Router {
       const project = await projectForUser(request.params.projectId, user.id);
       const iteration = await iterationForUser(request.params.iterationId, user.id);
       if (iteration.projectId !== project.id) throw new PersistenceError("ITERATION_NOT_FOUND", "That iteration was not found.", 404);
-      const snapshot = await snapshotForUser(project.id, user.id);
+      const [memoryState, credential] = await Promise.all([loadMemory(project.id), loadOrbioCredentialForInference(user.id)]);
+      if (!memoryState) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
       const acceptedChanges = iteration.changeRequests.filter((item) => item.status === "accepted");
       const accepted = [...acceptedChanges.map((item) => item.description), ...iteration.suggestions.filter((item) => item.status === "accepted" && !acceptedChanges.some((change) => change.id.includes(item.id))).map((item) => `${item.title}: ${item.description}`)];
       if (!accepted.length) { response.json({ success: true, data: iteration }); return; }
       const now = new Date().toISOString();
-      const impact = await runChangeImpactInference({ apiKey: (await getVerifiedOrbioConnection(user.id)).apiKey, project, memory: snapshot.memory, changes: accepted });
-      const proposal = validateInterviewProposal({ raw: { requirements: [...impact.requirements.new, ...impact.requirements.modified], acceptanceCriteria: [...impact.acceptanceCriteria.new, ...impact.acceptanceCriteria.modified] }, memory: snapshot.memory, userContent: accepted.join("\n"), sourceMessageId: `iteration:${iteration.id}`, now });
+      const impact = await runOrbioInference(user.id, () => runChangeImpactInference({ apiKey: credential.apiKey, project, memory: memoryState, changes: accepted }), credential);
+      const proposal = validateInterviewProposal({ raw: { requirements: [...impact.requirements.new, ...impact.requirements.modified], acceptanceCriteria: [...impact.acceptanceCriteria.new, ...impact.acceptanceCriteria.modified] }, memory: memoryState, userContent: accepted.join("\n"), sourceMessageId: `iteration:${iteration.id}`, now });
       const superseded = new Set(impact.requirements.superseded);
-      const memory = { ...snapshot.memory, requirements: proposal.requirements.map((item) => superseded.has(item.id) ? { ...item, status: "superseded" as const, version: item.version + 1, updatedAt: now } : item), acceptanceCriteria: proposal.acceptanceCriteria, risks: [...new Set([...snapshot.memory.risks, ...impact.risks])], technicalConstraints: [...new Set([...snapshot.memory.technicalConstraints, ...impact.securityImplications.map((item) => `Security: ${item}`), ...impact.dataModelChanges.map((item) => `Data model: ${item}`), ...impact.integrationChanges.map((item) => `Integration: ${item}`)])], version: snapshot.memory.version + 1, updatedAt: now };
+      const memory = { ...memoryState, requirements: proposal.requirements.map((item) => superseded.has(item.id) ? { ...item, status: "superseded" as const, version: item.version + 1, updatedAt: now } : item), acceptanceCriteria: proposal.acceptanceCriteria, risks: [...new Set([...memoryState.risks, ...impact.risks])], technicalConstraints: [...new Set([...memoryState.technicalConstraints, ...impact.securityImplications.map((item) => `Security: ${item}`), ...impact.dataModelChanges.map((item) => `Data model: ${item}`), ...impact.integrationChanges.map((item) => `Integration: ${item}`)])], version: memoryState.version + 1, updatedAt: now };
       await saveMemory(memory);
       await insertRequirements(project.id, memory.requirements);
       await insertAcceptanceCriteria(project.id, structuredAcceptanceCriteria(memory));
@@ -674,19 +781,25 @@ export function guidedRouter(): express.Router {
       const project = await projectForUser(request.params.projectId, user.id);
       const iteration = await iterationForUser(request.params.iterationId, user.id);
       if (iteration.projectId !== project.id) throw new PersistenceError("ITERATION_NOT_FOUND", "That iteration was not found.", 404);
-      const snapshot = await snapshotForUser(project.id, user.id);
-      const srs = await loadLatestSrs(project.id);
-      const architecture = await loadLatestArchitecture(project.id);
+      const [memory, srs, architecture, credential] = await Promise.all([
+        loadMemory(project.id),
+        loadLatestSrs(project.id),
+        loadLatestArchitecture(project.id),
+        loadOrbioCredentialForInference(user.id),
+      ]);
+      if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
       const needsSpecificationUpdate = iteration.changeRequests.some((item) => item.status === "accepted") || iteration.suggestions.some((item) => item.status === "accepted") || iteration.findings.some((item) => item.status === "accepted" && item.specificationAffected);
       if (needsSpecificationUpdate && !iteration.resultingSrsVersionId) throw new PersistenceError("CHANGE_APPROVAL_REQUIRED", "Apply the accepted changes and review the resulting specification before generating the next prompt.", 400);
       if (!srs || srs.status !== "approved") throw new PersistenceError("SRS_APPROVAL_REQUIRED", "Approve the current SRS before generating the next implementation prompt.", 400);
-      const draft = generateIterationPrompt({ iteration, memory: snapshot.memory, srs, architecture });
-      const inference = await runIterationPromptInference({ apiKey: (await getVerifiedOrbioConnection(user.id)).apiKey, project, draftPrompt: draft.prompt });
+      const draft = generateIterationPrompt({ iteration, memory, srs, architecture });
+      const inference = await runOrbioInference(user.id, () => runIterationPromptInference({ apiKey: credential.apiKey, project, draftPrompt: draft.prompt }), credential);
       const prompt = { ...draft, prompt: inference.prompt };
       const updated = { ...iteration, generatedPrompt: prompt, status: "prompt_ready" as const, updatedAt: new Date().toISOString() };
-      await saveIteration(updated);
-      await saveIterationPrompt(prompt);
-      await recordGuidedUsage({ userId: user.id, projectId: project.id, phase: "correction_prompt", model: inference.model, requestId: inference.requestId, usage: inference.usage });
+      await Promise.all([
+        saveIteration(updated),
+        saveIterationPrompt(prompt),
+        recordGuidedUsage({ userId: user.id, projectId: project.id, phase: "correction_prompt", model: inference.model, requestId: inference.requestId, usage: inference.usage }),
+      ]);
       response.json({ success: true, data: { iteration: updated, prompt } });
     } catch (error) { errorResponse(response, error); }
   });

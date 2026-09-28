@@ -355,6 +355,9 @@ TRANSCRIPTION_API_KEY=
 TRANSCRIPTION_MODEL=openai/whisper-large-v3-turbo
 TRANSCRIPTION_REQUEST_MODE=json_base64
 TRANSCRIPTION_TIMEOUT_MS=60000
+
+# Cache only safe Orbio connection metadata for two minutes
+ORBIO_STATUS_CACHE_MS=120000
 ```
 
 `CREDENTIAL_ENCRYPTION_KEY` must be one stable 32-byte value encoded as 64 hexadecimal
@@ -395,6 +398,22 @@ returns the raw key or handles top-up payments.
 
 The browser calls the backend directly, because writing a prompt takes long enough that a
 serverless function would time out first.
+
+### Latency operations
+
+The backend emits safe `[perf]` stage timings for project creation, interview turns, and
+repository review. Provider logs contain the selected model and provider duration, but never API
+keys, prompts, personal content, ciphertext, or authorization headers. Run the controlled local
+round-trip benchmark with `cd server && npm run benchmark:perf`; treat its result as an
+orchestration comparison, and use deployed `[perf]` logs for real before/after latency.
+
+`GET /health` exposes only safe cold-start diagnostics (`startedAt`, `uptimeSeconds`, and a short
+deployment commit). A sleeping Render instance can still add platform cold-start latency; Promgent
+does not create fake keep-alive traffic.
+
+Record the active Render and Supabase regions in the deployment runbook. Keep the backend near the
+database when the hosting plans permit it; this repository does not migrate infrastructure
+automatically.
 
 ### LLM budget
 

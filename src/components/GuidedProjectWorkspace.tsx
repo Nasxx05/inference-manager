@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, LogOut, Plus, RefreshCw } from "lucide-react";
 import { MODELS } from "@/data/models";
 import type { GuidedProjectSnapshot, PlanningDepth, ProjectRecord, ProjectUsageSummary, SrsDocument } from "@/types/project";
-import { approveSrs, connectOrbio, createProject, disconnectOrbio, generateArchitecture, generateProjectPlan, generateSrs, getOrbioStatus, getSession, isUsableOrbioStatus, listProjects, loadProject, sendInterview, signIn, signOut, signUp, transcribeAudio, GuidedApiError, type GuidedUser, type OrbioBalance, type OrbioConnectionState, type OrbioStatus } from "@/lib/guidedApi";
+import { approveSrs, connectOrbio, createProject, disconnectOrbio, generateArchitecture, generateProjectPlan, generateSrs, getOrbioBalance, getOrbioStatus, getProjectUsage, getSession, isUsableOrbioStatus, listProjects, loadProject, sendInterview, signIn, signOut, signUp, transcribeAudio, GuidedApiError, type GuidedUser, type OrbioBalance, type OrbioConnectionState, type OrbioStatus } from "@/lib/guidedApi";
 import { ORBIO_ACCOUNT_URL, EXTERNAL_LINK_REL } from "@/lib/externalLinks";
 import { Button, Field, Select } from "./ui";
 import { IterationWorkspace } from "./IterationWorkspace";
@@ -59,7 +59,14 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
 
   async function refreshProjects() {
     setBusy(true);
-    try { const [nextProjects, status] = await Promise.all([listProjects(), getOrbioStatus()]); setProjects(nextProjects); applyOrbioStatus(status); setMode("projects"); setError(null); }
+    try {
+      const nextProjects = await listProjects();
+      setProjects(nextProjects); setMode("projects"); setError(null);
+      void getOrbioStatus().then((status) => {
+        applyOrbioStatus(status);
+        if (status.connected && status.status === "active") void getOrbioBalance().then(setOrbioBalance).catch(() => undefined);
+      }).catch(() => applyOrbioStatus({ connected: false, status: "disconnected", modelIds: [], balance: null }));
+    }
     catch (caught) { setError(caught instanceof Error ? caught.message : "Could not load projects."); }
     finally { setBusy(false); }
   }
@@ -134,7 +141,8 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
     setBusy(true); setError(null);
     try {
       const result = await sendInterview(snapshot.project.id, message);
-      setSnapshot((current) => current ? { ...current, memory: result.memory, interview: result.session, messages: [...current.messages, result.userMessage, result.assistantMessage], usage: result.usage } : current);
+      setSnapshot((current) => current ? { ...current, memory: result.memory, interview: result.session, messages: [...current.messages, result.userMessage, result.assistantMessage], usage: result.usage ?? current.usage } : current);
+      void getProjectUsage(snapshot.project.id).then((usage) => setSnapshot((current) => current ? { ...current, usage } : current)).catch(() => undefined);
       setMessage("");
       setMessageSource("text");
     } catch (caught) { setError(caught instanceof Error ? caught.message : "The interview turn failed."); }

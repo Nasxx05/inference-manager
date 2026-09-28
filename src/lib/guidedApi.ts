@@ -65,6 +65,14 @@ export function getOrbioStatus(): Promise<OrbioStatus> {
   return call("/api/orbio/status");
 }
 
+export function refreshOrbioStatus(): Promise<OrbioStatus> {
+  return call("/api/orbio/status/refresh", { method: "POST" });
+}
+
+export function getOrbioBalance(): Promise<OrbioBalance | null> {
+  return call("/api/orbio/balance");
+}
+
 export function connectOrbio(apiKey: string): Promise<OrbioStatus> {
   return call("/api/orbio/connect", { method: "POST", body: JSON.stringify({ apiKey }) });
 }
@@ -98,7 +106,7 @@ export function loadProject(projectId: string): Promise<GuidedProjectSnapshot> {
 }
 
 export function sendInterview(projectId: string, content: string, source: "text" | "voice_transcript" = "text") {
-  return call<{ memory: ProjectMemory; session: InterviewSession; userMessage: GuidedProjectSnapshot["messages"][number]; assistantMessage: GuidedProjectSnapshot["messages"][number]; usage: ProjectUsageSummary }>(`/api/projects/${encodeURIComponent(projectId)}/interview`, { method: "POST", body: JSON.stringify({ content, source }) });
+  return call<{ memory: ProjectMemory; session: InterviewSession; userMessage: GuidedProjectSnapshot["messages"][number]; assistantMessage: GuidedProjectSnapshot["messages"][number]; usage?: ProjectUsageSummary; timing?: { providerInferenceMs: number; promgentOverheadMs: number } }>(`/api/projects/${encodeURIComponent(projectId)}/interview`, { method: "POST", body: JSON.stringify({ content, source }) });
 }
 
 export function getProjectUsage(projectId: string): Promise<ProjectUsageSummary> {

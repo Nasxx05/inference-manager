@@ -529,29 +529,52 @@ export async function saveProjectSession(session: InterviewSession): Promise<voi
   });
 }
 
+async function loadLatestInterviewSession(projectId: string): Promise<InterviewSession | null> {
+  const sessions = await request<Record<string, unknown>[]>({
+    path: `/rest/v1/interview_sessions?select=*&project_id=eq.${query(projectId)}&order=created_at.desc&limit=1`,
+  });
+  return sessions[0] ? sessionFromRow(sessions[0]) : null;
+}
+
+export interface InterviewState {
+  project: ProjectRecord;
+  memory: ProjectMemory;
+  interview: InterviewSession;
+}
+
+/**
+ * Loads only the canonical state required for one Requirements Agent turn.
+ * Ownership is established first; memory and session reads then run in parallel.
+ */
+export async function loadInterviewStateForUser(projectId: string, userId: string): Promise<InterviewState> {
+  const project = await projectForUser(projectId, userId);
+  const [memory, session] = await Promise.all([
+    loadMemory(project.id),
+    loadLatestInterviewSession(project.id),
+  ]);
+  if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
+  if (!session) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no interview session.", 500);
+  return { project, memory, interview: session };
+}
+
 export async function updateProjectStatus(projectId: string, status: ProjectRecord["status"]): Promise<void> {
   await request({ path: `/rest/v1/projects?id=eq.${query(projectId)}`, method: "PATCH", body: { status, updated_at: new Date().toISOString() } });
 }
 
 export async function snapshotForUser(projectId: string, userId: string): Promise<GuidedProjectSnapshot> {
   const project = await projectForUser(projectId, userId);
-  const memory = await loadMemory(projectId);
-  if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
-  const sessions = await request<Record<string, unknown>[]>({
-    path: `/rest/v1/interview_sessions?select=*&project_id=eq.${query(projectId)}&order=created_at.desc&limit=1`,
-  });
-  const session = sessions[0] ? sessionFromRow(sessions[0]) : null;
-  if (!session) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no interview session.", 500);
-  const messages = await request<Record<string, unknown>[]>({
-    path: `/rest/v1/interview_messages?select=*&project_id=eq.${query(projectId)}&order=created_at.asc`,
-  });
-  const [references, implementationPlan, architecture, srs, usage] = await Promise.all([
+  const [memory, session, messages, references, implementationPlan, architecture, srs, usage] = await Promise.all([
+    loadMemory(project.id),
+    loadLatestInterviewSession(project.id),
+    request<Record<string, unknown>[]>({ path: `/rest/v1/interview_messages?select=*&project_id=eq.${query(project.id)}&order=created_at.asc` }),
     loadProjectReferences(projectId),
     loadLatestProjectPlan(projectId),
     loadLatestArchitecture(projectId),
     loadLatestSrs(projectId),
     loadProjectUsage(projectId, userId, project.creditBudget),
   ]);
+  if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
+  if (!session) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no interview session.", 500);
   return {
     project,
     memory,
