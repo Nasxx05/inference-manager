@@ -32,12 +32,20 @@ export interface OrbioConnectionRecord {
 export class PersistenceError extends Error {
   readonly code: string;
   readonly status: number;
-  constructor(code: string, message: string, status = 503) {
+  readonly upstream?: { code?: string; message?: string; details?: string; hint?: string };
+  constructor(code: string, message: string, status = 503, upstream?: { code?: string; message?: string; details?: string; hint?: string }) {
     super(message);
     this.name = "PersistenceError";
     this.code = code;
     this.status = status;
+    this.upstream = upstream;
   }
+}
+
+interface SupabaseRequestContext {
+  requestId?: string;
+  operation?: string;
+  projectId?: string;
 }
 
 function supabaseUrl(): string {
@@ -71,16 +79,19 @@ async function request<T>(input: {
   body?: unknown;
   accessToken?: string;
   auth?: boolean;
+  context?: SupabaseRequestContext;
 }): Promise<T> {
   requireConfigured();
+  const requestApiKey = input.auth ? anonKey() : serviceRoleKey();
   const headers: Record<string, string> = {
-    apikey: input.auth ? anonKey() : serviceRoleKey(),
+    apikey: requestApiKey,
     "Content-Type": "application/json",
   };
   if (input.method === "POST" && input.path.startsWith("/rest/v1/")) {
     headers.Prefer = "resolution=merge-duplicates,return=representation";
   }
   if (input.accessToken) headers.Authorization = `Bearer ${input.accessToken}`;
+  else if (!input.auth) headers.Authorization = `Bearer ${requestApiKey}`;
   const response = await fetch(`${supabaseUrl()}${input.path}`, {
     method: input.method ?? "GET",
     headers,
@@ -94,16 +105,33 @@ async function request<T>(input: {
     payload = raw;
   }
   if (!response.ok) {
-    const diagnostic = typeof payload === "object" && payload !== null && "message" in payload
-      ? String((payload as { message?: unknown }).message)
-      : "The persistence service rejected the request.";
-    console.error(`[persistence] method=${input.method ?? "GET"} path=${input.path} status=${response.status} detail=${diagnostic.slice(0, 500)}`);
+    const errorPayload = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+    const upstream = {
+      ...(errorPayload.code ? { code: String(errorPayload.code).slice(0, 100) } : {}),
+      message: String(errorPayload.message ?? "The Supabase service rejected the request.").slice(0, 500),
+      ...(errorPayload.details ? { details: String(errorPayload.details).slice(0, 500) } : {}),
+      ...(errorPayload.hint ? { hint: String(errorPayload.hint).slice(0, 500) } : {}),
+    };
+    console.error("[supabase]", JSON.stringify({
+      requestId: input.context?.requestId ?? "unassigned",
+      operation: input.context?.operation ?? "supabase.request",
+      httpStatus: response.status,
+      supabaseCode: upstream.code ?? null,
+      message: upstream.message,
+      details: upstream.details ?? null,
+      hint: upstream.hint ?? null,
+      projectId: input.context?.projectId ?? null,
+    }));
+    const authValidation = input.context?.operation === "auth.validate_session" && (response.status === 401 || response.status === 403);
     throw new PersistenceError(
-      "PERSISTENCE_REQUEST_FAILED",
-      input.path.startsWith("/rest/v1/")
+      authValidation ? "AUTH_VALIDATION_FAILED" : "PERSISTENCE_REQUEST_FAILED",
+      authValidation
+        ? "Your Supabase session is invalid or expired. Please sign in again."
+        : input.path.startsWith("/rest/v1/")
         ? "The persistence service could not complete the request."
         : "The authentication service could not complete the request.",
       response.status,
+      upstream,
     );
   }
   return payload as T;
@@ -113,6 +141,16 @@ export interface AuthResponse {
   access_token?: string;
   refresh_token?: string;
   user?: AuthUser;
+}
+
+export async function refreshAuthSession(refreshToken: string, requestId?: string): Promise<AuthResponse> {
+  return request<AuthResponse>({
+    path: "/auth/v1/token?grant_type=refresh_token",
+    method: "POST",
+    auth: true,
+    body: { refresh_token: refreshToken },
+    context: { requestId, operation: "auth.refresh_session" },
+  });
 }
 
 export async function signUp(email: string, password: string): Promise<AuthResponse> {
@@ -133,8 +171,13 @@ export async function signIn(email: string, password: string): Promise<AuthRespo
   });
 }
 
-export async function userForToken(accessToken: string): Promise<AuthUser> {
-  return request<AuthUser>({ path: "/auth/v1/user", accessToken, auth: true });
+export async function userForToken(accessToken: string, requestId?: string): Promise<AuthUser> {
+  return request<AuthUser>({
+    path: "/auth/v1/user",
+    accessToken,
+    auth: true,
+    context: { requestId, operation: "auth.validate_session" },
+  });
 }
 
 function query(value: string): string {
@@ -426,6 +469,7 @@ export async function persistInterviewTurnAtomic(input: {
   assistantMessage: InterviewMessage;
   memory: ProjectMemory;
   session: InterviewSession;
+  requestId?: string;
 }): Promise<void> {
   try {
     await request({
@@ -454,12 +498,33 @@ export async function persistInterviewTurnAtomic(input: {
         })),
         p_session: sessionToRow(input.session),
       },
+      context: { requestId: input.requestId, operation: "interview.persist_turn", projectId: input.projectId },
     });
   } catch (error) {
-    console.error("[interview-persistence] atomic turn failed", error instanceof Error ? error.message : "unknown");
+    const upstream = error instanceof PersistenceError ? error.upstream : undefined;
+    const rpcNotFound = error instanceof PersistenceError
+      && (error.status === 404 || upstream?.code === "PGRST202" || /could not find the function/i.test(upstream?.message ?? ""));
+    const code = rpcNotFound
+      ? "INTERVIEW_RPC_NOT_FOUND"
+      : error instanceof PersistenceError
+        ? "INTERVIEW_RPC_FAILED"
+        : "INTERVIEW_PERSISTENCE_FAILED";
+    console.error("[interview-persistence]", JSON.stringify({
+      requestId: input.requestId ?? "unassigned",
+      operation: "interview.persist_turn",
+      httpStatus: error instanceof PersistenceError ? error.status : null,
+      supabaseCode: upstream?.code ?? null,
+      message: upstream?.message ?? (error instanceof Error ? error.message : "Unknown persistence failure"),
+      details: upstream?.details ?? null,
+      hint: upstream?.hint ?? null,
+      projectId: input.projectId,
+      errorCode: code,
+    }));
     throw new PersistenceError(
-      "INTERVIEW_PERSISTENCE_FAILED",
-      "Promgent could not save this interview response. Your previous project state was preserved.",
+      code,
+      rpcNotFound
+        ? "Promgent's interview persistence function is unavailable. Your previous project state was preserved."
+        : "Promgent could not save this interview response. Your previous project state was preserved.",
       503,
     );
   }

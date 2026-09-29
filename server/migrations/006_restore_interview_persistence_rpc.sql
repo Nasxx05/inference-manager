@@ -1,8 +1,16 @@
--- Reliability repair: persist an entire interview turn as one database
--- transaction. PostgreSQL rolls back every statement in this function if any
--- cast, constraint, insert, upsert, or session update fails.
+-- Production repair for environments where migration 005 was recorded or
+-- deployed without the RPC becoming visible to PostgREST. This migration is
+-- deliberately self-contained and idempotent.
 
-create or replace function public.persist_interview_turn(
+begin;
+
+-- Dropping only the expected identity signature also repairs a function whose
+-- input parameter names differ: PostgreSQL cannot rename input parameters via
+-- CREATE OR REPLACE. Migration runners apply this file transactionally, so
+-- callers never observe a half-created replacement.
+drop function if exists public.persist_interview_turn(uuid, uuid, jsonb, jsonb, jsonb, integer, jsonb, jsonb, jsonb);
+
+create function public.persist_interview_turn(
   p_user_id uuid,
   p_project_id uuid,
   p_user_message jsonb,
@@ -97,6 +105,6 @@ $$;
 revoke all on function public.persist_interview_turn(uuid, uuid, jsonb, jsonb, jsonb, integer, jsonb, jsonb, jsonb) from public;
 grant execute on function public.persist_interview_turn(uuid, uuid, jsonb, jsonb, jsonb, integer, jsonb, jsonb, jsonb) to service_role;
 
--- PostgREST normally observes DDL automatically. This explicit notification
--- prevents a newly deployed RPC from remaining absent from its schema cache.
 notify pgrst, 'reload schema';
+
+commit;

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { createInitialMemory, createProjectRecord } from "@/lib/projectMemory";
 import { canRenderProjectMode, canReviewImplementation, resolveProjectWorkspaceMode, safeProjectReturnMode } from "@/lib/projectLifecycle";
-import { persistInterviewTurnAtomic, PersistenceError } from "../server/src/persistence";
+import { persistInterviewTurnAtomic, PersistenceError, refreshAuthSession, userForToken } from "../server/src/persistence";
 import type { GuidedProjectSnapshot, InterviewMessage, InterviewSession } from "@/types/project";
 
 function snapshot(): GuidedProjectSnapshot {
@@ -18,6 +18,7 @@ function snapshot(): GuidedProjectSnapshot {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   delete process.env.SUPABASE_URL;
   delete process.env.SUPABASE_ANON_KEY;
@@ -47,6 +48,7 @@ describe("atomic interview persistence", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toContain("/rpc/persist_interview_turn");
+    expect(init.headers).toMatchObject({ apikey: "service", Authorization: "Bearer service" });
     const body = JSON.parse(String(init.body));
     expect(body.p_user_message.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(body.p_assistant_message.id).toMatch(/^[0-9a-f-]{36}$/);
@@ -56,7 +58,7 @@ describe("atomic interview persistence", () => {
     expect(body).toHaveProperty("p_session");
   });
 
-  it("normalizes a failed child write as one rollback-safe error", async () => {
+  it("normalizes a failed child write as an RPC failure", async () => {
     configured();
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ message: "private database constraint detail" }), { status: 409 }));
@@ -64,18 +66,85 @@ describe("atomic interview persistence", () => {
     const error = await persistInterviewTurnAtomic(turnInput()).catch((caught) => caught);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(error).toBeInstanceOf(PersistenceError);
-    expect(error.code).toBe("INTERVIEW_PERSISTENCE_FAILED");
+    expect(error.code).toBe("INTERVIEW_RPC_FAILED");
     expect(error.message).not.toContain("constraint detail");
   });
 
+  it("distinguishes a missing PostgREST RPC from other persistence failures", async () => {
+    configured();
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ code: "PGRST202", message: "Could not find the function public.persist_interview_turn", details: "schema cache miss", hint: "reload schema" }), { status: 404 })));
+    const error = await persistInterviewTurnAtomic({ ...turnInput(), requestId: "req-persist-1" }).catch((caught) => caught);
+    expect(error.code).toBe("INTERVIEW_RPC_NOT_FOUND");
+    const logs = log.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+    expect(logs).toContain('"requestId":"req-persist-1"');
+    expect(logs).toContain('"operation":"interview.persist_turn"');
+    expect(logs).toContain('"httpStatus":404');
+    expect(logs).toContain('"supabaseCode":"PGRST202"');
+    expect(logs).toContain(`"projectId":"${turnInput().projectId}"`);
+  });
+
+  it("uses the generic persistence code for a transport failure", async () => {
+    configured();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network unavailable")));
+    const error = await persistInterviewTurnAtomic(turnInput()).catch((caught) => caught);
+    expect(error.code).toBe("INTERVIEW_PERSISTENCE_FAILED");
+  });
+
   it("defines all turn writes in the same PostgreSQL function", () => {
-    const sql = readFileSync("server/migrations/005_reliability_repairs.sql", "utf8");
+    const sql = readFileSync("server/migrations/006_restore_interview_persistence_rpc.sql", "utf8");
+    expect(sql).toContain("drop function if exists public.persist_interview_turn(uuid, uuid, jsonb, jsonb, jsonb, integer, jsonb, jsonb, jsonb)");
     expect(sql).toContain("insert into public.interview_messages");
     expect(sql).toContain("insert into public.project_memory");
     expect(sql).toContain("insert into public.requirements");
     expect(sql).toContain("insert into public.acceptance_criteria");
     expect(sql).toContain("update public.interview_sessions");
     expect(sql).toContain("raise exception 'interview session update failed'");
+    expect(sql).toContain("notify pgrst, 'reload schema'");
+    expect(sql).toContain("p_acceptance_criteria jsonb");
+    expect(sql).toContain("p_assistant_message jsonb");
+    expect(sql).toContain("p_memory_version integer");
+  });
+});
+
+describe("Supabase authentication contract", () => {
+  function configured() {
+    process.env.SUPABASE_URL = "https://database.example";
+    process.env.SUPABASE_ANON_KEY = "anon";
+    process.env.SUPABASE_SERVICE_ROLE_KEY = "service";
+  }
+
+  it("validates a user with the anon API key and the access-token bearer", async () => {
+    configured();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: "user" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await userForToken("user-access-token", "req-auth-1");
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect(init.headers).toMatchObject({ apikey: "anon", Authorization: "Bearer user-access-token" });
+  });
+
+  it("classifies a 403 session response without logging the bearer token", async () => {
+    configured();
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ code: "bad_jwt", message: "JWT expired" }), { status: 403 })));
+    const error = await userForToken("secret-user-access-token", "req-auth-2").catch((caught) => caught);
+    expect(error.code).toBe("AUTH_VALIDATION_FAILED");
+    const logs = log.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+    expect(logs).toContain('"operation":"auth.validate_session"');
+    expect(logs).not.toContain("secret-user-access-token");
+  });
+
+  it("refreshes through the anon-key auth endpoint without exposing the refresh token", async () => {
+    configured();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: "new-access", refresh_token: "new-refresh", user: { id: "user" } }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await refreshAuthSession("secret-refresh-token", "req-auth-3");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("grant_type=refresh_token");
+    expect(init.headers).toMatchObject({ apikey: "anon" });
+    expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
+    expect(JSON.parse(String(init.body))).toEqual({ refresh_token: "secret-refresh-token" });
   });
 });
 

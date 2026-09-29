@@ -30,6 +30,7 @@ import {
   persistenceConfigured,
   projectForUser,
   projectUsageForUser,
+  refreshAuthSession,
   saveArchitecture,
   saveMemory,
   saveProjectSession,
@@ -68,6 +69,7 @@ import type { ReferenceAnalysis, ReferenceInput } from "@/lib/reference/types";
 import { MultipartError, parseMultipart } from "./multipart";
 
 const SESSION_COOKIE = "promgent_session";
+const REFRESH_COOKIE = "promgent_refresh";
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60;
 
 function logPerf(route: string, requestId: string, fields: Record<string, number | string>): void {
@@ -86,23 +88,45 @@ function cookies(request: express.Request): Record<string, string> {
   }));
 }
 
-function setSession(response: express.Response, token: string): void {
+function setSession(response: express.Response, token: string, refreshToken?: string): void {
   const production = process.env.NODE_ENV === "production";
   const attributes = production ? "; Secure; SameSite=None" : "; SameSite=Lax";
-  response.setHeader("Set-Cookie", `${SESSION_COOKIE}=${encodeURIComponent(token)}; Max-Age=${SESSION_MAX_AGE}; Path=/; HttpOnly${attributes}`);
+  const values = [`${SESSION_COOKIE}=${encodeURIComponent(token)}; Max-Age=${SESSION_MAX_AGE}; Path=/; HttpOnly${attributes}`];
+  values.push(refreshToken
+    ? `${REFRESH_COOKIE}=${encodeURIComponent(refreshToken)}; Max-Age=${SESSION_MAX_AGE}; Path=/; HttpOnly${attributes}`
+    : `${REFRESH_COOKIE}=; Max-Age=0; Path=/; HttpOnly${attributes}`);
+  response.setHeader("Set-Cookie", values);
 }
 
 function clearSession(response: express.Response): void {
-  response.setHeader("Set-Cookie", `${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`);
+  const production = process.env.NODE_ENV === "production";
+  const attributes = production ? "; Secure; SameSite=None" : "; SameSite=Lax";
+  response.setHeader("Set-Cookie", [
+    `${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly${attributes}`,
+    `${REFRESH_COOKIE}=; Max-Age=0; Path=/; HttpOnly${attributes}`,
+  ]);
 }
 
 async function authenticatedUser(request: express.Request): Promise<AuthUser> {
-  const token = cookies(request)[SESSION_COOKIE];
+  const stored = cookies(request);
+  const token = stored[SESSION_COOKIE];
+  const requestId = randomUUID();
   if (!token) throw new PersistenceError("AUTH_REQUIRED", "Sign in to use Promgent projects.", 401);
   try {
-    return await userForToken(token);
-  } catch {
-    throw new PersistenceError("AUTH_REQUIRED", "Your session has expired. Please sign in again.", 401);
+    return await userForToken(token, requestId);
+  } catch (error) {
+    if (!(error instanceof PersistenceError) || error.code !== "AUTH_VALIDATION_FAILED") throw error;
+    const refreshToken = stored[REFRESH_COOKIE];
+    if (!refreshToken) throw new PersistenceError("AUTH_VALIDATION_FAILED", "Your session has expired. Please sign in again.", 401);
+    try {
+      const refreshed = await refreshAuthSession(refreshToken, requestId);
+      if (!refreshed.access_token) throw new Error("Supabase returned no access token during refresh.");
+      const response = request.res as express.Response | undefined;
+      if (response) setSession(response, refreshed.access_token, refreshed.refresh_token ?? refreshToken);
+      return refreshed.user ?? await userForToken(refreshed.access_token, requestId);
+    } catch {
+      throw new PersistenceError("AUTH_VALIDATION_FAILED", "Your session has expired. Please sign in again.", 401);
+    }
   }
 }
 
@@ -247,7 +271,7 @@ export function guidedRouter(): express.Router {
       const password = String(input.password ?? "");
       if (!email || password.length < 8) throw new PersistenceError("AUTH_VALIDATION_FAILED", "Use a valid email and a password of at least 8 characters.", 400);
       const result = await signUp(email, password);
-      if (result.access_token) setSession(response, result.access_token);
+      if (result.access_token) setSession(response, result.access_token, result.refresh_token);
       response.status(201).json({ success: true, data: { authenticated: Boolean(result.access_token), user: result.user ? { id: result.user.id, email: result.user.email } : null } });
     } catch (error) { errorResponse(response, error); }
   });
@@ -257,7 +281,7 @@ export function guidedRouter(): express.Router {
       const input = body(request);
       const result = await signIn(String(input.email ?? "").trim(), String(input.password ?? ""));
       if (!result.access_token) throw new PersistenceError("AUTH_FAILED", "Sign in requires email confirmation or returned no session.", 401);
-      setSession(response, result.access_token);
+      setSession(response, result.access_token, result.refresh_token);
       response.json({ success: true, data: { user: result.user ? { id: result.user.id, email: result.user.email } : null } });
     } catch (error) { errorResponse(response, error); }
   });
@@ -445,6 +469,7 @@ export function guidedRouter(): express.Router {
         assistantMessage: result.assistantMessage,
         memory: result.memory,
         session: result.session,
+        requestId: inference.requestId || perfRequestId,
       });
       persistenceMs = Date.now() - persistenceStarted;
       const usageStarted = Date.now();

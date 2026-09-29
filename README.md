@@ -519,6 +519,30 @@ ALLOWED_ORIGINS=https://promgent.vercel.app
 
 Health endpoints: `/health`, `/health/ai`, `/health/ai/test`. None return secrets.
 
+### Supabase migrations
+
+Apply `server/migrations/*.sql` in numeric order through the Supabase CLI or SQL
+Editor before deploying backend code that depends on them. Migration
+`006_restore_interview_persistence_rpc.sql` is an idempotent production repair
+for the guided-interview RPC and explicitly reloads the PostgREST schema cache.
+The service-role REST key cannot apply database DDL by itself.
+
+After applying migration 006, verify the deployed signature in the SQL Editor:
+
+```sql
+select
+  n.nspname as schema_name,
+  p.proname as function_name,
+  pg_get_function_identity_arguments(p.oid) as arguments
+from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public'
+  and p.proname = 'persist_interview_turn';
+```
+
+The result must contain the nine `p_*` parameters declared in migration 006.
+PostgREST should then expose `/rest/v1/rpc/persist_interview_turn`.
+
 The user changes a persistent project's selected model through the project flow. Environment model
 variables do not silently reroute project reasoning.
 
