@@ -248,6 +248,14 @@ describe("atomic interview persistence", () => {
     const routes = readFileSync("server/src/guidedRoutes.ts", "utf8");
     expect(routes).toContain("; Secure; SameSite=None; Partitioned");
   });
+
+  it("routes production browser API calls through the same-origin backend proxy", () => {
+    const config = readFileSync("next.config.mjs", "utf8");
+    const backend = readFileSync("src/lib/backend.ts", "utf8");
+    expect(config).toContain('source: "/backend/:path*"');
+    expect(config).toContain("destination: `${backend}/:path*`");
+    expect(backend).toContain('return isProduction() ? "/backend"');
+  });
 });
 
 describe("Supabase authentication contract", () => {

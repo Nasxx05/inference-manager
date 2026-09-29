@@ -1,11 +1,10 @@
 /**
  * Where the Promgent backend lives.
  *
- * The browser calls the backend directly rather than going through a Next.js
- * route, because writing a prompt takes minutes and a serverless function
- * would time out long before it finished. This means the backend URL is public
- * by necessity: it ships in the JavaScript bundle. It is therefore only ever a
- * URL, never a credential, and the AI key stays on the backend.
+ * Production browser calls use the `/backend` external rewrite configured in
+ * next.config.mjs. The rewrite is a proxy rule rather than a serverless route,
+ * and makes authentication cookies first-party on the Promgent origin. Local
+ * development continues to call the configured backend directly.
  *
  * In production a missing URL is a real failure, not something to paper over:
  * silently defaulting to localhost would send every user's request to their own
@@ -37,7 +36,7 @@ export function backendUrl(): string {
     }
     return DEV_FALLBACK;
   }
-  return normalize(raw);
+  return isProduction() ? "/backend" : normalize(raw);
 }
 
 /** True when a backend URL has actually been configured. Never throws. */

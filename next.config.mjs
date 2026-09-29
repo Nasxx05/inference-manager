@@ -1,6 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  async rewrites() {
+    const backend = process.env.NEXT_PUBLIC_BACKEND_URL?.trim().replace(/\/+$/, "") || "http://localhost:10000";
+    return [{ source: "/backend/:path*", destination: `${backend}/:path*` }];
+  },
   async headers() {
     const backend = process.env.NEXT_PUBLIC_BACKEND_URL?.trim().replace(/\/+$/, "") || "http://localhost:10000";
     const csp = [
