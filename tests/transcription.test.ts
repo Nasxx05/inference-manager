@@ -39,6 +39,8 @@ describe("voice transcription transport", () => {
     ["audio/ogg;codecs=opus", "ogg"],
     ["audio/wav", "wav"],
     ["audio/mpeg", "mp3"],
+    ["audio/mp4", "m4a"],
+    ["audio/aac", "aac"],
   ])("maps %s to %s", (mimeType, expected) => {
     expect(transcriptionFormat(mimeType)).toBe(expected);
   });
@@ -116,6 +118,25 @@ describe("voice transcription transport", () => {
     expect((options?.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
     expect((options?.body as FormData).get("model")).toBe("openai/whisper-large-v3-turbo");
     expect((options?.body as FormData).get("file")).toBeInstanceOf(Blob);
+  });
+
+  it("uses an audio-capable chat completion when explicitly configured", async () => {
+    process.env.TRANSCRIPTION_REQUEST_MODE = "chat_completions";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(providerResponse(200, {
+      choices: [{ message: { content: "spoken through chat" } }],
+    }));
+    const buffer = Buffer.from("audio");
+
+    await expect(transcribeAudio({ buffer, mimeType: "audio/webm" })).resolves.toBe("spoken through chat");
+
+    const options = fetchMock.mock.calls[0][1];
+    const payload = JSON.parse(String(options?.body));
+    expect(payload.messages[0].content).toEqual([
+      { type: "text", text: "Transcribe the spoken words exactly. Return only the transcript." },
+      { type: "input_audio", input_audio: { data: buffer.toString("base64"), format: "webm" } },
+    ]);
+    expect(payload.response_format).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("does not retry with another transport after provider rejection", async () => {

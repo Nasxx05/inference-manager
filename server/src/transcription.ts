@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-type TranscriptionRequestMode = "json_base64" | "multipart";
+type TranscriptionRequestMode = "json_base64" | "multipart" | "chat_completions";
 type ProviderPayload = {
   text?: unknown;
   transcript?: unknown;
   message?: unknown;
   error?: { message?: unknown; code?: unknown } | unknown;
+  choices?: Array<{ message?: { content?: unknown } }>;
 };
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -49,8 +50,8 @@ export function transcriptionFormat(mimeType: string): string {
 
 function requestMode(): TranscriptionRequestMode {
   const configured = String(process.env.TRANSCRIPTION_REQUEST_MODE ?? "json_base64").trim().toLowerCase();
-  if (configured === "json_base64" || configured === "multipart") return configured;
-  throw new TranscriptionError("TRANSCRIPTION_NOT_CONFIGURED", "TRANSCRIPTION_REQUEST_MODE must be json_base64 or multipart.", 503);
+  if (configured === "json_base64" || configured === "multipart" || configured === "chat_completions") return configured;
+  throw new TranscriptionError("TRANSCRIPTION_NOT_CONFIGURED", "TRANSCRIPTION_REQUEST_MODE must be json_base64, multipart, or chat_completions.", 503);
 }
 
 function timeoutMs(): number {
@@ -155,6 +156,20 @@ export async function transcribeAudio(input: { buffer: Buffer; mimeType: string 
   if (mode === "json_base64") {
     headers["Content-Type"] = "application/json";
     body = JSON.stringify({ model, input_audio: { data: input.buffer.toString("base64"), format }, response_format: "json" });
+  } else if (mode === "chat_completions") {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify({
+      model,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "Transcribe the spoken words exactly. Return only the transcript." },
+          { type: "input_audio", input_audio: { data: input.buffer.toString("base64"), format } },
+        ],
+      }],
+      temperature: 0,
+      max_tokens: 2000,
+    });
   } else {
     const form = new FormData();
     form.append("file", new Blob([Uint8Array.from(input.buffer)], { type: input.mimeType }), `recording.${format}`);
@@ -186,7 +201,7 @@ export async function transcribeAudio(input: { buffer: Buffer; mimeType: string 
   logResult({ requestId, status: response.status, model, format, mimeType: input.mimeType, bytes: input.buffer.length, durationMs: Date.now() - started, providerCode: response.ok ? undefined : details.code, providerMessage: response.ok ? undefined : details.message });
   if (!response.ok) throw normalizedProviderError(response.status, details, requestId);
 
-  const text = String(payload?.text ?? payload?.transcript ?? "").trim();
+  const text = String(payload?.text ?? payload?.transcript ?? payload?.choices?.[0]?.message?.content ?? "").trim();
   if (!text) throw new TranscriptionError("TRANSCRIPTION_FAILED", "No speech was detected in the recording.", 502, requestId);
   return text.slice(0, 8000);
 }

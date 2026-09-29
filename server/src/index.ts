@@ -104,7 +104,21 @@ app.use(
 );
 
 app.use(express.json({ limit: "1mb" }));
-app.use(express.raw({ type: ["audio/webm", "audio/ogg", "audio/wav", "audio/mpeg"], limit: "12mb" }));
+app.use(express.raw({
+  type: [
+    "audio/webm",
+    "audio/ogg",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/mpeg",
+    "audio/mp3",
+    "audio/mp4",
+    "audio/m4a",
+    "audio/aac",
+    "audio/flac",
+  ],
+  limit: "12mb",
+}));
 /**
  * Raw body for multipart uploads only.
  *

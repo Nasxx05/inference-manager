@@ -350,10 +350,10 @@ SUPABASE_SERVICE_ROLE_KEY=
 CREDENTIAL_ENCRYPTION_KEY=
 
 # Separate voice transcription configuration (never inherited from chat)
-TRANSCRIPTION_URL=https://api.orbio.so/api/v1/audio/transcriptions
+TRANSCRIPTION_URL=https://api.orbio.so/api/v1/chat/completions
 TRANSCRIPTION_API_KEY=
-TRANSCRIPTION_MODEL=openai/whisper-large-v3-turbo
-TRANSCRIPTION_REQUEST_MODE=json_base64
+TRANSCRIPTION_MODEL=google/gemini-2.5-flash-lite
+TRANSCRIPTION_REQUEST_MODE=chat_completions
 TRANSCRIPTION_TIMEOUT_MS=60000
 
 # Cache only safe Orbio connection metadata for two minutes
