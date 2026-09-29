@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { ArrowLeft, LogOut, Plus, RefreshCw } from "lucide-react";
 import { MODELS } from "@/data/models";
 import type {
@@ -14,8 +15,12 @@ import type {
 import {
   approveSrs,
   connectOrbio,
+  completePasswordReset,
   createProject,
+  deleteAccount,
+  deleteProject,
   disconnectOrbio,
+  exportAccountData,
   generateArchitecture,
   generateProjectPlan,
   generateSrs,
@@ -27,6 +32,8 @@ import {
   listProjects,
   loadProject,
   sendInterview,
+  requestPasswordReset,
+  resendConfirmation,
   signIn,
   signOut,
   signUp,
@@ -39,7 +46,15 @@ import {
 } from "@/lib/guidedApi";
 import { ORBIO_ACCOUNT_URL, EXTERNAL_LINK_REL } from "@/lib/externalLinks";
 import { Button, Field, Select } from "./ui";
-import { IterationWorkspace } from "./IterationWorkspace";
+const IterationWorkspace = dynamic(
+  () =>
+    import("./IterationWorkspace").then((module) => module.IterationWorkspace),
+  {
+    loading: () => (
+      <p className="text-sm text-muted">Loading implementation review...</p>
+    ),
+  },
+);
 import { PromgentLogo } from "./PromgentLogo";
 import {
   canRenderProjectMode,
@@ -49,16 +64,29 @@ import {
   type ProjectWorkspaceMode,
 } from "@/lib/projectLifecycle";
 
-type Mode = "loading" | "auth" | "projects" | "create" | ProjectWorkspaceMode;
+type Mode =
+  | "loading"
+  | "auth"
+  | "recovery"
+  | "projects"
+  | "create"
+  | ProjectWorkspaceMode;
 const ACTIVE_PROJECT_KEY = "promgent.activeProjectId";
 
 export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
-  const [mode, setMode] = useState<Mode>("loading");
+  // Render the sign-in surface immediately. Authenticated sessions replace it
+  // after the cookie probe, avoiding a blank/loading-only first paint.
+  const [mode, setMode] = useState<Mode>("auth");
   const [user, setUser] = useState<GuidedUser | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
+  const [recoveryTokens, setRecoveryTokens] = useState<{
+    accessToken: string;
+    refreshToken: string;
+  } | null>(null);
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [snapshot, setSnapshot] = useState<GuidedProjectSnapshot | null>(null);
@@ -197,13 +225,62 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
   }
 
   useEffect(() => {
+    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    if (hash.get("type") === "recovery" && hash.get("access_token")) {
+      setRecoveryTokens({
+        accessToken: hash.get("access_token") ?? "",
+        refreshToken: hash.get("refresh_token") ?? "",
+      });
+      setMode("recovery");
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname}${window.location.search}`,
+      );
+      return;
+    }
     getSession()
       .then((session) => {
+        if (!session.authenticated || !session.user) return;
         setUser(session.user);
         return refreshProjects(window.localStorage.getItem(ACTIVE_PROJECT_KEY));
       })
-      .catch(() => setMode("auth"));
+      .catch(() => undefined);
   }, []);
+
+  async function submitPasswordRecovery(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    if (!recoveryTokens) {
+      setError("This password-reset link is invalid or expired.");
+      return;
+    }
+    if (password !== passwordConfirmation) {
+      setError("The passwords do not match.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await completePasswordReset(
+        recoveryTokens.accessToken,
+        recoveryTokens.refreshToken,
+        password,
+      );
+      setUser(result.user);
+      setRecoveryTokens(null);
+      setPassword("");
+      setPasswordConfirmation("");
+      await refreshProjects();
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Could not update the password.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function submitAuth(event: React.FormEvent) {
     event.preventDefault();
@@ -226,6 +303,115 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : "Authentication failed.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handlePasswordReset() {
+    setBusy(true);
+    setError(null);
+    try {
+      setError((await requestPasswordReset(email.trim())).message);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Could not request a password reset.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleResendConfirmation() {
+    setBusy(true);
+    setError(null);
+    try {
+      setError((await resendConfirmation(email.trim())).message);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Could not resend confirmation.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteProject(projectId: string) {
+    if (
+      !window.confirm(
+        "Delete this project and all of its saved history? This cannot be undone.",
+      )
+    )
+      return;
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteProject(projectId);
+      if (window.localStorage.getItem(ACTIVE_PROJECT_KEY) === projectId)
+        window.localStorage.removeItem(ACTIVE_PROJECT_KEY);
+      await refreshProjects();
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Could not delete the project.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleExportAccount() {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await exportAccountData();
+      const url = URL.createObjectURL(
+        new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
+      );
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `promgent-export-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Could not export account data.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteAccount() {
+    if (
+      !window.confirm(
+        "Permanently delete your Promgent account, projects, and saved credentials? This cannot be undone.",
+      )
+    )
+      return;
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteAccount();
+      window.localStorage.removeItem(ACTIVE_PROJECT_KEY);
+      setUser(null);
+      setProjects([]);
+      setSnapshot(null);
+      setProfileOpen(false);
+      setMode("auth");
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Could not delete the account.",
       );
     } finally {
       setBusy(false);
@@ -581,7 +767,7 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
               <PromgentLogo size={30} priority /> Promgent Project
             </span>
           </div>
-          {mode !== "auth" && mode !== "loading" ? (
+          {mode !== "auth" && mode !== "recovery" && mode !== "loading" ? (
             <div className="flex items-center gap-4">
               {snapshot ? (
                 <span className="font-mono text-xs text-muted">
@@ -611,7 +797,10 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
           ) : null}
         </div>
       </header>
-      {profileOpen && mode !== "auth" && mode !== "loading" ? (
+      {profileOpen &&
+      mode !== "auth" &&
+      mode !== "recovery" &&
+      mode !== "loading" ? (
         <ProfilePanel
           user={user}
           connected={orbioConnected}
@@ -620,6 +809,8 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
           balance={orbioBalance}
           busy={busy}
           onDisconnect={() => void handleDisconnectOrbio()}
+          onExport={() => void handleExportAccount()}
+          onDeleteAccount={() => void handleDeleteAccount()}
           onClose={() => setProfileOpen(false)}
         />
       ) : null}
@@ -642,6 +833,23 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
               busy,
               error,
             }}
+            onPasswordReset={() => void handlePasswordReset()}
+            onResendConfirmation={() => void handleResendConfirmation()}
+          />
+        ) : null}
+        {mode === "recovery" ? (
+          <PasswordRecoveryCard
+            password={password}
+            setPassword={setPassword}
+            confirmation={passwordConfirmation}
+            setConfirmation={setPasswordConfirmation}
+            busy={busy}
+            error={error}
+            onSubmit={submitPasswordRecovery}
+            onCancel={() => {
+              setRecoveryTokens(null);
+              setMode("auth");
+            }}
           />
         ) : null}
         {mode === "projects" ? (
@@ -653,6 +861,7 @@ export function ProjectWorkspace({ onBack }: { onBack?: () => void }) {
               setMode("create");
             }}
             onOpen={(id) => void openProject(id)}
+            onDelete={(id) => void handleDeleteProject(id)}
             onRefresh={() => void refreshProjects()}
             error={error}
             orbioConnected={orbioConnected}
@@ -799,6 +1008,8 @@ function ProfilePanel(props: {
   balance: OrbioBalance | null;
   busy: boolean;
   onDisconnect: () => void;
+  onExport: () => void;
+  onDeleteAccount: () => void;
   onClose: () => void;
 }) {
   const usable = isUsableOrbioStatus(props);
@@ -841,6 +1052,23 @@ function ProfilePanel(props: {
           ) : (
             <p className="mt-1 text-sm text-muted">No Orbio key connected.</p>
           )}
+          <div className="mt-5 flex flex-wrap gap-2 border-t border-line pt-4">
+            <Button
+              variant="secondary"
+              onClick={props.onExport}
+              disabled={props.busy}
+            >
+              Export my data
+            </Button>
+            <button
+              type="button"
+              onClick={props.onDeleteAccount}
+              disabled={props.busy}
+              className="rounded border border-danger px-3 py-2 text-sm text-danger disabled:opacity-50"
+            >
+              Delete account
+            </button>
+          </div>
         </div>
         <button
           type="button"
@@ -864,6 +1092,8 @@ function AuthCard(props: {
   submitAuth: (event: React.FormEvent) => void;
   busy: boolean;
   error: string | null;
+  onPasswordReset: () => void;
+  onResendConfirmation: () => void;
 }) {
   return (
     <div className="mx-auto max-w-[460px] rounded border border-line bg-paper p-6 sm:p-8">
@@ -913,6 +1143,24 @@ function AuthCard(props: {
               : "Create account"}
         </Button>
       </form>
+      <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-sm">
+        <button
+          type="button"
+          onClick={props.onPasswordReset}
+          disabled={props.busy || !props.email.trim()}
+          className="text-forest hover:underline disabled:opacity-50"
+        >
+          Forgot password?
+        </button>
+        <button
+          type="button"
+          onClick={props.onResendConfirmation}
+          disabled={props.busy || !props.email.trim()}
+          className="text-forest hover:underline disabled:opacity-50"
+        >
+          Resend confirmation
+        </button>
+      </div>
       <button
         type="button"
         onClick={() =>
@@ -928,11 +1176,78 @@ function AuthCard(props: {
   );
 }
 
+function PasswordRecoveryCard(props: {
+  password: string;
+  setPassword: (value: string) => void;
+  confirmation: string;
+  setConfirmation: (value: string) => void;
+  busy: boolean;
+  error: string | null;
+  onSubmit: (event: React.FormEvent) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="mx-auto max-w-[460px] rounded border border-line bg-paper p-6 sm:p-8">
+      <h1 className="display text-3xl text-ink">Choose a new password</h1>
+      <p className="mt-2 text-sm text-muted">
+        This reset link is single-use. Your new password must contain at least
+        eight characters.
+      </p>
+      <form onSubmit={props.onSubmit} className="mt-7 flex flex-col gap-5">
+        <Field label="New password" htmlFor="recovery-password">
+          <input
+            id="recovery-password"
+            type="password"
+            required
+            minLength={8}
+            autoComplete="new-password"
+            value={props.password}
+            onChange={(event) => props.setPassword(event.target.value)}
+            className="w-full rounded border border-line bg-paper px-3 py-2.5 text-sm"
+          />
+        </Field>
+        <Field
+          label="Confirm password"
+          htmlFor="recovery-password-confirmation"
+        >
+          <input
+            id="recovery-password-confirmation"
+            type="password"
+            required
+            minLength={8}
+            autoComplete="new-password"
+            value={props.confirmation}
+            onChange={(event) => props.setConfirmation(event.target.value)}
+            className="w-full rounded border border-line bg-paper px-3 py-2.5 text-sm"
+          />
+        </Field>
+        {props.error ? (
+          <p role="alert" className="text-sm text-danger">
+            {props.error}
+          </p>
+        ) : null}
+        <Button type="submit" disabled={props.busy}>
+          {props.busy ? "Updating..." : "Update password"}
+        </Button>
+      </form>
+      <button
+        type="button"
+        onClick={props.onCancel}
+        disabled={props.busy}
+        className="mt-5 text-sm text-muted hover:text-ink"
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
+
 function ProjectList(props: {
   projects: ProjectRecord[];
   busy: boolean;
   onCreate: () => void;
   onOpen: (id: string) => void;
+  onDelete: (id: string) => void;
   onRefresh: () => void;
   error: string | null;
   orbioConnected: boolean;
@@ -1033,22 +1348,35 @@ function ProjectList(props: {
       <div className="mt-8 grid gap-3">
         {props.projects.length ? (
           props.projects.map((project) => (
-            <button
-              type="button"
+            <div
               key={project.id}
-              onClick={() => props.onOpen(project.id)}
-              className="rounded border border-line bg-paper p-5 text-left hover:border-lineStrong"
+              className="flex items-start gap-2 rounded border border-line bg-paper p-2 hover:border-lineStrong"
             >
-              <div className="flex items-center justify-between gap-3">
-                <span className="font-medium text-ink">{project.title}</span>
-                <span className="font-mono text-xs text-muted">
-                  {project.status}
-                </span>
-              </div>
-              <p className="mt-2 line-clamp-2 text-sm text-muted">
-                {project.initialDescription}
-              </p>
-            </button>
+              <button
+                type="button"
+                onClick={() => props.onOpen(project.id)}
+                className="min-w-0 flex-1 p-3 text-left"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-medium text-ink">{project.title}</span>
+                  <span className="font-mono text-xs text-muted">
+                    {project.status}
+                  </span>
+                </div>
+                <p className="mt-2 line-clamp-2 text-sm text-muted">
+                  {project.initialDescription}
+                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() => props.onDelete(project.id)}
+                disabled={props.busy}
+                aria-label={`Delete ${project.title}`}
+                className="m-2 rounded px-2 py-1 text-xs text-danger hover:bg-canvas disabled:opacity-50"
+              >
+                Delete
+              </button>
+            </div>
           ))
         ) : (
           <div className="rounded border border-dashed border-line p-8 text-center text-sm text-muted">

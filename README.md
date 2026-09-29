@@ -477,7 +477,7 @@ Project inference is paid for through the user's connected Orbio key, so the bac
 npm test
 ```
 
-370 tests across 31 files. Rather than testing internals, most assert the product promise:
+373 tests across 31 files. Rather than testing internals, most assert the product promise:
 
 | Area | What's asserted |
 |---|---|
@@ -528,7 +528,9 @@ Apply `server/migrations/*.sql` in numeric order through the Supabase CLI or SQL
 Editor before deploying backend code that depends on them. Migration
 `006_restore_interview_persistence_rpc.sql` is an idempotent production repair
 for the guided-interview RPC. `007_atomic_project_lifecycle.sql` makes project
-bootstrap, SRS approval, and implementation-plan transitions atomic. Both
+bootstrap, SRS approval, and implementation-plan transitions atomic.
+`008_account_and_iteration_reliability.sql` adds shared database-backed auth
+throttling and makes an accepted iteration change set atomic. These migrations
 explicitly reload the PostgREST schema cache.
 The service-role REST key cannot apply database DDL by itself.
 
