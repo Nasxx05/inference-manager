@@ -60,6 +60,7 @@ console.log(`credentialEncryptionConfigured=${credentialEncryptionConfigured()}`
 requireCredentialEncryptionKey();
 
 const app = express();
+app.disable("x-powered-by");
 const SERVER_STARTED_AT = new Date();
 
 const PORT = Number(process.env.PORT ?? 10000);
@@ -112,6 +113,23 @@ app.use(express.raw({ type: ["audio/webm", "audio/ogg", "audio/wav", "audio/mpeg
  * bounded image caps in ./multipart with headroom for field data.
  */
 app.use(express.raw({ type: "multipart/form-data", limit: "12mb" }));
+
+// Credentialed cookies must use SameSite=None because the frontend and API are
+// hosted on different sites. CORS controls response visibility, not whether a
+// browser may send a simple cross-site POST, so reject untrusted mutation
+// origins explicitly before any project state can change.
+app.use("/api", (request, response, next) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return next();
+  const origin = String(request.headers.origin ?? "").trim().replace(/\/+$/, "");
+  const fetchSite = String(request.headers["sec-fetch-site"] ?? "").toLowerCase();
+  if (origin && allowList && !allowList.includes(origin)) {
+    return response.status(403).json({ success: false, error: { code: "CSRF_ORIGIN_REJECTED", message: "This request origin is not allowed." } });
+  }
+  if (!origin && fetchSite === "cross-site") {
+    return response.status(403).json({ success: false, error: { code: "CSRF_ORIGIN_REJECTED", message: "This cross-site request is not allowed." } });
+  }
+  return next();
+});
 
 // Persistent project endpoints. The legacy planner routes remain available
 // for backward-compatible API clients; project routes enforce authentication
@@ -266,6 +284,20 @@ function rateLimit(limit: number, windowMs: number, label: string) {
 const planMinuteLimit = rateLimit(RATE_LIMIT_PLAN, RATE_LIMIT_WINDOW_MS, "plan:min");
 const planHourLimit = rateLimit(RATE_LIMIT_PLAN_HOUR, 3_600_000, "plan:hour");
 const clarifyLimit = rateLimit(RATE_LIMIT_CLARIFY, RATE_LIMIT_WINDOW_MS, "clarify");
+const healthAiLimit = rateLimit(6, RATE_LIMIT_WINDOW_MS, "health-ai:min");
+
+function requireHealthAuthorization(request: express.Request, response: express.Response, next: express.NextFunction) {
+  const expected = String(process.env.HEALTHCHECK_TOKEN ?? "").trim();
+  if (!expected && !isProduction) return next();
+  if (!expected) {
+    return response.status(503).json({ success: false, error: { code: "HEALTHCHECK_NOT_CONFIGURED", message: "AI diagnostics are not configured." } });
+  }
+  const supplied = String(request.headers.authorization ?? "").replace(/^Bearer\s+/i, "").trim();
+  if (supplied !== expected) {
+    return response.status(401).json({ success: false, error: { code: "HEALTHCHECK_AUTH_REQUIRED", message: "AI diagnostics require authorization." } });
+  }
+  return next();
+}
 
 /* -------------------------------------------------------------------------- */
 /* Timing                                                                     */
@@ -326,7 +358,7 @@ app.get("/health", (_request, response) => {
  * Always 200 so the diagnostic body is readable; consult `status`, `error.code`
  * and `modelAvailable`. Nothing sensitive is returned.
  */
-app.get("/health/ai", async (_request, response) => {
+app.get("/health/ai", healthAiLimit, requireHealthAuthorization, async (_request, response) => {
   try {
     response.json({ success: true, data: await aiHealth() });
   } catch (error) {
@@ -348,7 +380,7 @@ app.get("/health/ai", async (_request, response) => {
  * if this succeeds but /api/plan fails, the fault is in prompt generation.
  * It uses a 32-token cap, so it is fast and cheap.
  */
-app.get("/health/ai/test", async (_request, response) => {
+app.get("/health/ai/test", healthAiLimit, requireHealthAuthorization, async (_request, response) => {
   const result = await simpleAiTest();
   response.json({
     success: result.ok,

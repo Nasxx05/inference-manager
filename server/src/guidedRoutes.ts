@@ -17,10 +17,7 @@ import type { InterviewSession, PlanningDepth } from "@/types/project";
 import {
   AuthUser,
   PersistenceError,
-  approveSrs,
-  insertInterviewSession,
-  insertMessage,
-  insertProject,
+  approveSrsAtomic,
   insertRequirements,
   insertAcceptanceCriteria,
   insertUsageEvent,
@@ -43,13 +40,14 @@ import {
   loadLatestArchitecture,
   loadLatestSrs,
   persistInterviewTurnAtomic,
+  persistProjectBootstrapAtomic,
   saveIteration,
   saveIterationPrompt,
   saveSuggestionDiscussionMessage,
   loadSuggestionDiscussion,
   saveScreenshotArtifacts,
-  saveProjectPlan,
-  saveProjectReferences,
+  saveProjectPlanAndStatusAtomic,
+  saveSrsAndStatusAtomic,
   updateProjectStatus,
   userForToken,
 } from "./persistence";
@@ -138,7 +136,7 @@ function body(request: express.Request): Record<string, unknown> {
 
 function errorResponse(response: express.Response, error: unknown): void {
   if (error instanceof PersistenceError) {
-    response.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+    response.status(error.status).json({ success: false, error: { code: error.code, message: error.message, ...(error.requestId ? { requestId: error.requestId } : {}) } });
     return;
   }
   if (error instanceof AiError) {
@@ -160,6 +158,31 @@ function errorResponse(response: express.Response, error: unknown): void {
   }
   console.error("[guided-project] unexpected error", error instanceof Error ? error.message : "unknown");
   response.status(500).json({ success: false, error: { code: "PROJECT_OPERATION_FAILED", message: "The project operation failed." } });
+}
+
+const authAttempts = new Map<string, { count: number; resetAt: number }>();
+function authRateLimit(request: express.Request, response: express.Response, next: express.NextFunction) {
+  const forwarded = String(request.headers["x-forwarded-for"] ?? "").split(",")[0]?.trim();
+  const key = forwarded || request.ip || "unknown";
+  const now = Date.now();
+  // Bound the in-memory limiter in long-running instances. Expired entries no
+  // longer contribute to protection and should not accumulate indefinitely.
+  if (authAttempts.size > 1_000) {
+    for (const [attemptKey, attempt] of authAttempts) {
+      if (attempt.resetAt <= now) authAttempts.delete(attemptKey);
+    }
+  }
+  const current = authAttempts.get(key);
+  if (!current || current.resetAt <= now) {
+    authAttempts.set(key, { count: 1, resetAt: now + 15 * 60_000 });
+    return next();
+  }
+  if (current.count >= 10) {
+    response.setHeader("Retry-After", String(Math.ceil((current.resetAt - now) / 1000)));
+    return response.status(429).json({ success: false, error: { code: "AUTH_RATE_LIMITED", message: "Too many authentication attempts. Please wait and try again." } });
+  }
+  current.count += 1;
+  return next();
 }
 
 function validDepth(value: unknown): PlanningDepth {
@@ -264,7 +287,7 @@ export function guidedRouter(): express.Router {
     }
   });
 
-  router.post("/auth/signup", async (request, response) => {
+  router.post("/auth/signup", authRateLimit, async (request, response) => {
     try {
       const input = body(request);
       const email = String(input.email ?? "").trim();
@@ -276,7 +299,7 @@ export function guidedRouter(): express.Router {
     } catch (error) { errorResponse(response, error); }
   });
 
-  router.post("/auth/signin", async (request, response) => {
+  router.post("/auth/signin", authRateLimit, async (request, response) => {
     try {
       const input = body(request);
       const result = await signIn(String(input.email ?? "").trim(), String(input.password ?? ""));
@@ -402,19 +425,7 @@ export function guidedRouter(): express.Router {
         createdAt: project.createdAt,
       };
       const persistenceStarted = Date.now();
-      // The project is the foreign-key root. Its independent children can be
-      // stored concurrently after it exists; the message waits for its session.
-      await insertProject(project);
-      await Promise.all([
-        saveMemory(memory),
-        (async () => {
-          await insertRequirements(project.id, memory.requirements);
-          await insertAcceptanceCriteria(project.id, structuredAcceptanceCriteria(memory));
-        })(),
-        saveProjectReferences(references),
-        insertInterviewSession(session),
-      ]);
-      await insertMessage(assistantMessage);
+      await persistProjectBootstrapAtomic({ userId: user.id, project, memory, references, session, assistantMessage, requestId: inference.requestId || perfRequestId });
       const persistenceMs = Date.now() - persistenceStarted;
       const usageStarted = Date.now();
       await Promise.all([
@@ -459,8 +470,13 @@ export function guidedRouter(): express.Router {
       const inference = await runOrbioInference(user.id, () => runGuidedInterviewInference({ apiKey: credential.apiKey, project: state.project, memory: state.memory, userContent: content }), credential);
       const providerMs = Date.now() - providerStarted;
       const result = applyInterviewTurn({ memory: state.memory, session: state.interview, content, source: body(request).source === "voice_transcript" ? "voice_transcript" : "text", assistantContent: inference.assistantContent, structuredProposal: inference.structuredProposal });
+      // The provider has already charged the user's key at this point. Record
+      // that charge before project-state persistence so a failed RPC cannot
+      // make the project budget silently under-report real usage.
+      const usageStarted = Date.now();
+      await recordGuidedUsage({ userId: user.id, projectId: state.project.id, model: inference.model, requestId: inference.requestId, usage: inference.usage });
+      const usageMs = Date.now() - usageStarted;
       let persistenceMs = 0;
-      let usageMs = 0;
       const persistenceStarted = Date.now();
       await persistInterviewTurnAtomic({
         userId: user.id,
@@ -472,14 +488,12 @@ export function guidedRouter(): express.Router {
         requestId: inference.requestId || perfRequestId,
       });
       persistenceMs = Date.now() - persistenceStarted;
-      const usageStarted = Date.now();
-      await recordGuidedUsage({ userId: user.id, projectId: state.project.id, model: inference.model, requestId: inference.requestId, usage: inference.usage });
-      usageMs = Date.now() - usageStarted;
+      const usage = await projectUsageForUser(state.project.id, user.id);
       const totalMs = Date.now() - perfStarted;
       const overheadMs = Math.max(0, totalMs - providerMs);
       logPerf("interview", inference.requestId || perfRequestId, { authMs, databaseReadMs, credentialMs, providerMs, providerReportedMs: inference.providerDurationMs ?? "-", persistenceMs, usageMs, finishReason: inference.finishReason ?? "-", totalMs });
       if (process.env.NODE_ENV !== "production") response.setHeader("Server-Timing", `auth;dur=${authMs}, db;dur=${databaseReadMs}, credential;dur=${credentialMs}, provider;dur=${providerMs}, persistence;dur=${persistenceMs}, total;dur=${totalMs}`);
-      response.json({ success: true, data: { ...result, timing: { providerInferenceMs: providerMs, promgentOverheadMs: overheadMs } } });
+      response.json({ success: true, data: { ...result, usage, timing: { providerInferenceMs: providerMs, promgentOverheadMs: overheadMs } } });
     } catch (error) { errorResponse(response, error); }
   });
 
@@ -510,8 +524,7 @@ export function guidedRouter(): express.Router {
       ]);
       if (!memory) throw new PersistenceError("PROJECT_STATE_MISSING", "This project has no saved memory.", 500);
       const document = generateSrs({ memory, architecture, version: (previous?.version ?? 0) + 1 });
-      await saveSrs(document);
-      await updateProjectStatus(project.id, "srs_ready");
+      await saveSrsAndStatusAtomic(user.id, project.id, document);
       response.json({ success: true, data: document });
     } catch (error) { errorResponse(response, error); }
   });
@@ -525,7 +538,7 @@ export function guidedRouter(): express.Router {
       if (memory.completeness.level !== "ready") {
         throw new PersistenceError("SPECIFICATION_INCOMPLETE", "Resolve the critical requirements gaps before approving this specification.", 400);
       }
-      await approveSrs(request.params.projectId, request.params.srsId);
+      await approveSrsAtomic(user.id, request.params.projectId, request.params.srsId);
       response.json({ success: true, data: { approvedSrsId: request.params.srsId } });
     } catch (error) { errorResponse(response, error); }
   });
@@ -553,8 +566,7 @@ export function guidedRouter(): express.Router {
       if (!provider.baseUrl) throw new PersistenceError("ORBIO_NOT_CONFIGURED", "ORBIO_BASE_URL is not configured.");
       const planRequest = planningRequestFromApprovedSrs({ project, memory, srs });
       const built = await runOrbioInference(user.id, () => buildPlanWithMetrics({ ...planRequest, aiProvider: provider }), credential);
-      await saveProjectPlan(project.id, srs.id, built.plan);
-      await updateProjectStatus(project.id, "implementation");
+      await saveProjectPlanAndStatusAtomic(user.id, project.id, srs.id, built.plan);
       await recordGuidedUsage({ userId: user.id, projectId: project.id, phase: "planning", model: built.plan.agentModel ?? provider.model, requestId: built.requestId ?? built.plan.id });
       response.json({ success: true, data: { plan: built.plan, projectId: project.id } });
     } catch (error) { errorResponse(response, error); }

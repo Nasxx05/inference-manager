@@ -477,7 +477,7 @@ Project inference is paid for through the user's connected Orbio key, so the bac
 npm test
 ```
 
-323 tests across 26 files. Rather than testing internals, most assert the product promise:
+370 tests across 31 files. Rather than testing internals, most assert the product promise:
 
 | Area | What's asserted |
 |---|---|
@@ -515,16 +515,21 @@ CREDENTIAL_ENCRYPTION_KEY=
 AGENTFUND_AI_MAX_TOKENS=4500
 AGENTFUND_AI_TIMEOUT_MS=90000
 ALLOWED_ORIGINS=https://promgent.vercel.app
+HEALTHCHECK_TOKEN=<a-long-random-server-side-token>
 ```
 
-Health endpoints: `/health`, `/health/ai`, `/health/ai/test`. None return secrets.
+`/health` is public and does not contact the AI provider. `/health/ai` and
+`/health/ai/test` are rate-limited and require
+`Authorization: Bearer $HEALTHCHECK_TOKEN` in production. None return secrets.
 
 ### Supabase migrations
 
 Apply `server/migrations/*.sql` in numeric order through the Supabase CLI or SQL
 Editor before deploying backend code that depends on them. Migration
 `006_restore_interview_persistence_rpc.sql` is an idempotent production repair
-for the guided-interview RPC and explicitly reloads the PostgREST schema cache.
+for the guided-interview RPC. `007_atomic_project_lifecycle.sql` makes project
+bootstrap, SRS approval, and implementation-plan transitions atomic. Both
+explicitly reload the PostgREST schema cache.
 The service-role REST key cannot apply database DDL by itself.
 
 After applying migration 006, verify the deployed signature in the SQL Editor:
@@ -608,10 +613,7 @@ The project endpoints are:
 - iteration decision endpoints for findings, changes and suggestions
 - `/api/projects/:id/iterations/:iterationId/generate-prompt` for the next implementation prompt
 
-Apply [`server/migrations/001_guided_projects.sql`](server/migrations/001_guided_projects.sql),
-[`server/migrations/002_project_iterations.sql`](server/migrations/002_project_iterations.sql),
-[`server/migrations/003_unified_project_lifecycle.sql`](server/migrations/003_unified_project_lifecycle.sql)
-and [`server/migrations/004_intelligence_completeness.sql`](server/migrations/004_intelligence_completeness.sql)
+Apply every file in [`server/migrations`](server/migrations) in numeric order
 to a Supabase project and configure the Supabase and credential-encryption
 variables from [`.env.example`](.env.example) before using
 the project flow locally. The raw Orbio key is verified server-side,

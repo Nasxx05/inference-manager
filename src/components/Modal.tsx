@@ -34,7 +34,7 @@ export function Modal({
    * is still open.
    */
   const closeRef = useRef(onClose);
-  closeRef.current = onClose;
+  useEffect(() => { closeRef.current = onClose; }, [onClose]);
 
   // Capture the trigger once, before focus moves into the panel.
   useEffect(() => {

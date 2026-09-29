@@ -25,6 +25,7 @@ import {
   WEBSITE_MAX_BYTES,
   WEBSITE_MAX_REDIRECTS,
   checkUrl,
+  hostnameResolvesPublic,
 } from "./urlSafety";
 
 export type WebsiteFailure =
@@ -180,6 +181,14 @@ async function fetchWithGuards(startUrl: string): Promise<
       };
     }
 
+    try {
+      if (!await hostnameResolvesPublic(check.hostname)) {
+        return { ok: false, failure: fail("BLOCKED_REFERENCE_URL", "That URL cannot be used as a reference.") };
+      }
+    } catch {
+      return { ok: false, failure: fail("WEBSITE_FETCH_FAILED", "That website could not be reached.") };
+    }
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), WEBSITE_FETCH_TIMEOUT_MS);
     const started = Date.now();
@@ -205,13 +214,31 @@ async function fetchWithGuards(startUrl: string): Promise<
       const statusFailure = classifyStatus(response.status);
       if (statusFailure) return { ok: false, failure: statusFailure };
 
-      const raw = await response.text();
-      if (raw.length > WEBSITE_MAX_BYTES) {
+      const declaredBytes = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredBytes) && declaredBytes > WEBSITE_MAX_BYTES) {
         return {
           ok: false,
           failure: fail("WEBSITE_TOO_LARGE", "That page is too large to inspect."),
         };
       }
+      if (!response.body) return { ok: false, failure: fail("WEBSITE_FETCH_FAILED", "That website returned no content.") };
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let bytes = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > WEBSITE_MAX_BYTES) {
+          await reader.cancel();
+          return { ok: false, failure: fail("WEBSITE_TOO_LARGE", "That page is too large to inspect.") };
+        }
+        chunks.push(value);
+      }
+      const joined = new Uint8Array(bytes);
+      let offset = 0;
+      for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
+      const raw = new TextDecoder().decode(joined);
 
       console.log(
         `[reference] ts=${new Date().toISOString()} kind=website ` +

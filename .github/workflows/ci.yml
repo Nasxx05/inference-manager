@@ -18,6 +18,10 @@ jobs:
             server/package-lock.json
       - name: Install web dependencies
         run: npm ci
+      - name: Lint web and shared code
+        run: npm run lint
+      - name: Audit production web dependencies
+        run: npm audit --omit=dev --audit-level=high
       - name: Test web and shared logic
         run: npm test
       - name: Build web application
@@ -25,6 +29,9 @@ jobs:
       - name: Install server dependencies
         working-directory: server
         run: npm ci
+      - name: Audit production server dependencies
+        working-directory: server
+        run: npm audit --omit=dev --audit-level=high
       - name: Type-check server
         working-directory: server
         run: npm run typecheck

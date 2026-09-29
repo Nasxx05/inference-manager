@@ -33,12 +33,14 @@ export class PersistenceError extends Error {
   readonly code: string;
   readonly status: number;
   readonly upstream?: { code?: string; message?: string; details?: string; hint?: string };
-  constructor(code: string, message: string, status = 503, upstream?: { code?: string; message?: string; details?: string; hint?: string }) {
+  readonly requestId?: string;
+  constructor(code: string, message: string, status = 503, upstream?: { code?: string; message?: string; details?: string; hint?: string }, requestId?: string) {
     super(message);
     this.name = "PersistenceError";
     this.code = code;
     this.status = status;
     this.upstream = upstream;
+    this.requestId = requestId;
   }
 }
 
@@ -132,6 +134,7 @@ async function request<T>(input: {
         : "The authentication service could not complete the request.",
       response.status,
       upstream,
+      input.context?.requestId,
     );
   }
   return payload as T;
@@ -200,6 +203,41 @@ export async function insertProject(project: ProjectRecord): Promise<ProjectReco
   const row = rows[0];
   if (!row) throw new PersistenceError("PERSISTENCE_REQUEST_FAILED", "The project was not created.");
   return projectFromRow(row);
+}
+
+export async function persistProjectBootstrapAtomic(input: {
+  userId: string;
+  project: ProjectRecord;
+  memory: ProjectMemory;
+  references: ProjectReference[];
+  session: InterviewSession;
+  assistantMessage: InterviewMessage;
+  requestId?: string;
+}): Promise<void> {
+  await request({
+    path: "/rest/v1/rpc/persist_project_bootstrap",
+    method: "POST",
+    body: {
+      p_user_id: input.userId,
+      p_project: projectToRow(input.project),
+      p_memory: input.memory,
+      p_memory_version: input.memory.version,
+      p_requirements: input.memory.requirements.map((item) => requirementToRow(input.project.id, item)),
+      p_acceptance_criteria: structuredAcceptanceCriteria(input.memory).map((item) => ({ id: item.id, project_id: input.project.id, requirement_id: item.requirementId, description: item.description, source: item.source, source_message_id: item.sourceMessageId ?? null, status: item.status, confidence: item.confidence, version: item.version, created_at: item.createdAt, updated_at: item.updatedAt })),
+      p_references: input.references.map((item) => ({ id: item.id, project_id: item.projectId, type: item.type, source: item.source, analysis: item.analysis ?? {}, metadata: item.metadata, created_at: item.createdAt })),
+      p_session: sessionToRow(input.session),
+      p_assistant_message: messageToRow(input.assistantMessage),
+    },
+    context: { requestId: input.requestId, operation: "project.persist_bootstrap", projectId: input.project.id },
+  });
+}
+
+export async function saveSrsAndStatusAtomic(userId: string, projectId: string, document: SrsDocument): Promise<void> {
+  await request({ path: "/rest/v1/rpc/save_srs_and_status", method: "POST", body: { p_user_id: userId, p_project_id: projectId, p_srs: srsToRow(document) }, context: { operation: "project.save_srs", projectId } });
+}
+
+export async function approveSrsAtomic(userId: string, projectId: string, srsId: string): Promise<void> {
+  await request({ path: "/rest/v1/rpc/approve_srs_atomic", method: "POST", body: { p_user_id: userId, p_project_id: projectId, p_srs_id: srsId }, context: { operation: "project.approve_srs", projectId } });
 }
 
 export async function projectForUser(projectId: string, userId: string): Promise<ProjectRecord> {
@@ -526,6 +564,8 @@ export async function persistInterviewTurnAtomic(input: {
         ? "Promgent's interview persistence function is unavailable. Your previous project state was preserved."
         : "Promgent could not save this interview response. Your previous project state was preserved.",
       503,
+      undefined,
+      input.requestId,
     );
   }
 }
@@ -610,6 +650,15 @@ export async function saveProjectPlan(projectId: string, srsId: string, plan: Pl
       data: plan,
       created_at: plan.createdAt,
     }],
+  });
+}
+
+export async function saveProjectPlanAndStatusAtomic(userId: string, projectId: string, srsId: string, plan: PlanResult): Promise<void> {
+  await request({
+    path: "/rest/v1/rpc/save_plan_and_status",
+    method: "POST",
+    body: { p_user_id: userId, p_project_id: projectId, p_srs_id: srsId, p_prompt_id: randomUUID(), p_plan: plan },
+    context: { operation: "project.save_plan", projectId },
   });
 }
 

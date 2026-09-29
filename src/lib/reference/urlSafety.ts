@@ -8,6 +8,7 @@
  */
 
 import type { WebsiteReferenceInput } from "./types";
+import { lookup } from "node:dns/promises";
 
 /** Deliberately conservative: enough for real sites, not a crawler. */
 export const WEBSITE_FETCH_TIMEOUT_MS = 10_000;
@@ -101,6 +102,24 @@ function isPrivateIpv4(ip: string): boolean {
   if (a === 100 && b >= 64 && b <= 127) return true;
   if (a >= 224) return true;
   return false;
+}
+
+function isPrivateIpv6(ip: string): boolean {
+  const value = ip.toLowerCase().split("%")[0] ?? "";
+  if (value === "::" || value === "::1") return true;
+  if (value.startsWith("fc") || value.startsWith("fd")) return true;
+  if (/^fe[89ab]/.test(value)) return true;
+  const mapped = value.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+  return mapped ? isPrivateIpv4(mapped) : false;
+}
+
+/** Resolve every address before fetching and reject the hostname if any answer is private. */
+export async function hostnameResolvesPublic(hostname: string): Promise<boolean> {
+  if (isIpv4(hostname)) return !isPrivateIpv4(hostname);
+  const addresses = await lookup(hostname, { all: true, verbatim: true });
+  return addresses.length > 0 && addresses.every((entry) => entry.family === 4
+    ? !isPrivateIpv4(entry.address)
+    : !isPrivateIpv6(entry.address));
 }
 
 /** Hostnames that must never be fetched, whatever they resolve to. */
@@ -197,4 +216,4 @@ export function toWebsiteReference(raw: string): WebsiteReferenceInput | UrlChec
   return check.ok ? { type: "website", url: check.url } : check;
 }
 
-export const __testing = { isPrivateIpv4, ipv4ToInt, looksPublic };
+export const __testing = { isPrivateIpv4, isPrivateIpv6, ipv4ToInt, looksPublic };
