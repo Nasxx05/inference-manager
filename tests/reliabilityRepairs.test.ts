@@ -178,6 +178,27 @@ describe("atomic interview persistence", () => {
     expect(logs).toContain(`"projectId":"${turnInput().projectId}"`);
   });
 
+  it("does not misclassify a missing dependent relation as a missing RPC", async () => {
+    configured();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            code: "42P01",
+            message: 'relation "public.acceptance_criteria" does not exist',
+          }),
+          { status: 404 },
+        ),
+      ),
+    );
+    const error = await persistInterviewTurnAtomic(turnInput()).catch(
+      (caught) => caught,
+    );
+    expect(error.code).toBe("INTERVIEW_RPC_FAILED");
+  });
+
   it("uses the generic persistence code for a transport failure", async () => {
     configured();
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -209,6 +230,23 @@ describe("atomic interview persistence", () => {
     expect(sql).toContain("p_acceptance_criteria jsonb");
     expect(sql).toContain("p_assistant_message jsonb");
     expect(sql).toContain("p_memory_version integer");
+  });
+
+  it("ships the missing acceptance-criteria relation as an idempotent repair", () => {
+    const sql = readFileSync(
+      "server/migrations/009_restore_acceptance_criteria.sql",
+      "utf8",
+    );
+    expect(sql).toContain(
+      "create table if not exists public.acceptance_criteria",
+    );
+    expect(sql).toContain("enable row level security");
+    expect(sql).toContain("notify pgrst, 'reload schema'");
+  });
+
+  it("uses partitioned production cookies for cross-site session persistence", () => {
+    const routes = readFileSync("server/src/guidedRoutes.ts", "utf8");
+    expect(routes).toContain("; Secure; SameSite=None; Partitioned");
   });
 });
 

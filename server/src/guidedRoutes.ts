@@ -128,7 +128,12 @@ function setSession(
   refreshToken?: string,
 ): void {
   const production = process.env.NODE_ENV === "production";
-  const attributes = production ? "; Secure; SameSite=None" : "; SameSite=Lax";
+  // The Vercel frontend and Render API are cross-site. `Partitioned` opts the
+  // session into CHIPS so browsers that block unpartitioned third-party
+  // cookies can still retain this HttpOnly session for the Promgent site.
+  const attributes = production
+    ? "; Secure; SameSite=None; Partitioned"
+    : "; SameSite=Lax";
   const values = [
     `${SESSION_COOKIE}=${encodeURIComponent(token)}; Max-Age=${SESSION_MAX_AGE}; Path=/; HttpOnly${attributes}`,
   ];
@@ -142,7 +147,9 @@ function setSession(
 
 function clearSession(response: express.Response): void {
   const production = process.env.NODE_ENV === "production";
-  const attributes = production ? "; Secure; SameSite=None" : "; SameSite=Lax";
+  const attributes = production
+    ? "; Secure; SameSite=None; Partitioned"
+    : "; SameSite=Lax";
   response.setHeader("Set-Cookie", [
     `${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly${attributes}`,
     `${REFRESH_COOKIE}=; Max-Age=0; Path=/; HttpOnly${attributes}`,

@@ -1007,8 +1007,7 @@ export async function persistInterviewTurnAtomic(input: {
       error instanceof PersistenceError ? error.upstream : undefined;
     const rpcNotFound =
       error instanceof PersistenceError &&
-      (error.status === 404 ||
-        upstream?.code === "PGRST202" ||
+      (upstream?.code === "PGRST202" ||
         /could not find the function/i.test(upstream?.message ?? ""));
     const code = rpcNotFound
       ? "INTERVIEW_RPC_NOT_FOUND"
