@@ -21,11 +21,17 @@ import type { PlanResult } from "@/types";
 import type {
   IterationPrompt,
   ProjectIteration,
+  RepositorySnapshot,
   ScreenshotArtifact,
   SuggestionDiscussionMessage,
 } from "@/types/iteration";
+import type { ModelRouteSummary, ProjectAction, ProjectArtifact, RepositoryTestRun } from "@/types/conversation";
 import { MODELS } from "@/data/models";
 import { structuredAcceptanceCriteria } from "@/lib/projectMemory/proposals";
+import {
+  normalizeProjectMemory,
+  phaseForLegacyStatus,
+} from "@/lib/projectMemory/compatibility";
 
 export interface AuthUser {
   id: string;
@@ -956,6 +962,112 @@ export async function insertAcceptanceCriteria(
   });
 }
 
+export async function persistConversationTurnAtomic(input: {
+  userId: string;
+  projectId: string;
+  userMessage: InterviewMessage;
+  assistantMessage: InterviewMessage;
+  memory: ProjectMemory;
+  session: InterviewSession;
+  phase: NonNullable<ProjectRecord["phase"]>;
+  actions: ProjectAction[];
+  artifacts: ProjectArtifact[];
+  modelRoute: ModelRouteSummary & {
+    id: string;
+    requestId: string;
+    modelMode: "auto" | "locked";
+    requestedModel?: string;
+    providerUsage?: Record<string, unknown>;
+  };
+  repositorySnapshot?: RepositorySnapshot;
+  testRun?: RepositoryTestRun;
+}): Promise<void> {
+  const criteria = structuredAcceptanceCriteria(input.memory);
+  try {
+    await request({
+      path: "/rest/v1/rpc/persist_conversation_turn",
+      method: "POST",
+      body: {
+        p_user_id: input.userId,
+        p_project_id: input.projectId,
+        p_user_message: messageToRow(input.userMessage),
+        p_assistant_message: messageToRow(input.assistantMessage),
+        p_memory: input.memory,
+        p_memory_version: input.memory.version,
+        p_requirements: input.memory.requirements.map((item) => requirementToRow(input.projectId, item)),
+        p_acceptance_criteria: criteria.map((item) => ({ id: item.id, project_id: input.projectId, requirement_id: item.requirementId, description: item.description, source: item.source, source_message_id: item.sourceMessageId ?? null, status: item.status, confidence: item.confidence, version: item.version, created_at: item.createdAt, updated_at: item.updatedAt })),
+        p_decisions: (input.memory.decisions ?? []).map((item) => ({
+          id: item.id, decision: item.decision, reason: item.reason,
+          source: item.source, source_message_id: item.sourceMessageId ?? null,
+          confidence: item.confidence, status: item.status,
+          created_at: item.createdAt, updated_at: item.updatedAt,
+        })),
+        p_session: sessionToRow(input.session),
+        p_project_phase: input.phase,
+        p_next_recommended_action: input.memory.nextRecommendedAction ?? null,
+        p_model_route: {
+          id: input.modelRoute.id,
+          request_id: input.modelRoute.requestId,
+          task_class: input.modelRoute.taskClass,
+          model_mode: input.modelRoute.modelMode,
+          requested_model: input.modelRoute.requestedModel ?? "",
+          chosen_model: input.modelRoute.chosenModel,
+          reason_code: input.modelRoute.reasonCode,
+          expected_cost_class: input.modelRoute.expectedCostClass,
+          fallback_used: input.modelRoute.fallbackUsed,
+          provider_usage: input.modelRoute.providerUsage ?? null,
+        },
+        p_actions: input.actions.map((action) => ({ id: action.id, type: action.type, label: action.label, payload: action.payload ?? {} })),
+        p_artifacts: input.artifacts.map((artifact) => ({
+          id: artifact.id, type: artifact.type, version: artifact.version, title: artifact.title,
+          content: artifact.content, structured_data: artifact.structuredData,
+          supersedes_artifact_id: artifact.supersedesArtifactId ?? "",
+          content_hash: createHash("sha256").update(`${artifact.content}\n${JSON.stringify(artifact.structuredData)}`).digest("hex"),
+          created_at: artifact.createdAt, updated_at: artifact.updatedAt,
+        })),
+        p_repository_snapshot: input.repositorySnapshot
+          ? {
+              repository_url: input.repositorySnapshot.repositoryUrl,
+              default_branch: input.repositorySnapshot.branch ?? "",
+              latest_reviewed_commit: input.repositorySnapshot.commitSha ?? "",
+            }
+          : null,
+        p_test_run: input.testRun
+          ? {
+              id: input.testRun.id,
+              commit_sha: input.testRun.commitSha,
+              commands: input.testRun.commands,
+              runner: input.testRun.runner,
+              status: input.testRun.status,
+              authorized_at: input.testRun.authorizedAt ?? null,
+              started_at: input.testRun.startedAt ?? null,
+              completed_at: input.testRun.completedAt ?? null,
+              exit_code: input.testRun.exitCode ?? null,
+              output_summary: input.testRun.summary ?? null,
+              created_at: input.testRun.createdAt,
+            }
+          : null,
+      },
+      context: { requestId: input.modelRoute.requestId, operation: "conversation.persist_turn", projectId: input.projectId },
+    });
+  } catch (error) {
+    console.error("[conversation-persistence]", JSON.stringify({ requestId: input.modelRoute.requestId, operation: "conversation.persist_turn", httpStatus: error instanceof PersistenceError ? error.status : null, supabaseCode: error instanceof PersistenceError ? error.upstream?.code ?? null : null, message: error instanceof PersistenceError ? error.upstream?.message ?? error.message : "Unknown persistence failure", projectId: input.projectId, errorCode: "CONVERSATION_PERSISTENCE_FAILED" }));
+    throw new PersistenceError("CONVERSATION_PERSISTENCE_FAILED", "Promgent couldn't save that message. Your existing project state is safe.", 503, undefined, input.modelRoute.requestId);
+  }
+}
+
+export async function loadProjectArtifacts(projectId: string): Promise<ProjectArtifact[]> {
+  const rows = await request<Record<string, unknown>[]>({ path: `/rest/v1/project_artifacts?select=*&project_id=eq.${query(projectId)}&order=created_at.asc` });
+  return rows.map((row) => ({
+    id: String(row.id), projectId: String(row.project_id), type: row.type as ProjectArtifact["type"],
+    version: Number(row.version), title: String(row.title), content: String(row.content ?? ""),
+    structuredData: row.structured_data && typeof row.structured_data === "object" ? row.structured_data as Record<string, unknown> : {},
+    ...(row.source_message_id ? { sourceMessageId: String(row.source_message_id) } : {}),
+    ...(row.supersedes_artifact_id ? { supersedesArtifactId: String(row.supersedes_artifact_id) } : {}),
+    status: row.status as ProjectArtifact["status"], createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  }));
+}
+
 export async function persistInterviewTurnAtomic(input: {
   userId: string;
   projectId: string;
@@ -1060,9 +1172,10 @@ export async function loadMemory(
   });
   const memory = rows[0]?.memory ?? null;
   if (!memory) return null;
+  const normalized = normalizeProjectMemory(memory);
   return {
-    ...memory,
-    acceptanceCriteria: structuredAcceptanceCriteria(memory),
+    ...normalized,
+    acceptanceCriteria: structuredAcceptanceCriteria(normalized),
   };
 }
 
@@ -1279,6 +1392,7 @@ export async function snapshotForUser(
     architecture,
     srs,
     usage,
+    artifacts,
   ] = await Promise.all([
     loadMemory(project.id),
     loadLatestInterviewSession(project.id),
@@ -1290,6 +1404,7 @@ export async function snapshotForUser(
     loadLatestArchitecture(projectId),
     loadLatestSrs(projectId),
     loadProjectUsage(projectId, userId, project.creditBudget),
+    loadProjectArtifacts(projectId),
   ]);
   if (!memory)
     throw new PersistenceError(
@@ -1309,6 +1424,7 @@ export async function snapshotForUser(
     interview: session,
     messages: messages.map(messageFromRow),
     references,
+    artifacts,
     ...(implementationPlan ? { implementationPlan } : {}),
     ...(architecture ? { architecture } : {}),
     ...(srs ? { srs } : {}),
@@ -1394,9 +1510,13 @@ function projectToRow(project: ProjectRecord): Record<string, unknown> {
     initial_description: project.initialDescription,
     project_type: project.projectType,
     selected_model: project.selectedModel,
+    model_mode:
+      project.modelMode ?? (project.selectedModel === "auto" ? "auto" : "locked"),
     planning_depth: project.planningDepth,
     credit_budget: project.creditBudget,
     status: project.status,
+    phase: project.phase ?? phaseForLegacyStatus(project.status),
+    next_recommended_action: project.nextRecommendedAction ?? null,
     created_at: project.createdAt,
     updated_at: project.updatedAt,
   };
@@ -1410,9 +1530,20 @@ function projectFromRow(row: Record<string, unknown>): ProjectRecord {
     initialDescription: String(row.initial_description),
     projectType: String(row.project_type),
     selectedModel: String(row.selected_model),
+    modelMode: row.model_mode === "auto" ? "auto" : "locked",
     planningDepth: row.planning_depth as ProjectRecord["planningDepth"],
     creditBudget: Number(row.credit_budget),
     status: row.status as ProjectRecord["status"],
+    phase:
+      (row.phase as ProjectRecord["phase"]) ??
+      phaseForLegacyStatus(row.status as ProjectRecord["status"]),
+    nextRecommendedAction:
+      row.next_recommended_action &&
+      typeof row.next_recommended_action === "object"
+        ? (row.next_recommended_action as NonNullable<
+            ProjectRecord["nextRecommendedAction"]
+          >)
+        : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -1477,6 +1608,9 @@ function messageToRow(message: InterviewMessage): Record<string, unknown> {
     role: message.role,
     content: message.content,
     source: message.source,
+    ...(message.artifactIds ? { artifact_ids: message.artifactIds } : {}),
+    ...(message.modelRoute ? { model_route: message.modelRoute } : {}),
+    ...(message.metadata ? { metadata: message.metadata } : {}),
     created_at: message.createdAt,
   };
 }
@@ -1489,6 +1623,19 @@ function messageFromRow(row: Record<string, unknown>): InterviewMessage {
     role: row.role as InterviewMessage["role"],
     content: String(row.content),
     source: row.source as InterviewMessage["source"],
+    ...(Array.isArray(row.artifact_ids)
+      ? { artifactIds: row.artifact_ids.map(String) }
+      : {}),
+    ...(row.model_route && typeof row.model_route === "object"
+      ? {
+          modelRoute: row.model_route as NonNullable<
+            InterviewMessage["modelRoute"]
+          >,
+        }
+      : {}),
+    ...(row.metadata && typeof row.metadata === "object"
+      ? { metadata: row.metadata as Record<string, unknown> }
+      : {}),
     createdAt: String(row.created_at),
   };
 }

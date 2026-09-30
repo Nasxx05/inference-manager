@@ -108,7 +108,7 @@ export function structuredAcceptanceCriteria(memory: Pick<ProjectMemory, "projec
   });
 }
 
-export function validateInterviewProposal(input: { raw: unknown; memory: ProjectMemory; userContent: string; sourceMessageId: string; now: string }): ValidatedInterviewProposal {
+export function validateInterviewProposal(input: { raw: unknown; memory: ProjectMemory; userContent: string; sourceMessageId: string; now: string; fallbackToUserContent?: boolean }): ValidatedInterviewProposal {
   const root = record(input.raw);
   const rawRequirements = Array.isArray(root.requirements) ? root.requirements : [];
   const proposedDescriptions = rawRequirements.flatMap((item) => {
@@ -116,7 +116,11 @@ export function validateInterviewProposal(input: { raw: unknown; memory: Project
     const description = text(value.description);
     return description ? splitAtomicRequirements(description) : [];
   });
-  const descriptions = proposedDescriptions.length ? proposedDescriptions : splitAtomicRequirements(input.userContent);
+  const descriptions = proposedDescriptions.length
+    ? proposedDescriptions
+    : input.fallbackToUserContent === false
+      ? []
+      : splitAtomicRequirements(input.userContent);
   let requirements = [...input.memory.requirements];
   const accepted: Requirement[] = [];
 

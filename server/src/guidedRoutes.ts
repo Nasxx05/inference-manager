@@ -13,7 +13,8 @@ import {
   refreshQuestionBacklog,
   detectContradictions,
 } from "@/lib/projectMemory";
-import type { InterviewSession, PlanningDepth } from "@/types/project";
+import type { InterviewMessage, InterviewSession, PlanningDepth } from "@/types/project";
+import type { ProjectAction, ProjectArtifact } from "@/types/conversation";
 import {
   AuthUser,
   PersistenceError,
@@ -38,7 +39,9 @@ import {
   listIterations,
   loadLatestArchitecture,
   loadLatestSrs,
+  loadProjectArtifacts,
   persistInterviewTurnAtomic,
+  persistConversationTurnAtomic,
   persistProjectBootstrapAtomic,
   persistIterationChangeApprovalAtomic,
   requestPasswordReset,
@@ -58,7 +61,7 @@ import {
   providerModelId,
   runGuidedInterviewInference,
 } from "./guidedInterview";
-import { inspectLiveProduct, inspectRepository } from "./iterationEvidence";
+import { inspectGithubActions, inspectLiveProduct, inspectRepository, type GithubCiEvidence } from "./iterationEvidence";
 import {
   runChangeImpactInference,
   runIterationPromptInference,
@@ -90,9 +93,24 @@ import type { ProjectIteration, ProjectSuggestion } from "@/types/iteration";
 import type { ProjectReference } from "@/types/project";
 import { buildPlanWithMetrics } from "@/lib/planner";
 import { planningRequestFromApprovedSrs } from "@/lib/projectMemory/plannerAdapter";
+import { applyConversationTurn } from "@/lib/conversation/conversationTurn";
+import { routeConversationIntents } from "@/lib/conversation/intentRouter";
+import {
+  architectureArtifact,
+  buildArtifact,
+  projectBlueprint,
+} from "@/lib/artifacts/artifacts";
+import {
+  estimateProjectImplementationCredit,
+  implementationEstimateMarkdown,
+} from "@/lib/estimator/projectEstimate";
 import { processReferences, referenceError } from "@/lib/reference";
 import type { ReferenceAnalysis, ReferenceInput } from "@/lib/reference/types";
 import { MultipartError, parseMultipart } from "./multipart";
+import { runPromgentConversation } from "./promgentConversation";
+import { discoverNodeTestCommands, repositoryTestRunner } from "./repositoryTestRunner";
+import { cachedOrbioCatalogue } from "./orbioModelCatalogue";
+import { routeOrbioModel } from "@/lib/models/orbioRouter";
 
 const SESSION_COOKIE = "promgent_session";
 const REFRESH_COOKIE = "promgent_refresh";
@@ -876,6 +894,15 @@ export function guidedRouter(): express.Router {
         .filter(Boolean);
       const referenceRequestId = randomUUID();
       const referenceStarted = Date.now();
+      const referenceModel = project.selectedModel === "auto" && (parsedRequest.images.length || urls.length)
+        ? routeOrbioModel({
+            models: cachedOrbioCatalogue(),
+            mode: "auto",
+            taskClass: "image_analysis",
+            requiredModalities: parsedRequest.images.length ? ["text", "image"] : ["text"],
+            contextTokens: 16_000,
+          }).model.id
+        : providerModelId(project.selectedModel);
       const referenceResult = await runOrbioInference(
         user.id,
         () =>
@@ -893,7 +920,7 @@ export function guidedRouter(): express.Router {
               )
                 .trim()
                 .replace(/\/+$/, ""),
-              model: providerModelId(project.selectedModel),
+              model: referenceModel,
             },
           }),
         connection,
@@ -940,21 +967,23 @@ export function guidedRouter(): express.Router {
       const inference = await runOrbioInference(
         user.id,
         () =>
-          runGuidedInterviewInference({
+          runPromgentConversation({
             apiKey: connection.apiKey,
             project,
             memory,
-            opening: true,
+            recentMessages: [],
+            userContent: description,
           }),
         connection,
       );
       const interviewInferenceMs = Date.now() - inferenceStarted;
       const intakeProposal = validateInterviewProposal({
-        raw: inference.structuredProposal,
+        raw: inference.structuredMemoryProposal,
         memory,
         userContent: description,
         sourceMessageId: `intake:${project.id}`,
         now: project.createdAt,
+        fallbackToUserContent: false,
       });
       const intakeDraft = {
         ...memory,
@@ -998,8 +1027,13 @@ export function guidedRouter(): express.Router {
         projectId: project.id,
         sessionId: session.id,
         role: "assistant" as const,
-        content: inference.assistantContent,
+        content: inference.response.message,
         source: "system" as const,
+        modelRoute: {
+          ...inference.route,
+          requestId: inference.requestId,
+          modelMode: project.modelMode ?? "auto",
+        },
         createdAt: project.createdAt,
       };
       const persistenceStarted = Date.now();
@@ -1028,7 +1062,7 @@ export function guidedRouter(): express.Router {
                 userId: user.id,
                 projectId: project.id,
                 phase: "reference_analysis",
-                model: providerModelId(project.selectedModel),
+                model: referenceModel,
                 requestId: referenceRequestId,
               }),
             ]
@@ -1199,6 +1233,463 @@ export function guidedRouter(): express.Router {
             providerInferenceMs: providerMs,
             promgentOverheadMs: overheadMs,
           },
+        },
+      });
+    } catch (error) {
+      errorResponse(response, error);
+    }
+  });
+
+  router.post("/projects/:projectId/conversation", async (request, response) => {
+    const perfStarted = Date.now();
+    const fallbackRequestId = randomUUID();
+    try {
+      const user = await authenticatedUser(request);
+      const parsedConversation = projectRequestInput(request);
+      const conversationInput = parsedConversation.input;
+      const content = String(conversationInput.content ?? "").trim();
+      if (!content || content.length > 8000)
+        throw new PersistenceError(
+          "CONVERSATION_VALIDATION_FAILED",
+          "Enter a message of up to 8,000 characters.",
+          400,
+        );
+      let databaseReadMs = 0;
+      let credentialMs = 0;
+      const [state, credential, previousArtifacts, previousArchitecture] =
+        await Promise.all([
+          (async () => {
+            const started = Date.now();
+            const value = await loadInterviewStateForUser(
+              request.params.projectId,
+              user.id,
+            );
+            databaseReadMs = Date.now() - started;
+            return value;
+          })(),
+          (async () => {
+            const started = Date.now();
+            const value = await loadOrbioCredentialForInference(user.id);
+            credentialMs = Date.now() - started;
+            return value;
+          })(),
+          loadProjectArtifacts(request.params.projectId),
+          loadLatestArchitecture(request.params.projectId),
+        ]);
+      const recentMessages = (
+        await snapshotForUser(state.project.id, user.id)
+      ).messages.slice(-8);
+      const intents = routeConversationIntents(content);
+      let repositoryRetrievalMs = 0;
+      let repositorySnapshot: Awaited<ReturnType<typeof inspectRepository>> | undefined;
+      let ciEvidence: GithubCiEvidence | undefined;
+      let testRun: Awaited<ReturnType<typeof repositoryTestRunner.run>> | undefined;
+      let liveProductSnapshot: Awaited<ReturnType<typeof inspectLiveProduct>> | undefined;
+      let imageAnalyses: ReferenceAnalysis[] = [];
+      let imageAnalysisMs = 0;
+      if (intents.includes("repository_review")) {
+        const repositoryUrl = content.match(/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/i)?.[0]?.replace(/[),.;]+$/, "");
+        if (repositoryUrl) {
+          const repositoryStarted = Date.now();
+          repositorySnapshot = await inspectRepository(repositoryUrl, {
+            ...(state.memory.currentReviewedCommit
+              ? { previousCommitSha: state.memory.currentReviewedCommit }
+              : {}),
+            requirementText: state.memory.requirements.map((item) => item.description),
+          });
+          ciEvidence = await inspectGithubActions(repositorySnapshot);
+          const commands = discoverNodeTestCommands(repositorySnapshot.evidenceText);
+          testRun = await repositoryTestRunner.run({
+            projectId: state.project.id,
+            snapshot: repositorySnapshot,
+            commands,
+            explicitlyAuthorized: false,
+          });
+          repositoryRetrievalMs = Date.now() - repositoryStarted;
+        }
+      }
+      if (intents.includes("live_product_review")) {
+        const liveUrl = content.match(/https:\/\/(?!github\.com)[^\s<>()]+/i)?.[0]?.replace(/[),.;]+$/, "");
+        if (liveUrl) {
+          const liveStarted = Date.now();
+          liveProductSnapshot = await inspectLiveProduct(liveUrl);
+          repositoryRetrievalMs += Date.now() - liveStarted;
+        }
+      }
+      if (parsedConversation.images.length) {
+        const imageStarted = Date.now();
+        const imageRequestId = randomUUID();
+        const imageModel = routeOrbioModel({
+          models: cachedOrbioCatalogue(),
+          mode: state.project.modelMode ?? (state.project.selectedModel === "auto" ? "auto" : "locked"),
+          ...(state.project.selectedModel !== "auto"
+            ? { lockedModel: providerModelId(state.project.selectedModel) }
+            : {}),
+          taskClass: "image_analysis",
+          requiredModalities: ["text", "image"],
+          contextTokens: 16_000,
+        }).model.id;
+        const analyzed = await runOrbioInference(
+          user.id,
+          () => processSelectedModelReferences({
+            taskDescription: content,
+            images: parsedConversation.images,
+            urls: [],
+            requestId: imageRequestId,
+            provider: {
+              apiKey: credential.apiKey,
+              baseUrl: String(process.env.ORBIO_BASE_URL ?? process.env.AGENTFUND_AI_BASE_URL ?? "").trim().replace(/\/+$/, ""),
+              model: imageModel,
+            },
+          }),
+          credential,
+        );
+        if (!analyzed.ok) throw referenceError(analyzed.code, analyzed.message);
+        imageAnalyses = analyzed.analyses;
+        await recordGuidedUsage({ userId: user.id, projectId: state.project.id, phase: "image_analysis", model: imageModel, requestId: imageRequestId });
+        imageAnalysisMs = Date.now() - imageStarted;
+      }
+      const providerStarted = Date.now();
+      const inference = await runOrbioInference(
+        user.id,
+        () =>
+          runPromgentConversation({
+            apiKey: credential.apiKey,
+            project: state.project,
+            memory: state.memory,
+            recentMessages,
+            userContent: content,
+            ...(repositorySnapshot || liveProductSnapshot || imageAnalyses.length
+              ? {
+                  externalEvidence: [
+                    repositorySnapshot?.evidenceText ?? "No repository was supplied.",
+                    ciEvidence?.summary ?? "CI evidence was not inspected.",
+                    testRun?.summary ?? "No Promgent test-runner evidence exists.",
+                    liveProductSnapshot ? `Safely inspected live product data: ${JSON.stringify(liveProductSnapshot)}` : "No live product was supplied.",
+                    imageAnalyses.length ? `Analyzed user-supplied image data: ${JSON.stringify(imageAnalyses)}` : "No image was supplied.",
+                  ].join("\n\n"),
+                }
+              : {}),
+          }),
+        credential,
+      );
+      const providerMs = Date.now() - providerStarted;
+      const allowedSources = new Set([
+        "text",
+        "voice_transcript",
+        "image",
+        "website_reference",
+        "repository",
+        "live_url",
+      ]);
+      const requestedSource = String(conversationInput.source ?? "text");
+      let turn = applyConversationTurn({
+        memory: state.memory,
+        session: state.interview,
+        content,
+        source: repositorySnapshot
+          ? "repository"
+          : liveProductSnapshot
+            ? "live_url"
+            : imageAnalyses.length
+              ? "image"
+            : allowedSources.has(requestedSource)
+          ? (requestedSource as InterviewMessage["source"])
+          : "text",
+        intents: inference.response.intents,
+        response: inference.response,
+        structuredMemoryProposal: inference.structuredMemoryProposal,
+      });
+      if (repositorySnapshot)
+        turn = {
+          ...turn,
+          memory: {
+            ...turn.memory,
+            connectedRepository: repositorySnapshot.repositoryUrl,
+            currentReviewedCommit: repositorySnapshot.commitSha ?? null,
+            currentImplementationState: repositorySnapshot.unchanged
+              ? "Repository unchanged since the previous review."
+              : `Static review captured commit ${repositorySnapshot.commitSha?.slice(0, 12) ?? "unknown"}.`,
+            projectPhase: "reviewing",
+          },
+        };
+      if (liveProductSnapshot)
+        turn = {
+          ...turn,
+          memory: {
+            ...turn.memory,
+            references: [...new Set([...(turn.memory.references ?? []), liveProductSnapshot.url])],
+            currentImplementationState: liveProductSnapshot.status === "reviewed"
+              ? `Live product safely inspected at ${liveProductSnapshot.inspectedAt}. Browser behavior was not executed.`
+              : `Live product inspection was unavailable at ${liveProductSnapshot.inspectedAt}.`,
+            projectPhase: "reviewing",
+          },
+        };
+      if (imageAnalyses.length)
+        turn = {
+          ...turn,
+          memory: {
+            ...turn.memory,
+            designPreferences: [
+              ...new Set([
+                ...turn.memory.designPreferences,
+                ...imageAnalyses.map((analysis) => `Image observation: ${analysis.summary}`),
+              ]),
+            ],
+            references: [
+              ...new Set([
+                ...(turn.memory.references ?? []),
+                ...parsedConversation.images.map((image) => `upload:${image.filename ?? "conversation-image"}`),
+              ]),
+            ],
+            version: turn.memory.version === state.memory.version ? turn.memory.version + 1 : turn.memory.version,
+            updatedAt: new Date().toISOString(),
+          },
+        };
+      const requested = [...inference.response.artifactRequests];
+      if (
+        inference.response.intents.includes("architecture_request") &&
+        !requested.some((item) => item.type === "architecture")
+      )
+        requested.push({
+          type: "architecture",
+          title: "Architecture",
+          reason: "The user asked to see how the project connects.",
+        });
+      if (
+        liveProductSnapshot &&
+        !requested.some((item) => item.type === "live_product_review")
+      )
+        requested.push({
+          type: "live_product_review",
+          title: "Live product review",
+          reason: "The user supplied a live product URL for safe inspection.",
+          content: [
+            inference.response.message,
+            "",
+            `URL: ${liveProductSnapshot.url}`,
+            `Inspected at: ${liveProductSnapshot.inspectedAt}`,
+            `Status: ${liveProductSnapshot.status}`,
+            "Evidence category: Observed through bounded server-side document inspection. Interactive browser behavior and runtime flows were not executed.",
+          ].join("\n"),
+          structuredData: { ...liveProductSnapshot, browserExecution: false },
+        });
+      if (
+        inference.response.intents.includes("credit_estimate_request") &&
+        !requested.some((item) => item.type === "cost_estimate")
+      )
+        requested.push({
+          type: "cost_estimate",
+          title: "Estimated build budget",
+          reason: "The user requested an implementation CREDIT estimate.",
+        });
+      if (
+        repositorySnapshot &&
+        !requested.some((item) => item.type === "repository_review")
+      )
+        requested.push({
+          type: "repository_review",
+          title: `Review of ${repositorySnapshot.owner}/${repositorySnapshot.name}`,
+          reason: "The user supplied a public GitHub repository for review.",
+          content: [
+            inference.response.message,
+            "",
+            `Repository: ${repositorySnapshot.repositoryUrl}`,
+            `Branch: ${repositorySnapshot.branch ?? "unknown"}`,
+            `Exact reviewed commit: ${repositorySnapshot.commitSha ?? "unknown"}`,
+            `Reviewed at: ${repositorySnapshot.reviewedAt}`,
+            "",
+            ciEvidence?.summary ?? "CI evidence was unavailable.",
+            testRun?.summary ?? "Promgent did not execute repository code.",
+          ].join("\n"),
+          structuredData: {
+            repositoryUrl: repositorySnapshot.repositoryUrl,
+            branch: repositorySnapshot.branch,
+            commitSha: repositorySnapshot.commitSha,
+            reviewedAt: repositorySnapshot.reviewedAt,
+            relevantFiles: repositorySnapshot.relevantFiles,
+            changedFiles: repositorySnapshot.changedFiles ?? [],
+            ci: ciEvidence ?? null,
+            testRun: testRun ?? null,
+          },
+        });
+
+      const artifactPriority = [
+        ...(repositorySnapshot ? ["repository_review"] : []),
+        ...(liveProductSnapshot ? ["live_product_review"] : []),
+        ...(inference.response.intents.includes("architecture_request") ? ["architecture"] : []),
+        ...(inference.response.intents.includes("credit_estimate_request") ? ["cost_estimate"] : []),
+      ];
+      requested.sort((left, right) => {
+        const leftIndex = artifactPriority.indexOf(left.type);
+        const rightIndex = artifactPriority.indexOf(right.type);
+        return (leftIndex < 0 ? 99 : leftIndex) - (rightIndex < 0 ? 99 : rightIndex);
+      });
+
+      const artifacts: ProjectArtifact[] = [];
+      const attachedArtifactIds: string[] = [];
+      for (const artifactRequest of requested.slice(0, 4)) {
+        const previous = [...previousArtifacts]
+          .filter((item) => item.type === artifactRequest.type)
+          .sort((a, b) => b.version - a.version)[0];
+        let title = artifactRequest.title ?? artifactRequest.type;
+        let artifactContent = artifactRequest.content ?? "";
+        let structuredData = artifactRequest.structuredData ?? {};
+        if (artifactRequest.type === "project_blueprint") {
+          const blueprint = projectBlueprint(turn.memory);
+          title = blueprint.title;
+          artifactContent = blueprint.content;
+          structuredData = blueprint.structuredData;
+        } else if (artifactRequest.type === "architecture") {
+          const architecture = architectureForMemory({
+            memory: turn.memory,
+            previous: previousArchitecture,
+          });
+          const generated = architectureArtifact(architecture);
+          title = generated.title;
+          artifactContent = generated.content;
+          structuredData = generated.structuredData;
+        } else if (artifactRequest.type === "cost_estimate") {
+          const estimate = estimateProjectImplementationCredit(
+            state.project,
+            turn.memory,
+          );
+          title = "Estimated build budget";
+          artifactContent = implementationEstimateMarkdown(estimate);
+          structuredData = { ...estimate };
+        } else if (
+          artifactRequest.type === "repository_review" &&
+          repositorySnapshot
+        ) {
+          title = artifactRequest.title ?? `Review of ${repositorySnapshot.owner}/${repositorySnapshot.name}`;
+          artifactContent = [
+            artifactContent || inference.response.message,
+            "",
+            `Repository: ${repositorySnapshot.repositoryUrl}`,
+            `Branch: ${repositorySnapshot.branch ?? "unknown"}`,
+            `Exact reviewed commit: ${repositorySnapshot.commitSha ?? "unknown"}`,
+            `Reviewed at: ${repositorySnapshot.reviewedAt}`,
+            "",
+            ciEvidence?.summary ?? "CI evidence was unavailable.",
+            testRun?.summary ?? "Promgent did not execute repository code.",
+          ].join("\n");
+          structuredData = {
+            ...structuredData,
+            repositoryUrl: repositorySnapshot.repositoryUrl,
+            branch: repositorySnapshot.branch,
+            commitSha: repositorySnapshot.commitSha,
+            reviewedAt: repositorySnapshot.reviewedAt,
+            relevantFiles: repositorySnapshot.relevantFiles,
+            changedFiles: repositorySnapshot.changedFiles ?? [],
+            ci: ciEvidence ?? null,
+            testRun: testRun ?? null,
+          };
+        } else if (
+          artifactRequest.type === "live_product_review" &&
+          liveProductSnapshot
+        ) {
+          title = artifactRequest.title ?? "Live product review";
+          artifactContent = [
+            artifactContent || inference.response.message,
+            "",
+            `URL: ${liveProductSnapshot.url}`,
+            `Inspected at: ${liveProductSnapshot.inspectedAt}`,
+            `Status: ${liveProductSnapshot.status}`,
+            "Evidence category: Observed through bounded server-side document inspection. Interactive browser behavior and runtime flows were not executed.",
+          ].join("\n");
+          structuredData = { ...structuredData, ...liveProductSnapshot, browserExecution: false };
+        }
+        if (!artifactContent.trim()) continue;
+        const artifact = buildArtifact({
+          id: randomUUID(),
+          projectId: state.project.id,
+          type: artifactRequest.type,
+          title,
+          content: artifactContent,
+          structuredData,
+          sourceMessageId: turn.assistantMessage.id,
+          previous,
+        });
+        attachedArtifactIds.push(artifact.id);
+        if (artifact !== previous) artifacts.push(artifact);
+      }
+
+      const allArtifactIds = attachedArtifactIds;
+      const actions: ProjectAction[] = inference.response.suggestedActions.map((action) => ({
+        ...action,
+        id: randomUUID(),
+      }));
+      for (const artifact of artifacts)
+        actions.push({
+          id: randomUUID(),
+          type: "view_artifact",
+          label: `View ${artifact.title}`,
+          payload: { artifactId: artifact.id },
+        });
+      const assistantMessage = {
+        ...turn.assistantMessage,
+        artifactIds: allArtifactIds,
+        modelRoute: inference.route,
+      };
+      await recordGuidedUsage({
+        userId: user.id,
+        projectId: state.project.id,
+        phase: inference.route.taskClass,
+        model: inference.model,
+        requestId: inference.requestId,
+        usage: inference.usage,
+      });
+      const persistenceStarted = Date.now();
+      await persistConversationTurnAtomic({
+        userId: user.id,
+        projectId: state.project.id,
+        userMessage: turn.userMessage,
+        assistantMessage,
+        memory: turn.memory,
+        session: turn.session,
+        phase: turn.memory.projectPhase ?? "exploring",
+        actions,
+        artifacts,
+        modelRoute: {
+          ...inference.route,
+          id: randomUUID(),
+          requestId: inference.requestId || fallbackRequestId,
+          modelMode:
+            state.project.modelMode ??
+            (state.project.selectedModel === "auto" ? "auto" : "locked"),
+          ...(state.project.selectedModel !== "auto"
+            ? { requestedModel: state.project.selectedModel }
+            : {}),
+          ...(inference.usage ? { providerUsage: inference.usage } : {}),
+        },
+        repositorySnapshot,
+        testRun,
+      });
+      const persistenceMs = Date.now() - persistenceStarted;
+      const usage = await projectUsageForUser(state.project.id, user.id);
+      logPerf("conversation", inference.requestId || fallbackRequestId, {
+        databaseReadMs,
+        credentialMs,
+        providerMs,
+        imageAnalysisMs,
+        repositoryRetrievalMs,
+        persistenceMs,
+        totalMs: Date.now() - perfStarted,
+      });
+      response.json({
+        success: true,
+        data: {
+          userMessage: turn.userMessage,
+          assistantMessage,
+          memory: turn.memory,
+          interview: turn.session,
+          artifacts,
+          actions,
+          usage,
+          repositorySnapshot,
+          ciEvidence,
+          testRun,
+          liveProductSnapshot,
         },
       });
     } catch (error) {

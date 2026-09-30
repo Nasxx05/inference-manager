@@ -66,6 +66,7 @@ export type AiStage =
   | "prompt-generation"
   | "reference-analysis"
   | "guided-interview"
+  | "project-conversation"
   | "repository-review"
   | "traceability-analysis"
   | "suggestion-analysis"

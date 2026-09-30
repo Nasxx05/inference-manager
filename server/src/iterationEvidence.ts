@@ -6,6 +6,15 @@ const MAX_RELEVANT_FILES = 24;
 const MAX_FILE_BYTES = 120_000;
 const MAX_EVIDENCE_CHARS = 60_000;
 
+export interface GithubCiEvidence {
+  available: boolean;
+  commitSha: string;
+  status: "passed" | "failed" | "running" | "unavailable";
+  workflowRuns: Array<{ name: string; status: string; conclusion?: string; url?: string }>;
+  summary: string;
+  checkedAt: string;
+}
+
 function githubParts(value: string): { owner: string; name: string } {
   let url: URL;
   try { url = new URL(value.trim()); } catch { throw new PersistenceError("REPOSITORY_FETCH_FAILED", "Enter a valid GitHub repository URL.", 400); }
@@ -103,6 +112,28 @@ export async function inspectRepository(repositoryUrl: string, options: { previo
     } catch { /* One inaccessible file must not discard the repository review. */ }
   }
   return { repositoryUrl, owner, name, branch, commitSha, ...(options.previousCommitSha ? { previousCommitSha: options.previousCommitSha } : {}), ...(changedFiles.length ? { changedFiles } : {}), ...(comparisonUrl ? { comparisonUrl } : {}), unchanged: Boolean(options.previousCommitSha && options.previousCommitSha === commitSha), reviewedAt: new Date().toISOString(), fileCount: files.length, relevantFiles: selected.map((item) => item.path), structuralSummary: chunks.slice(0, 6).join("\n"), evidenceText: chunks.join("\n").slice(0, MAX_EVIDENCE_CHARS), status: "reviewed" };
+}
+
+export async function inspectGithubActions(snapshot: RepositorySnapshot): Promise<GithubCiEvidence> {
+  const checkedAt = new Date().toISOString();
+  if (!snapshot.owner || !snapshot.name || !snapshot.commitSha)
+    return { available: false, commitSha: snapshot.commitSha ?? "", status: "unavailable", workflowRuns: [], summary: "No exact repository commit was available for CI inspection.", checkedAt };
+  try {
+    const data = await githubJson<{ workflow_runs?: Array<{ name?: string; status?: string; conclusion?: string | null; html_url?: string; head_sha?: string }> }>(
+      `https://api.github.com/repos/${encodeURIComponent(snapshot.owner)}/${encodeURIComponent(snapshot.name)}/actions/runs?head_sha=${encodeURIComponent(snapshot.commitSha)}&per_page=20`,
+    );
+    const runs = (data.workflow_runs ?? [])
+      .filter((run) => run.head_sha === snapshot.commitSha)
+      .map((run) => ({ name: String(run.name ?? "GitHub Actions"), status: String(run.status ?? "unknown"), ...(run.conclusion ? { conclusion: String(run.conclusion) } : {}), ...(run.html_url ? { url: String(run.html_url) } : {}) }));
+    if (!runs.length)
+      return { available: false, commitSha: snapshot.commitSha, status: "unavailable", workflowRuns: [], summary: `No GitHub Actions run was found for commit ${snapshot.commitSha.slice(0, 12)}. Tests may exist in source, but Promgent cannot claim they passed.`, checkedAt };
+    const running = runs.some((run) => run.status !== "completed");
+    const failed = runs.some((run) => run.status === "completed" && !["success", "neutral", "skipped"].includes(run.conclusion ?? ""));
+    const status = running ? "running" : failed ? "failed" : "passed";
+    return { available: true, commitSha: snapshot.commitSha, status, workflowRuns: runs, summary: `GitHub Actions evidence for exact commit ${snapshot.commitSha.slice(0, 12)}: ${runs.map((run) => `${run.name} — ${run.status}${run.conclusion ? `/${run.conclusion}` : ""}`).join("; ")}.`, checkedAt };
+  } catch (error) {
+    return { available: false, commitSha: snapshot.commitSha, status: "unavailable", workflowRuns: [], summary: error instanceof Error ? `GitHub Actions evidence was unavailable: ${error.message}` : "GitHub Actions evidence was unavailable.", checkedAt };
+  }
 }
 
 export async function inspectLiveProduct(url: string): Promise<LiveProductSnapshot> {

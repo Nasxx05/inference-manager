@@ -16,6 +16,7 @@ import type {
   ProjectIteration,
   SuggestionDiscussionMessage,
 } from "@/types/iteration";
+import type { ProjectAction, ProjectArtifact } from "@/types/conversation";
 
 export interface GuidedUser {
   id: string;
@@ -261,6 +262,37 @@ export function sendInterview(
     method: "POST",
     body: JSON.stringify({ content, source }),
   });
+}
+
+export interface ConversationTurnResponse {
+  memory: ProjectMemory;
+  interview: InterviewSession;
+  userMessage: GuidedProjectSnapshot["messages"][number];
+  assistantMessage: GuidedProjectSnapshot["messages"][number];
+  artifacts: ProjectArtifact[];
+  actions: ProjectAction[];
+  usage?: ProjectUsageSummary;
+}
+
+export async function sendConversation(
+  projectId: string,
+  content: string,
+  source: "text" | "voice_transcript" = "text",
+  image?: File | null,
+): Promise<ConversationTurnResponse> {
+  const path = `/api/projects/${encodeURIComponent(projectId)}/conversation`;
+  if (!image) return call<ConversationTurnResponse>(path, {
+    method: "POST",
+    body: JSON.stringify({ content, source }),
+  });
+  const form = new FormData();
+  form.append("payload", JSON.stringify({ content, source }));
+  form.append("images", image, image.name);
+  const response = await fetch(endpoint(path), { method: "POST", credentials: "include", body: form });
+  const payload = (await response.json().catch(() => null)) as { success?: boolean; data?: ConversationTurnResponse; error?: { code?: string; message?: string; requestId?: string } } | null;
+  if (!response.ok || !payload?.success || !payload.data)
+    throw new GuidedApiError(payload?.error?.message ?? "The image message could not be completed.", payload?.error?.code, payload?.error?.requestId);
+  return payload.data;
 }
 
 export function getProjectUsage(

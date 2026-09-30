@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Promgent — Budget-aware AI task planner",
+  title: "Promgent — Your AI software-building guide",
   description:
-    "Describe what you want to build, choose your model and budget, and Promgent creates a realistic execution plan and optimized prompt for the task.",
+    "Shape, plan, build, review, and improve a software project with one context-aware senior engineering guide powered by Orbio.",
   applicationName: "Promgent",
   icons: {
     icon: [{ url: "/promgent-icon.png", type: "image/png", sizes: "192x192" }],

@@ -1,4 +1,13 @@
 import type { PlanResult } from "@/types";
+import type {
+  ConversationMessageSource,
+  ModelMode,
+  ModelRouteSummary,
+  NextRecommendedAction,
+  ProjectDecision,
+  ProjectPhase,
+  ProjectArtifact,
+} from "@/types/conversation";
 
 /**
  * Shared domain contracts for the persistent Promgent project workflow.
@@ -102,9 +111,12 @@ export interface ProjectRecord {
   initialDescription: string;
   projectType: string;
   selectedModel: string;
+  modelMode?: ModelMode;
   planningDepth: PlanningDepth;
   creditBudget: number;
   status: ProjectStatus;
+  phase?: ProjectPhase;
+  nextRecommendedAction?: NextRecommendedAction | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -168,10 +180,40 @@ export interface ProjectMemory {
   purpose: string;
   projectType: string;
   users: string[];
+  secondaryUsers?: string[];
+  administrators?: string[];
+  stakeholders?: string[];
+  mvpScope?: string[];
+  deferredScope?: string[];
+  rejectedIdeas?: string[];
+  futureIdeas?: string[];
   requirements: Requirement[];
   conflicts: RequirementConflict[];
   assumptions: string[];
   risks: string[];
+  workflows?: string[];
+  adminWorkflows?: string[];
+  decisions?: ProjectDecision[];
+  proposedStack?: string[];
+  confirmedStack?: string[];
+  hosting?: string[];
+  database?: string[];
+  authentication?: string[];
+  externalServices?: string[];
+  apis?: string[];
+  architectureSummary?: string;
+  dataModel?: string[];
+  references?: string[];
+  constraints?: string[];
+  currentImplementationState?: string;
+  connectedRepository?: string | null;
+  currentReviewedCommit?: string | null;
+  knownProblems?: string[];
+  nextRecommendedAction?: NextRecommendedAction | null;
+  projectPhase?: ProjectPhase;
+  artifactVersions?: Record<string, number>;
+  creditEstimates?: Record<string, unknown>;
+  creditUsage?: Record<string, unknown>;
   openQuestions: QuestionBacklogItem[];
   designPreferences: string[];
   technicalConstraints: string[];
@@ -196,7 +238,10 @@ export interface InterviewMessage {
   sessionId: string;
   role: "user" | "assistant" | "system";
   content: string;
-  source: "text" | "voice_transcript" | "reference" | "system";
+  source: ConversationMessageSource | "reference";
+  artifactIds?: string[];
+  modelRoute?: ModelRouteSummary;
+  metadata?: Record<string, unknown>;
   createdAt: string;
 }
 
@@ -240,6 +285,7 @@ export interface GuidedProjectSnapshot {
   architecture?: ArchitectureVersion;
   srs?: SrsDocument;
   references?: ProjectReference[];
+  artifacts?: ProjectArtifact[];
   implementationPlan?: PlanResult;
   usage: ProjectUsageSummary;
 }

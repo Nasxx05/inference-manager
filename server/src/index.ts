@@ -51,6 +51,7 @@ import { parseBudget, parseOptimization } from "@/lib/validation/schemas";
 import type { ClarifyingQuestion, OptimizationPreference, TaskType } from "@/types";
 import { guidedRouter } from "./guidedRoutes";
 import { credentialEncryptionConfigured, requireCredentialEncryptionKey } from "./persistence";
+import { warmOrbioCatalogue } from "./orbioModelCatalogue";
 
 // Must run before any env value is read below, and before PORT or the CORS
 // allow-list are captured. On the host this is a no-op: the variables already
@@ -754,6 +755,9 @@ app.use((_request, response) => {
 });
 
 app.listen(PORT, () => {
+  // Warm safe model metadata outside the conversation hot path. A catalogue
+  // outage never blocks startup or causes an inference retry.
+  warmOrbioCatalogue();
   const health = backendHealth();
   const budgets = tokenBudgets();
   console.log(`Promgent backend listening on port ${PORT}`);
