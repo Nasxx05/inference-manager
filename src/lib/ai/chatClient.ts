@@ -125,6 +125,8 @@ export interface ChatResult {
     inputTokens?: number;
     outputTokens?: number;
     totalTokens?: number;
+    /** Exact provider-reported charge when available. */
+    cost?: number;
   };
   /** How many times the request was actually sent: 1, or 2 after one retry. */
   attemptCount: number;
@@ -330,6 +332,7 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
         prompt_tokens?: number;
         completion_tokens?: number;
         total_tokens?: number;
+        cost?: number;
       };
     };
     const providerDurationMs =
@@ -383,6 +386,9 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
             inputTokens: payload.usage.prompt_tokens,
             outputTokens: payload.usage.completion_tokens,
             totalTokens: payload.usage.total_tokens,
+            ...(Number.isFinite(payload.usage.cost)
+              ? { cost: Math.max(0, Number(payload.usage.cost)) }
+              : {}),
           }
         : undefined,
       attemptCount: attempt,

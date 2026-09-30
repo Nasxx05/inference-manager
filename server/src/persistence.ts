@@ -1432,6 +1432,18 @@ export async function snapshotForUser(
   };
 }
 
+/** Small hot-path read used while composing the next conversation turn. */
+export async function loadRecentInterviewMessages(
+  projectId: string,
+  limit = 8,
+): Promise<InterviewMessage[]> {
+  const safeLimit = Math.max(1, Math.min(20, Math.floor(limit)));
+  const rows = await request<Record<string, unknown>[]>({
+    path: `/rest/v1/interview_messages?select=*&project_id=eq.${query(projectId)}&order=created_at.desc&limit=${safeLimit}`,
+  });
+  return rows.reverse().map(messageFromRow);
+}
+
 export function encryptOrbioKey(value: string): string {
   const configured = requireCredentialEncryptionKey();
   const iv = randomBytes(12);

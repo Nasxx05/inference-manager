@@ -55,3 +55,83 @@ export function projectBlueprint(memory: ProjectMemory): { title: string; conten
 export function architectureArtifact(architecture: ArchitectureVersion): { title: string; content: string; structuredData: Record<string, unknown> } {
   return { title: "Architecture", content: `${architecture.summary}\n\n\`\`\`mermaid\n${architecture.diagramSource}\n\`\`\``, structuredData: { diagramSource: architecture.diagramSource, reasonForChange: architecture.reasonForChange, legacyArchitectureId: architecture.id } };
 }
+
+export function implementationPromptArtifact(input: {
+  memory: ProjectMemory;
+  title?: string;
+  additionalInstructions?: string;
+  kind?: "implementation" | "correction" | "enhancement";
+}): { title: string; content: string; structuredData: Record<string, unknown> } {
+  const { memory } = input;
+  const requirements = activeRequirements(memory).filter((item) => item.required).slice(0, 30);
+  const criteria = memory.acceptanceCriteria
+    .map((item) => typeof item === "string" ? item : item.description)
+    .filter(Boolean)
+    .slice(0, 40);
+  const stack = memory.confirmedStack?.length ? memory.confirmedStack : memory.proposedStack ?? [];
+  const list = (items: string[], empty: string) => items.length ? items.map((item) => `- ${item}`).join("\n") : `- ${empty}`;
+  const kind = input.kind ?? "implementation";
+  const title = input.title?.trim() || `${kind[0]!.toUpperCase()}${kind.slice(1)} prompt`;
+  const content = [
+    `# ${title}`,
+    "",
+    "## Role",
+    "Act as a senior product engineer working inside the existing repository. Inspect the current implementation before editing, preserve working behavior, and make the smallest coherent change that fully satisfies this prompt.",
+    "",
+    "## Objective",
+    memory.purpose || "Implement the confirmed project scope described below.",
+    "",
+    "## Current project context",
+    `- Project phase: ${memory.projectPhase ?? "exploring"}`,
+    `- Current implementation: ${memory.currentImplementationState ?? "Inspect the repository and report what already exists before changing it."}`,
+    `- Reviewed commit: ${memory.currentReviewedCommit ?? "No reviewed commit is recorded; do not assume repository state."}`,
+    "",
+    "## Required scope",
+    list(requirements.map((item) => `[${item.priority}] ${item.description}`), "No requirements are confirmed yet; stop and request the missing product decisions."),
+    "",
+    "## Main workflows",
+    list(memory.workflows ?? [], "Derive only the minimum workflows supported by the required scope."),
+    "",
+    "## Technical direction",
+    list(stack, "Reuse the repository's established stack and conventions; do not introduce a new framework without a demonstrated need."),
+    "",
+    "## Constraints",
+    list([...new Set([...(memory.constraints ?? []), ...memory.technicalConstraints])], "Preserve backward compatibility, security boundaries, and existing user data."),
+    "",
+    "## Acceptance criteria",
+    list(criteria, "Add observable acceptance criteria before implementation if the requested behavior remains ambiguous."),
+    "",
+    "## Additional task-specific instructions",
+    input.additionalInstructions?.trim() || "No additional instructions. Follow the canonical scope above.",
+    "",
+    "## Implementation requirements",
+    "- Trace each code change to a required behavior or acceptance criterion.",
+    "- Reuse existing modules, design tokens, data contracts, and error-handling patterns.",
+    "- Keep authentication, authorization, persistence, and transaction boundaries intact.",
+    "- Handle loading, empty, success, validation, and failure states where the affected flow needs them.",
+    "- Do not silently add product scope, dependencies, migrations, or infrastructure that the requirements do not justify.",
+    "- If a database change is required, provide a safe forward migration and maintain compatibility with existing records.",
+    "",
+    "## Verification",
+    "- Run the relevant unit, integration, type, lint, and production-build checks.",
+    "- Add or update regression tests for every changed behavior and important failure path.",
+    "- Verify the complete user journey, including persistence after refresh when state changes.",
+    "- Never claim a check passed unless it was actually executed; report any unavailable check explicitly.",
+    "",
+    "## Do not change",
+    list(memory.deferredScope ?? [], "Anything outside the required scope or unrelated working behavior."),
+    "",
+    "## Final report",
+    "Return a concise summary of files changed, product behavior delivered, migrations or configuration required, tests executed with results, and any remaining risks or follow-up work.",
+  ].join("\n");
+  return {
+    title,
+    content,
+    structuredData: {
+      kind,
+      requirementIds: requirements.map((item) => item.id),
+      acceptanceCriteriaCount: criteria.length,
+      generatedFromMemoryVersion: memory.version,
+    },
+  };
+}

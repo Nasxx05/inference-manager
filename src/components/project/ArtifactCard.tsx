@@ -3,6 +3,7 @@
 import { Check, Copy, FileText } from "lucide-react";
 import { useState } from "react";
 import type { ProjectArtifact } from "@/types/conversation";
+import { ArchitectureDiagram } from "./ArchitectureDiagram";
 
 export function ArtifactCard({ artifact }: { artifact: ProjectArtifact }) {
   const [copied, setCopied] = useState(false);
@@ -12,6 +13,10 @@ export function ArtifactCard({ artifact }: { artifact: ProjectArtifact }) {
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1400);
   }
+  const diagramSource = artifact.type === "architecture" && typeof artifact.structuredData.diagramSource === "string"
+    ? artifact.structuredData.diagramSource
+    : null;
+  const architectureSummary = diagramSource ? artifact.content.split("```mermaid")[0]?.trim() : null;
 
   return (
     <details className="group mt-4 overflow-hidden rounded-lg border border-line bg-paper">
@@ -37,9 +42,11 @@ export function ArtifactCard({ artifact }: { artifact: ProjectArtifact }) {
             {copied ? "Copied" : "Copy"}
           </button>
         </div>
-        <div className="max-h-[32rem] overflow-auto whitespace-pre-wrap font-mono text-xs leading-6 text-ink">
-          {artifact.content}
-        </div>
+        {diagramSource ? <div className="space-y-4">
+          {architectureSummary ? <p className="text-sm leading-6 text-muted">{architectureSummary}</p> : null}
+          <ArchitectureDiagram source={diagramSource} />
+          <details className="text-xs text-muted"><summary className="cursor-pointer">View diagram source</summary><pre className="mt-2 overflow-auto whitespace-pre-wrap rounded-md bg-canvas p-3 font-mono leading-6 text-ink">{diagramSource}</pre></details>
+        </div> : <div className="max-h-[32rem] overflow-auto whitespace-pre-wrap font-mono text-xs leading-6 text-ink">{artifact.content}</div>}
       </div>
     </details>
   );

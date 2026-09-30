@@ -10,7 +10,7 @@ function List({ values, empty }: { values?: string[]; empty: string }) {
   ) : <p className="text-xs leading-5 text-muted">{empty}</p>;
 }
 
-export function ProjectContextPanel({ snapshot }: { snapshot: GuidedProjectSnapshot }) {
+export function ProjectContextPanel({ snapshot, balance }: { snapshot: GuidedProjectSnapshot; balance?: { available: number; currency: string } | null }) {
   const { project, memory, usage } = snapshot;
   const phase = memory.projectPhase ?? project.phase ?? "exploring";
   const next = memory.nextRecommendedAction ?? project.nextRecommendedAction;
@@ -51,10 +51,15 @@ export function ProjectContextPanel({ snapshot }: { snapshot: GuidedProjectSnaps
       </section>
 
       <section className="mt-6 grid grid-cols-2 gap-2">
+        <div className="col-span-2 rounded-md border border-line bg-forest-light/40 p-3">
+          <WalletCards className="h-3.5 w-3.5 text-forest" />
+          <p className="mt-2 font-mono text-sm">{balance ? balance.available.toFixed(3) : "—"}</p>
+          <p className="text-[10px] text-muted">Available {balance?.currency ?? "CREDIT"}</p>
+        </div>
         <div className="rounded-md border border-line p-3">
           <WalletCards className="h-3.5 w-3.5 text-credit" />
           <p className="mt-2 font-mono text-sm">{usage.used.toFixed(3)}</p>
-          <p className="text-[10px] text-muted">CREDIT used</p>
+          <p className="text-[10px] text-muted">Conversation CREDIT used</p>
         </div>
         <div className="rounded-md border border-line p-3">
           <GitBranch className="h-3.5 w-3.5 text-muted" />

@@ -11,28 +11,34 @@ export function architectureForMemory(input: {
   now?: string;
 }): ArchitectureVersion {
   const { memory, previous } = input;
-  const nodes = ["User", "Application"];
-  const edges = ["User --> Application"];
+  const nodes = ["User", "Client", "Application API"];
+  const edges = ["User --> Client", "Client --> Application API"];
+
+  if (has(memory, /login|sign.?in|account|role|permission|authentication|authorization/i)) {
+    nodes.push("Identity Service");
+    edges.push("Application API --> Identity Service");
+  }
 
   if (has(memory, /database|store|persist|history|order|booking/i)) {
     nodes.push("Database");
-    edges.push("Application --> Database");
+    edges.push("Application API --> Database");
   }
   if (has(memory, /payment|checkout|billing|subscription/i)) {
     nodes.push("Payment Provider");
-    edges.push("Application --> Payment Provider");
+    edges.push("Application API --> Payment Provider");
   }
   if (has(memory, /email|notification|webhook/i)) {
     nodes.push("Notification Service");
-    edges.push("Application --> Notification Service");
+    edges.push("Application API --> Notification Service");
   }
   if (has(memory, /image|upload|asset|file/i)) {
     nodes.push("File Storage");
-    edges.push("Application --> File Storage");
+    edges.push("Application API --> File Storage");
   }
 
   const diagramSource = ["flowchart TD", ...edges].join("\n");
-  const summary = `Users interact with the application${nodes.length > 2 ? `, which connects to ${nodes.slice(2).join(", ")}` : ""}.`;
+  const boundaries = nodes.slice(3);
+  const summary = `Users enter through the client, which talks to the application API${boundaries.length ? ` and its ${boundaries.join(", ")}` : ""}.`;
   const changed = previous?.diagramSource !== diagramSource;
   const version = previous ? (changed ? previous.version + 1 : previous.version) : 1;
 

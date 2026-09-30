@@ -40,6 +40,7 @@ import {
   loadLatestArchitecture,
   loadLatestSrs,
   loadProjectArtifacts,
+  loadRecentInterviewMessages,
   persistInterviewTurnAtomic,
   persistConversationTurnAtomic,
   persistProjectBootstrapAtomic,
@@ -98,6 +99,7 @@ import { routeConversationIntents } from "@/lib/conversation/intentRouter";
 import {
   architectureArtifact,
   buildArtifact,
+  implementationPromptArtifact,
   projectBlueprint,
 } from "@/lib/artifacts/artifacts";
 import {
@@ -475,7 +477,7 @@ async function recordGuidedUsage(input: {
   phase?: string;
   model: string;
   requestId: string;
-  usage?: { inputTokens?: number; outputTokens?: number };
+  usage?: { inputTokens?: number; outputTokens?: number; cost?: number };
 }): Promise<void> {
   try {
     await insertUsageEvent({
@@ -486,6 +488,7 @@ async function recordGuidedUsage(input: {
       requestId: input.requestId,
       inputTokens: input.usage?.inputTokens,
       outputTokens: input.usage?.outputTokens,
+      cost: input.usage?.cost,
     });
   } catch (error) {
     // The provider has already charged the user's key. Do not make the browser
@@ -1256,7 +1259,7 @@ export function guidedRouter(): express.Router {
         );
       let databaseReadMs = 0;
       let credentialMs = 0;
-      const [state, credential, previousArtifacts, previousArchitecture] =
+      const [state, credential, previousArtifacts, previousArchitecture, recentMessages, priorUsage] =
         await Promise.all([
           (async () => {
             const started = Date.now();
@@ -1275,10 +1278,9 @@ export function guidedRouter(): express.Router {
           })(),
           loadProjectArtifacts(request.params.projectId),
           loadLatestArchitecture(request.params.projectId),
+          loadRecentInterviewMessages(request.params.projectId, 8),
+          projectUsageForUser(request.params.projectId, user.id),
         ]);
-      const recentMessages = (
-        await snapshotForUser(state.project.id, user.id)
-      ).messages.slice(-8);
       const intents = routeConversationIntents(content);
       let repositoryRetrievalMs = 0;
       let repositorySnapshot: Awaited<ReturnType<typeof inspectRepository>> | undefined;
@@ -1549,6 +1551,20 @@ export function guidedRouter(): express.Router {
           title = generated.title;
           artifactContent = generated.content;
           structuredData = generated.structuredData;
+        } else if (["implementation_prompt", "correction_prompt", "enhancement_prompt"].includes(artifactRequest.type)) {
+          const generated = implementationPromptArtifact({
+            memory: turn.memory,
+            title: artifactRequest.title,
+            additionalInstructions: artifactRequest.content,
+            kind: artifactRequest.type === "correction_prompt"
+              ? "correction"
+              : artifactRequest.type === "enhancement_prompt"
+                ? "enhancement"
+                : "implementation",
+          });
+          title = generated.title;
+          artifactContent = generated.content;
+          structuredData = { ...generated.structuredData, ...structuredData };
         } else if (artifactRequest.type === "cost_estimate") {
           const estimate = estimateProjectImplementationCredit(
             state.project,
@@ -1631,42 +1647,62 @@ export function guidedRouter(): express.Router {
         artifactIds: allArtifactIds,
         modelRoute: inference.route,
       };
-      await recordGuidedUsage({
-        userId: user.id,
-        projectId: state.project.id,
-        phase: inference.route.taskClass,
-        model: inference.model,
-        requestId: inference.requestId,
-        usage: inference.usage,
-      });
       const persistenceStarted = Date.now();
-      await persistConversationTurnAtomic({
-        userId: user.id,
-        projectId: state.project.id,
-        userMessage: turn.userMessage,
-        assistantMessage,
-        memory: turn.memory,
-        session: turn.session,
-        phase: turn.memory.projectPhase ?? "exploring",
-        actions,
-        artifacts,
-        modelRoute: {
-          ...inference.route,
-          id: randomUUID(),
-          requestId: inference.requestId || fallbackRequestId,
-          modelMode:
-            state.project.modelMode ??
-            (state.project.selectedModel === "auto" ? "auto" : "locked"),
-          ...(state.project.selectedModel !== "auto"
-            ? { requestedModel: state.project.selectedModel }
-            : {}),
-          ...(inference.usage ? { providerUsage: inference.usage } : {}),
-        },
-        repositorySnapshot,
-        testRun,
-      });
+      await Promise.all([
+        recordGuidedUsage({
+          userId: user.id,
+          projectId: state.project.id,
+          phase: inference.route.taskClass,
+          model: inference.model,
+          requestId: inference.requestId,
+          usage: inference.usage,
+        }),
+        persistConversationTurnAtomic({
+          userId: user.id,
+          projectId: state.project.id,
+          userMessage: turn.userMessage,
+          assistantMessage,
+          memory: turn.memory,
+          session: turn.session,
+          phase: turn.memory.projectPhase ?? "exploring",
+          actions,
+          artifacts,
+          modelRoute: {
+            ...inference.route,
+            id: randomUUID(),
+            requestId: inference.requestId || fallbackRequestId,
+            modelMode:
+              state.project.modelMode ??
+              (state.project.selectedModel === "auto" ? "auto" : "locked"),
+            ...(state.project.selectedModel !== "auto"
+              ? { requestedModel: state.project.selectedModel }
+              : {}),
+            ...(inference.usage ? { providerUsage: inference.usage } : {}),
+          },
+          repositorySnapshot,
+          testRun,
+        }),
+      ]);
       const persistenceMs = Date.now() - persistenceStarted;
-      const usage = await projectUsageForUser(state.project.id, user.id);
+      const turnCost = Math.max(0, Number(inference.usage?.cost) || 0);
+      const usage = {
+        ...priorUsage,
+        used: Number((priorUsage.used + turnCost).toFixed(6)),
+        remaining: Number(Math.max(0, priorUsage.budget - priorUsage.used - turnCost).toFixed(6)),
+        events: [
+          ...priorUsage.events,
+          {
+            phase: inference.route.taskClass,
+            source: "promgent" as const,
+            model: inference.model,
+            cost: turnCost,
+            estimated: inference.usage?.cost === undefined,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+        estimated: priorUsage.estimated || inference.usage?.cost === undefined,
+        updatedAt: new Date().toISOString(),
+      };
       logPerf("conversation", inference.requestId || fallbackRequestId, {
         databaseReadMs,
         credentialMs,
