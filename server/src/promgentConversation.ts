@@ -1,4 +1,5 @@
 import { chat } from "@/lib/ai/chatClient";
+import { AiError } from "@/lib/ai/errors";
 import { extractJson } from "@/lib/ai/json";
 import { composeConversationContext } from "@/lib/conversation/contextComposer";
 import { routeConversationIntents } from "@/lib/conversation/intentRouter";
@@ -36,6 +37,11 @@ Rules:
 - Never mention or request secret keys. Never claim tests ran unless supplied evidence says they ran.
 - Do not use markdown fences around the JSON.`;
 
+// The upstream catalogue can briefly advertise models with no live serving
+// provider. Remember definitive 404-style rejections for this server process
+// so subsequent auto-routed turns do not repeatedly select them.
+const unavailableInteractiveModels = new Set<string>();
+
 function taskClass(intents: ReturnType<typeof routeConversationIntents>): ModelTaskClass {
   if (intents.includes("repository_review")) return "code_review";
   if (intents.includes("architecture_request")) return "architecture";
@@ -59,12 +65,7 @@ export async function runPromgentConversation(input: {
   const intents = routeConversationIntents(input.userContent);
   const catalogue = input.catalogue ?? cachedOrbioCatalogue();
   if (!catalogue.length) throw new PersistenceError("ORBIO_CATALOGUE_UNAVAILABLE", "Promgent is still loading the available Orbio models. Try again shortly.", 503);
-  let decision;
-  try {
-    decision = routeOrbioModel({ models: catalogue, mode: input.project.modelMode ?? (input.project.selectedModel === "auto" ? "auto" : "locked"), lockedModel: providerModelId(input.project.selectedModel), taskClass: taskClass(intents), contextTokens: 32_000 });
-  } catch (error) {
-    throw new PersistenceError("ORBIO_MODEL_ROUTE_FAILED", error instanceof Error ? error.message : "Promgent could not select a compatible Orbio model.", 400);
-  }
+  const mode = input.project.modelMode ?? (input.project.selectedModel === "auto" ? "auto" : "locked");
   const baseUrl = String(process.env.ORBIO_BASE_URL ?? process.env.AGENTFUND_AI_BASE_URL ?? "").trim().replace(/\/+$/, "");
   if (!baseUrl) throw new PersistenceError("ORBIO_NOT_CONFIGURED", "Orbio is not configured.", 503);
   const context = [
@@ -77,7 +78,34 @@ export async function runPromgentConversation(input: {
   // Orbio's catalogue includes capable models that obey this explicit JSON
   // contract but reject that provider-specific flag. We still parse and
   // validate the response below before any state can be persisted.
-  const result = await chat({ apiKey: input.apiKey, baseUrl, model: decision.model.id, messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: context }], maxTokens: intents.includes("prompt_generation") ? 3200 : 1500, temperature: 0.2, jsonMode: false, stage: "project-conversation", retry: false });
+  let decision: ReturnType<typeof routeOrbioModel> | undefined;
+  let result: Awaited<ReturnType<typeof chat>> | undefined;
+  let fallbackUsed = false;
+  let routingCatalogue = mode === "auto"
+    ? catalogue.filter((model) => !unavailableInteractiveModels.has(model.id))
+    : catalogue;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      decision = routeOrbioModel({ models: routingCatalogue, mode, lockedModel: providerModelId(input.project.selectedModel), taskClass: taskClass(intents), contextTokens: 32_000 });
+    } catch (error) {
+      throw new PersistenceError("ORBIO_MODEL_ROUTE_FAILED", error instanceof Error ? error.message : "Promgent could not select a compatible Orbio model.", 400);
+    }
+    try {
+      result = await chat({ apiKey: input.apiKey, baseUrl, model: decision.model.id, messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: context }], maxTokens: intents.includes("prompt_generation") ? 3200 : 1500, temperature: 0.2, jsonMode: false, stage: "project-conversation", retry: false });
+      break;
+    } catch (error) {
+      const mayTryAnother = mode === "auto"
+        && error instanceof AiError
+        && error.code === "AI_MODEL_UNAVAILABLE"
+        && attempt < 3;
+      if (!mayTryAnother) throw error;
+      unavailableInteractiveModels.add(decision.model.id);
+      routingCatalogue = routingCatalogue.filter((model) => model.id !== decision!.model.id);
+      fallbackUsed = true;
+    }
+  }
+  if (!decision || !result)
+    throw new PersistenceError("ORBIO_MODEL_ROUTE_FAILED", "No currently served Orbio model could complete this turn.", 503);
   const parsed = extractJson(result.content);
   if (!parsed) throw new PersistenceError("PROMGENT_INVALID_RESPONSE", "Promgent returned an invalid response. No project state was changed.", 502);
   let response: PromgentResponseProposal;
@@ -85,7 +113,7 @@ export async function runPromgentConversation(input: {
   catch { throw new PersistenceError("PROMGENT_INVALID_RESPONSE", "Promgent returned no usable response. No project state was changed.", 502); }
   return {
     response, structuredMemoryProposal: parsed,
-    route: { taskClass: taskClass(intents), chosenModel: result.model || decision.model.id, reasonCode: decision.reasonCode, expectedCostClass: decision.expectedCostClass, fallbackUsed: false, estimated: decision.estimated },
+    route: { taskClass: taskClass(intents), chosenModel: result.model || decision.model.id, reasonCode: decision.reasonCode, expectedCostClass: decision.expectedCostClass, fallbackUsed, estimated: decision.estimated },
     requestId: result.requestId, model: result.model, durationMs: result.durationMs,
     ...(result.usage ? { usage: { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens } } : {}),
   };
