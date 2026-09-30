@@ -91,7 +91,7 @@ export async function runPromgentConversation(input: {
       throw new PersistenceError("ORBIO_MODEL_ROUTE_FAILED", error instanceof Error ? error.message : "Promgent could not select a compatible Orbio model.", 400);
     }
     try {
-      result = await chat({ apiKey: input.apiKey, baseUrl, model: decision.model.id, messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: context }], maxTokens: intents.includes("prompt_generation") ? 1900 : 1100, temperature: 0.2, jsonMode: false, stage: "project-conversation", retry: false });
+      result = await chat({ apiKey: input.apiKey, baseUrl, model: decision.model.id, messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: context }], maxTokens: intents.includes("prompt_generation") ? 1900 : 1500, temperature: 0.2, jsonMode: false, stage: "project-conversation", retry: false });
       break;
     } catch (error) {
       const mayTryAnother = mode === "auto"
