@@ -35,7 +35,7 @@ export function ProjectContextPanel({ snapshot, balance }: { snapshot: GuidedPro
       </section>
 
       <section className="mt-6">
-        <h3 className="mb-2 text-xs font-medium">Stack</h3>
+        <div className="mb-2 flex items-center justify-between gap-2"><h3 className="text-xs font-medium">Stack</h3>{(memory.confirmedStack?.length || memory.proposedStack?.length) ? <span className={`rounded-full px-2 py-0.5 font-mono text-[9px] uppercase ${memory.confirmedStack?.length ? "bg-forest-light text-forest" : "bg-credit-light text-credit"}`}>{memory.confirmedStack?.length ? "Confirmed" : "Promgent recommendation"}</span> : null}</div>
         <List values={memory.confirmedStack?.length ? memory.confirmedStack : memory.proposedStack} empty="No stack decision yet." />
       </section>
 

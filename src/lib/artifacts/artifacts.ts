@@ -1,5 +1,6 @@
 import type { ArtifactType, ProjectArtifact } from "@/types/conversation";
 import type { ArchitectureVersion, ProjectMemory } from "@/types/project";
+import type { TechnicalBlueprint } from "@/types/technicalBlueprint";
 import { activeRequirements } from "@/lib/projectMemory/requirements";
 
 function stable(value: unknown): string {
@@ -54,6 +55,21 @@ export function projectBlueprint(memory: ProjectMemory): { title: string; conten
 
 export function architectureArtifact(architecture: ArchitectureVersion): { title: string; content: string; structuredData: Record<string, unknown> } {
   return { title: "Architecture", content: `${architecture.summary}\n\n\`\`\`mermaid\n${architecture.diagramSource}\n\`\`\``, structuredData: { diagramSource: architecture.diagramSource, reasonForChange: architecture.reasonForChange, legacyArchitectureId: architecture.id } };
+}
+
+export function technicalBlueprintArtifact(blueprint: TechnicalBlueprint): { title: string; content: string; structuredData: Record<string, unknown> } {
+  const stack = Object.values(blueprint.recommendedStack).flat().filter((item): item is NonNullable<typeof blueprint.recommendedStack.frontend> => Boolean(item) && typeof item === "object" && "technology" in item);
+  const content = [
+    `# Technical Blueprint v${blueprint.version}`,
+    `\n## Objective\n${blueprint.objective}`,
+    `\n## MVP Scope\n${blueprint.mvpScope.map((item) => `- ${item}`).join("\n") || "- Still being clarified"}`,
+    `\n## Technology\n${stack.map((item) => `- ${item.technology} — ${item.purpose}: ${item.rationale}`).join("\n")}`,
+    `\n## Architecture\n${blueprint.architecture.summary}\n\n\`\`\`mermaid\n${blueprint.architecture.mermaid}\n\`\`\``,
+    `\n## Workflows\n${blueprint.workflows.map((item) => `- ${item.name} (${item.actor})`).join("\n")}`,
+    `\n## Data\n${blueprint.dataEntities.map((item) => `- ${item.name}: ${item.purpose}`).join("\n") || "- No persistent entities currently required"}`,
+    `\n## Delivery\n${blueprint.implementationPhases.map((item) => `- ${item.name}: ${item.objective}`).join("\n")}`,
+  ].join("\n");
+  return { title: "Technical Blueprint", content, structuredData: { blueprint, memoryVersion: blueprint.memoryVersion, blueprintVersion: blueprint.version, quality: blueprint.quality, qualityWarnings: blueprint.qualityWarnings } };
 }
 
 export function implementationPromptArtifact(input: {

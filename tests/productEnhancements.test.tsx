@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { chat } from "@/lib/ai/chatClient";
 import { implementationPromptArtifact } from "@/lib/artifacts/artifacts";
 import { ArchitectureDiagram, parseArchitectureEdges } from "@/components/project/ArchitectureDiagram";
+import { ArtifactCard } from "@/components/project/ArtifactCard";
 import { createInitialMemory, createProjectRecord } from "@/lib/projectMemory";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -51,10 +52,19 @@ describe("conversation product enhancements", () => {
   });
 
   it("renders Mermaid-style architecture edges as an accessible skeleton diagram", () => {
-    const source = "flowchart TD\nUser --> Client\nClient --> Application API\nApplication API --> Database";
+    const source = "flowchart TD\nUSER[User] --> CLIENT[Next.js Web App]\nCLIENT --> API[Application API]\nAPI --> DB[(PostgreSQL)]";
     expect(parseArchitectureEdges(source)).toHaveLength(3);
     render(<ArchitectureDiagram source={source} />);
     expect(screen.getByRole("img", { name: /system architecture skeleton diagram/i })).toBeInTheDocument();
     expect(screen.getByText("Application API")).toBeInTheDocument();
+  });
+
+  it("copies the complete compiled prompt rather than a preview", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const complete = `# Role\n${"Detailed project-specific instruction. ".repeat(200)}\n## Final Implementation Report`;
+    render(<ArtifactCard artifact={{ id: "prompt", projectId: "project", type: "implementation_prompt", version: 2, title: "Implementation prompt", content: complete, structuredData: { promptDepth: "full_mvp", memoryVersion: 4 }, status: "current", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }} />);
+    fireEvent.click(screen.getByRole("button", { name: /copy prompt/i }));
+    expect(writeText).toHaveBeenCalledWith(complete);
   });
 });

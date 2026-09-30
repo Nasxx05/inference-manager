@@ -12,7 +12,7 @@ export type ConversationIntent =
 export type ConversationMessageSource = "text" | "voice_transcript" | "image" | "website_reference" | "repository" | "live_url" | "system";
 
 export type ArtifactType =
-  | "project_blueprint" | "architecture" | "implementation_plan"
+  | "project_blueprint" | "technical_blueprint" | "architecture" | "implementation_plan"
   | "implementation_prompt" | "correction_prompt" | "enhancement_prompt"
   | "test_plan" | "srs" | "requirements_snapshot" | "data_model"
   | "api_plan" | "deployment_plan" | "repository_review" | "live_product_review" | "cost_estimate";

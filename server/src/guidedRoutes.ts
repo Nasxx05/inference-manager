@@ -99,9 +99,12 @@ import { routeConversationIntents } from "@/lib/conversation/intentRouter";
 import {
   architectureArtifact,
   buildArtifact,
-  implementationPromptArtifact,
   projectBlueprint,
+  technicalBlueprintArtifact,
 } from "@/lib/artifacts/artifacts";
+import { buildTechnicalBlueprint, parseTechnicalBlueprint } from "@/lib/technicalBlueprint";
+import { compileImplementationPrompt, inferPromptDepth } from "@/lib/prompts";
+import type { TechnicalBlueprint } from "@/types/technicalBlueprint";
 import {
   estimateProjectImplementationCredit,
   implementationEstimateMarkdown,
@@ -109,7 +112,7 @@ import {
 import { processReferences, referenceError } from "@/lib/reference";
 import type { ReferenceAnalysis, ReferenceInput } from "@/lib/reference/types";
 import { MultipartError, parseMultipart } from "./multipart";
-import { runPromgentConversation } from "./promgentConversation";
+import { runPromgentConversation, runPromptPlanInference } from "./promgentConversation";
 import { discoverNodeTestCommands, repositoryTestRunner } from "./repositoryTestRunner";
 import { cachedOrbioCatalogue } from "./orbioModelCatalogue";
 import { routeOrbioModel } from "@/lib/models/orbioRouter";
@@ -1448,6 +1451,72 @@ export function guidedRouter(): express.Router {
             updatedAt: new Date().toISOString(),
           },
         };
+      const blueprintRelevant = inference.response.intents.some((intent) => [
+        "architecture_request",
+        "build_plan_request",
+        "prompt_generation",
+        "repository_review",
+        "change_request",
+      ].includes(intent));
+      const previousBlueprintArtifact = [...previousArtifacts]
+        .filter((item) => item.type === "technical_blueprint")
+        .sort((a, b) => b.version - a.version)[0];
+      const previousBlueprint = parseTechnicalBlueprint(previousBlueprintArtifact?.structuredData.blueprint);
+      const detectedRepositoryStack = repositorySnapshot
+        ? [
+            [/next\.config|next\/|"next"/i, "Next.js + TypeScript"],
+            [/django|manage\.py/i, "Django + Python"],
+            [/fastapi/i, "FastAPI + Python"],
+            [/vite|react/i, "React + TypeScript"],
+            [/supabase/i, "Supabase"],
+            [/prisma/i, "Prisma"],
+            [/tailwind/i, "Tailwind CSS"],
+          ].flatMap(([pattern, name]) => (pattern as RegExp).test(repositorySnapshot.evidenceText) ? [name as string] : [])
+        : [];
+      let technicalBlueprint: TechnicalBlueprint | undefined;
+      let promptPlanResult: Awaited<ReturnType<typeof runPromptPlanInference>> | undefined;
+      if (blueprintRelevant) {
+        technicalBlueprint = buildTechnicalBlueprint({
+          memory: turn.memory,
+          previous: previousBlueprint,
+          ...(repositorySnapshot ? { repositoryEvidence: { url: repositorySnapshot.repositoryUrl, ...(repositorySnapshot.commitSha ? { commitSha: repositorySnapshot.commitSha } : {}), existingStack: detectedRepositoryStack, relevantFiles: repositorySnapshot.relevantFiles } } : {}),
+        });
+        if (!(turn.memory.confirmedStack?.length) && !(turn.memory.proposedStack?.length)) {
+          const stackValues = Object.values(technicalBlueprint.recommendedStack)
+            .flat()
+            .filter((item): item is { technology: string; purpose: string } => Boolean(item) && typeof item === "object" && "technology" in item);
+          turn = {
+            ...turn,
+            memory: {
+              ...turn.memory,
+              proposedStack: [...new Set(stackValues.map((item) => item.technology))],
+              hosting: [...new Set([...(turn.memory.hosting ?? []), ...(technicalBlueprint.recommendedStack.hosting ? [technicalBlueprint.recommendedStack.hosting.technology] : [])])],
+              database: [...new Set([...(turn.memory.database ?? []), ...(technicalBlueprint.recommendedStack.database ? [technicalBlueprint.recommendedStack.database.technology] : [])])],
+              authentication: [...new Set([...(turn.memory.authentication ?? []), ...(technicalBlueprint.recommendedStack.authentication ? [technicalBlueprint.recommendedStack.authentication.technology] : [])])],
+              architectureSummary: technicalBlueprint.architecture.summary,
+              version: turn.memory.version + 1,
+              updatedAt: new Date().toISOString(),
+            },
+          };
+          technicalBlueprint = buildTechnicalBlueprint({
+            memory: turn.memory,
+            previous: previousBlueprint,
+            ...(repositorySnapshot ? { repositoryEvidence: { url: repositorySnapshot.repositoryUrl, ...(repositorySnapshot.commitSha ? { commitSha: repositorySnapshot.commitSha } : {}), existingStack: detectedRepositoryStack, relevantFiles: repositorySnapshot.relevantFiles } } : {}),
+          });
+        }
+        const promptDepth = inferPromptDepth({ userRequest: content, memory: turn.memory, hasRepository: Boolean(repositorySnapshot) });
+        if (inference.response.intents.includes("prompt_generation") && ["major_feature", "full_mvp", "repository_correction", "refactor"].includes(promptDepth)) {
+          try {
+            promptPlanResult = await runOrbioInference(
+              user.id,
+              () => runPromptPlanInference({ apiKey: credential.apiKey, project: state.project, blueprint: technicalBlueprint!, userRequest: content }),
+              credential,
+            );
+          } catch (error) {
+            console.warn("[prompt-plan] dedicated synthesis unavailable; deterministic compiler retained", error instanceof AiError ? error.code : "PROMPT_PLAN_FAILED");
+          }
+        }
+      }
       const requested = [...inference.response.artifactRequests];
       if (
         inference.response.intents.includes("architecture_request") &&
@@ -1486,6 +1555,25 @@ export function guidedRouter(): express.Router {
           reason: "The user requested an implementation CREDIT estimate.",
         });
       if (
+        technicalBlueprint &&
+        !requested.some((item) => item.type === "technical_blueprint")
+      )
+        requested.push({
+          type: "technical_blueprint",
+          title: "Technical Blueprint",
+          reason: "A technical plan was prepared for the requested engineering artifact.",
+        });
+      if (
+        inference.response.intents.includes("prompt_generation") &&
+        !requested.some((item) => ["implementation_prompt", "correction_prompt", "enhancement_prompt"].includes(item.type))
+      )
+        requested.push({
+          type: repositorySnapshot && /fix|correct|repair/i.test(content) ? "correction_prompt" : "implementation_prompt",
+          title: repositorySnapshot ? "Repository implementation prompt" : "Comprehensive implementation prompt",
+          reason: "The user requested an implementation-ready prompt.",
+          content,
+        });
+      if (
         repositorySnapshot &&
         !requested.some((item) => item.type === "repository_review")
       )
@@ -1520,6 +1608,7 @@ export function guidedRouter(): express.Router {
         ...(repositorySnapshot ? ["repository_review"] : []),
         ...(liveProductSnapshot ? ["live_product_review"] : []),
         ...(inference.response.intents.includes("architecture_request") ? ["architecture"] : []),
+        ...(inference.response.intents.includes("prompt_generation") ? ["technical_blueprint", "implementation_prompt", "correction_prompt", "enhancement_prompt"] : []),
         ...(inference.response.intents.includes("credit_estimate_request") ? ["cost_estimate"] : []),
       ];
       requested.sort((left, right) => {
@@ -1542,29 +1631,41 @@ export function guidedRouter(): express.Router {
           title = blueprint.title;
           artifactContent = blueprint.content;
           structuredData = blueprint.structuredData;
-        } else if (artifactRequest.type === "architecture") {
-          const architecture = architectureForMemory({
-            memory: turn.memory,
-            previous: previousArchitecture,
-          });
-          const generated = architectureArtifact(architecture);
+        } else if (artifactRequest.type === "technical_blueprint" && technicalBlueprint) {
+          const generated = technicalBlueprintArtifact(technicalBlueprint);
           title = generated.title;
           artifactContent = generated.content;
           structuredData = generated.structuredData;
-        } else if (["implementation_prompt", "correction_prompt", "enhancement_prompt"].includes(artifactRequest.type)) {
-          const generated = implementationPromptArtifact({
-            memory: turn.memory,
-            title: artifactRequest.title,
-            additionalInstructions: artifactRequest.content,
-            kind: artifactRequest.type === "correction_prompt"
-              ? "correction"
-              : artifactRequest.type === "enhancement_prompt"
-                ? "enhancement"
-                : "implementation",
-          });
+        } else if (artifactRequest.type === "architecture") {
+          const architecture = technicalBlueprint ? {
+            id: `architecture_${turn.memory.projectId}_${technicalBlueprint.version}`,
+            projectId: turn.memory.projectId,
+            version: previousArchitecture?.diagramSource === technicalBlueprint.architecture.mermaid ? previousArchitecture.version : (previousArchitecture?.version ?? 0) + 1,
+            diagramSource: technicalBlueprint.architecture.mermaid,
+            summary: technicalBlueprint.architecture.summary,
+            reasonForChange: previousArchitecture ? "The current Technical Blueprint changed the system structure or technology responsibilities." : "Initial architecture derived from the Technical Blueprint.",
+            createdAt: new Date().toISOString(),
+          } : architectureForMemory({ memory: turn.memory, previous: previousArchitecture });
+          const generated = architectureArtifact(architecture);
           title = generated.title;
           artifactContent = generated.content;
-          structuredData = { ...generated.structuredData, ...structuredData };
+          structuredData = { ...generated.structuredData, ...(technicalBlueprint ? { blueprintVersion: technicalBlueprint.version, componentResponsibilities: technicalBlueprint.systemComponents } : {}) };
+        } else if (["implementation_prompt", "correction_prompt", "enhancement_prompt"].includes(artifactRequest.type)) {
+          const blueprint = technicalBlueprint ?? buildTechnicalBlueprint({ memory: turn.memory, previous: previousBlueprint });
+          const kind = artifactRequest.type === "correction_prompt" ? "correction" : artifactRequest.type === "enhancement_prompt" ? "enhancement" : "implementation";
+          const compiled = compileImplementationPrompt({
+            memory: turn.memory,
+            technicalBlueprint: blueprint,
+            kind,
+            title: artifactRequest.title,
+            userRequest: artifactRequest.content || content,
+            ...(promptPlanResult ? { promptPlan: promptPlanResult.plan } : {}),
+            depth: inferPromptDepth({ userRequest: artifactRequest.content || content, memory: turn.memory, kind, hasRepository: Boolean(blueprint.repository) }),
+            ...(repositorySnapshot ? { reviewFindings: [ciEvidence?.summary ?? "CI evidence was unavailable.", testRun?.summary ?? "Promgent did not execute repository code."] } : {}),
+          });
+          title = compiled.title;
+          artifactContent = compiled.content;
+          structuredData = { ...compiled.structuredData, quality: compiled.quality, qualityWarnings: compiled.warnings, ...structuredData };
         } else if (artifactRequest.type === "cost_estimate") {
           const estimate = estimateProjectImplementationCredit(
             state.project,
@@ -1644,6 +1745,9 @@ export function guidedRouter(): express.Router {
         });
       const assistantMessage = {
         ...turn.assistantMessage,
+        ...(artifacts.some((artifact) => ["implementation_prompt", "correction_prompt", "enhancement_prompt"].includes(artifact.type))
+          ? { content: `${turn.assistantMessage.content}\n\nYou can paste this prompt into Cursor, Claude Code, Codex, Cline, or your preferred coding agent. When the implementation is ready, send me the GitHub repository and I can compare what was built against this plan.` }
+          : {}),
         artifactIds: allArtifactIds,
         modelRoute: inference.route,
       };
@@ -1657,6 +1761,14 @@ export function guidedRouter(): express.Router {
           requestId: inference.requestId,
           usage: inference.usage,
         }),
+        ...(promptPlanResult ? [recordGuidedUsage({
+          userId: user.id,
+          projectId: state.project.id,
+          phase: "implementation_prompt",
+          model: promptPlanResult.model,
+          requestId: promptPlanResult.requestId,
+          usage: promptPlanResult.usage,
+        })] : []),
         persistConversationTurnAtomic({
           userId: user.id,
           projectId: state.project.id,
@@ -1684,7 +1796,7 @@ export function guidedRouter(): express.Router {
         }),
       ]);
       const persistenceMs = Date.now() - persistenceStarted;
-      const turnCost = Math.max(0, Number(inference.usage?.cost) || 0);
+      const turnCost = Math.max(0, Number(inference.usage?.cost) || 0) + Math.max(0, Number(promptPlanResult?.usage?.cost) || 0);
       const usage = {
         ...priorUsage,
         used: Number((priorUsage.used + turnCost).toFixed(6)),
@@ -1699,8 +1811,16 @@ export function guidedRouter(): express.Router {
             estimated: inference.usage?.cost === undefined,
             createdAt: new Date().toISOString(),
           },
+          ...(promptPlanResult ? [{
+            phase: "implementation_prompt",
+            source: "promgent" as const,
+            model: promptPlanResult.model,
+            cost: Math.max(0, Number(promptPlanResult.usage?.cost) || 0),
+            estimated: promptPlanResult.usage?.cost === undefined,
+            createdAt: new Date().toISOString(),
+          }] : []),
         ],
-        estimated: priorUsage.estimated || inference.usage?.cost === undefined,
+        estimated: priorUsage.estimated || inference.usage?.cost === undefined || (promptPlanResult !== undefined && promptPlanResult.usage?.cost === undefined),
         updatedAt: new Date().toISOString(),
       };
       logPerf("conversation", inference.requestId || fallbackRequestId, {

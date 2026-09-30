@@ -1,15 +1,19 @@
 interface DiagramEdge { from: string; to: string }
 
-function clean(value: string): string {
-  return value.trim().replace(/^[A-Za-z0-9_-]+\s*\[\s*["']?/, "").replace(/["']?\s*\]$/, "").trim();
-}
-
 export function parseArchitectureEdges(source: string): DiagramEdge[] {
+  const labels = new Map<string, string>();
+  for (const match of source.matchAll(/\b([A-Za-z][A-Za-z0-9_]*)\s*\[\(?\s*["']?([^\]\)"']+)["']?\s*\)?\]/g)) labels.set(match[1]!, match[2]!.trim());
+  const endpoint = (value: string) => {
+    const raw = value.trim();
+    const match = raw.match(/^([A-Za-z][A-Za-z0-9_]*)(?:\s*\[\(?\s*["']?([^\]\)"']+)["']?\s*\)?\])?$/);
+    if (!match) return raw;
+    return (match[2]?.trim() || labels.get(match[1]!) || match[1]!.replaceAll("_", " ")).trim();
+  };
   return source.split(/\r?\n/).flatMap((line) => {
     const match = line.trim().match(/^(.+?)\s*--+>\s*(.+?)\s*$/);
     if (!match) return [];
-    const from = clean(match[1]!);
-    const to = clean(match[2]!);
+    const from = endpoint(match[1]!);
+    const to = endpoint(match[2]!);
     return from && to ? [{ from, to }] : [];
   });
 }

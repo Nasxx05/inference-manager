@@ -1,6 +1,6 @@
 import type { ArtifactType, ConversationIntent, ProjectAction, PromgentResponseProposal } from "@/types/conversation";
 
-const artifactTypes = new Set<ArtifactType>(["project_blueprint", "architecture", "implementation_plan", "implementation_prompt", "correction_prompt", "enhancement_prompt", "test_plan", "srs", "requirements_snapshot", "data_model", "api_plan", "deployment_plan", "repository_review", "live_product_review", "cost_estimate"]);
+const artifactTypes = new Set<ArtifactType>(["project_blueprint", "technical_blueprint", "architecture", "implementation_plan", "implementation_prompt", "correction_prompt", "enhancement_prompt", "test_plan", "srs", "requirements_snapshot", "data_model", "api_plan", "deployment_plan", "repository_review", "live_product_review", "cost_estimate"]);
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};

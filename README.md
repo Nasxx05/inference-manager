@@ -27,7 +27,8 @@ Normal technical questions do not silently change project scope. Model output is
 flowchart LR
   A[Idea by text or voice] --> B[One project conversation]
   B --> C[Structured Project Memory]
-  C --> D[Blueprints, architecture, plans, prompts]
+  C --> T[Validated Technical Blueprint]
+  T --> D[Architecture, plans, compiled prompts]
   D --> E[Build externally]
   E --> F[Public GitHub or live URL]
   F --> G[SHA-pinned review and CI evidence]
@@ -41,7 +42,7 @@ There is one Promgent—not separate user-facing interview, requirements, planni
 
 Users connect their own Orbio API key. The key is encrypted server-side, never returned to the browser after connection, never placed in model context, and never logged.
 
-New projects use Auto mode by default. Promgent caches Orbio's model catalogue and selects the lowest-cost model that meets the task's modality, context, and capability needs. A locked model is honored strictly. Ambiguous provider failures are not automatically retried with a second model because doing so could double-bill the user.
+New projects use Auto mode by default. Promgent caches Orbio's model catalogue and selects the lowest-cost model that meets the task's modality, context, and curated capability needs. Unknown models receive conservative defaults rather than being assumed capable. Full prompts and code review require stronger coding/reasoning capability than normal chat. A locked model is honored strictly. Ambiguous provider failures are not automatically retried with a second model because doing so could double-bill the user.
 
 Safe route metadata is persisted: task class, chosen model, reason code, expected cost class, provider usage, and whether fallback occurred. Credentials are never part of route logs.
 
@@ -50,6 +51,7 @@ Safe route metadata is persisted: task class, chosen model, reason code, expecte
 Artifacts are versioned project records attached inline to conversation messages:
 
 - Project Blueprint
+- Technical Blueprint (validated stack, components, pages, workflows, data, API, security, delivery, and tests)
 - architecture
 - implementation and test plans
 - implementation, correction, and enhancement prompts
@@ -59,6 +61,10 @@ Artifacts are versioned project records attached inline to conversation messages
 - deterministic implementation CREDIT estimates
 
 Unchanged content reuses its existing artifact version. A changed artifact supersedes the prior current version without deleting history.
+
+Promgent recommends a coherent beginner-friendly stack when the user has not chosen one, labels it as a recommendation, and records it as confirmed only after explicit user approval. Connected repositories keep their established stack unless evidence justifies a change.
+
+Implementation prompts are compiled from canonical Project Memory plus the versioned Technical Blueprint and architecture. Prompt depth adapts from a focused quick fix to a comprehensive MVP or SHA-pinned repository correction. Full prompts include stack rationale, Mermaid architecture, component responsibilities, screens, workflows, data, server operations, authentication and authorization, security, UX states, delivery phases, testing, deployment, acceptance criteria, verification, and final-report requirements. A dedicated stronger prompt-planning call supplies bounded project-specific engineering detail; deterministic code validates and renders the final Markdown.
 
 ## CREDIT terminology
 

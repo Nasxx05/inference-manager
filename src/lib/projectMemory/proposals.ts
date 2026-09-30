@@ -24,6 +24,24 @@ export interface ValidatedInterviewProposal {
   resolvedQuestionAreas: string[];
   newOpenQuestions: string[];
   possibleContradictions: string[];
+  mvpScope: string[];
+  deferredScope: string[];
+  rejectedIdeas: string[];
+  futureIdeas: string[];
+  workflows: string[];
+  adminWorkflows: string[];
+  proposedStack: string[];
+  confirmedStack: string[];
+  hosting: string[];
+  database: string[];
+  authentication: string[];
+  externalServices: string[];
+  apis: string[];
+  dataModel: string[];
+  risks: string[];
+  constraints: string[];
+  knownProblems: string[];
+  architectureSummary: string;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -160,6 +178,17 @@ export function validateInterviewProposal(input: { raw: unknown; memory: Project
     if (existing) criteria.splice(criteria.indexOf(existing), 1, criterion); else criteria.push(criterion);
   }
 
+  const explicitOrConfirmed = (value: string) => explicitEvidence(value, input.userContent)
+    || requirements.some((requirement) => requirement.status === "confirmed" && similarity(requirement.description, value) >= 0.4);
+  const proposedStack = strings(root.proposedStack, 16, 160);
+  const requestedConfirmedStack = strings(root.confirmedStack, 16, 160);
+  const confirmsRecommendation = /\b(yes|okay|ok|approved?|use (?:that|it|the recommendation)|go with|sounds good|that works)\b/i.test(input.userContent);
+  const explicitTechnologyChoice = (item: string) => /\b(use|want|choose|prefer|with)\b/i.test(input.userContent)
+    && normalizedRequirementDescription(item).split(" ").some((word) => word.length >= 4 && normalizedRequirementDescription(input.userContent).includes(word));
+  const confirmedStack = requestedConfirmedStack.filter((item) => explicitEvidence(item, input.userContent) || explicitTechnologyChoice(item)
+    || (input.memory.proposedStack ?? []).some((existing) => similarity(existing, item) >= 0.65));
+  if (confirmsRecommendation && !confirmedStack.length) confirmedStack.push(...(input.memory.proposedStack ?? []));
+
   return {
     requirements,
     acceptanceCriteria: criteria,
@@ -170,5 +199,23 @@ export function validateInterviewProposal(input: { raw: unknown; memory: Project
     resolvedQuestionAreas: strings(root.resolvedQuestionAreas, 20, 80),
     newOpenQuestions: strings(root.newOpenQuestions),
     possibleContradictions: strings(root.possibleContradictions),
+    mvpScope: strings(root.mvpScope).filter(explicitOrConfirmed),
+    deferredScope: strings(root.deferredScope).filter((item) => explicitEvidence(item, input.userContent)),
+    rejectedIdeas: strings(root.rejectedIdeas).filter((item) => explicitEvidence(item, input.userContent)),
+    futureIdeas: strings(root.futureIdeas).filter((item) => explicitEvidence(item, input.userContent)),
+    workflows: strings(root.workflows).filter(explicitOrConfirmed),
+    adminWorkflows: strings(root.adminWorkflows).filter(explicitOrConfirmed),
+    proposedStack,
+    confirmedStack: [...new Set(confirmedStack)],
+    hosting: strings(root.hosting, 10, 160),
+    database: strings(root.database, 10, 240),
+    authentication: strings(root.authentication, 10, 240),
+    externalServices: strings(root.externalServices, 16, 160),
+    apis: strings(root.apis, 20, 300),
+    dataModel: strings(root.dataModel, 30, 500),
+    risks: strings(root.risks, 20, 500),
+    constraints: strings(root.constraints, 20, 500),
+    knownProblems: strings(root.knownProblems, 20, 500),
+    architectureSummary: text(root.architectureSummary, 1600),
   };
 }

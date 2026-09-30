@@ -26,17 +26,34 @@ const minimumCapability: Record<ModelTaskClass, number> = {
   large_repository_review: 82, change_impact: 74, image_analysis: 64, transcription: 55,
 };
 
+interface CuratedCapabilities { coding: number; reasoning: number; structuredOutput: number; multimodal: number; speed: number; reliability: number }
+const CAPABILITY_REGISTRY: Array<{ pattern: RegExp; capabilities: CuratedCapabilities }> = [
+  { pattern: /whisper|transcri|asr|stt|chirp|nova/i, capabilities: { coding: 5, reasoning: 20, structuredOutput: 30, multimodal: 95, speed: 80, reliability: 82 } },
+  { pattern: /gpt-6|gpt-5(?!-nano)|claude-(?:opus|sonnet)-5|gemini-3(?:\.|-|$)|glm-5|deepseek-v3|deepseek-r1|qwen3\.8/i, capabilities: { coding: 90, reasoning: 90, structuredOutput: 88, multimodal: 78, speed: 58, reliability: 86 } },
+  { pattern: /gpt-4|claude-(?:opus|sonnet)|gemini-(?:2\.5|2\.0)|glm-4|deepseek-v4|qwen|coder/i, capabilities: { coding: 82, reasoning: 80, structuredOutput: 80, multimodal: 68, speed: 66, reliability: 80 } },
+  { pattern: /mini|flash|haiku|small|lite|nano/i, capabilities: { coding: 62, reasoning: 60, structuredOutput: 65, multimodal: 55, speed: 90, reliability: 70 } },
+];
+
+function curatedCapabilities(model: OrbioCatalogueModel): CuratedCapabilities {
+  const known = CAPABILITY_REGISTRY.find((entry) => entry.pattern.test(model.id))?.capabilities;
+  if (known) return { ...known, multimodal: model.inputModalities.some((item) => item !== "text") ? known.multimodal : Math.min(known.multimodal, 35) };
+  // Unknown catalogue entries are usable for light work, but are not assumed
+  // to be strong engineers merely because they are new or inexpensive.
+  return { coding: 45, reasoning: 45, structuredOutput: 42, multimodal: model.inputModalities.some((item) => item !== "text") ? 50 : 25, speed: 55, reliability: 50 };
+}
+
 function capability(model: OrbioCatalogueModel, task: ModelTaskClass): number {
-  const id = model.id.toLowerCase();
-  let score = 62;
-  if (/opus|gpt-5|gpt-6|sonnet|glm-5|deepseek-v3|deepseek-r1|gemini-3/.test(id)) score += 22;
-  if (/flash|mini|haiku|nano|small|lite/.test(id)) score -= task === "light_chat" || task === "explanation" ? 2 : 10;
-  if (/preview|free/.test(id)) score -= 5;
-  if (task === "transcription" && /transcri|whisper|asr|stt|chirp|nova/.test(id)) score += 30;
-  if ((task === "code_review" || task === "implementation_prompt") && /coder|code|claude|gpt|deepseek|qwen/.test(id)) score += 8;
-  if (task === "large_repository_review" && model.contextLength >= 128_000) score += 8;
-  if (task === "structured_project_update" && /gpt|gemini|claude|deepseek|qwen|glm/.test(id)) score += 5;
-  return Math.max(0, Math.min(100, score));
+  const value = curatedCapabilities(model);
+  const longContext = model.contextLength >= 128_000 ? 88 : model.contextLength >= 64_000 ? 68 : 45;
+  const score = task === "light_chat" ? value.speed * 0.55 + value.reliability * 0.25 + value.reasoning * 0.2
+    : task === "explanation" ? value.reasoning * 0.55 + value.reliability * 0.3 + value.speed * 0.15
+    : task === "architecture" || task === "structured_project_update" || task === "requirements_reasoning" ? value.reasoning * 0.55 + value.structuredOutput * 0.3 + value.reliability * 0.15
+    : task === "implementation_prompt" ? value.coding * 0.4 + value.reasoning * 0.35 + value.structuredOutput * 0.2 + value.reliability * 0.05
+    : task === "code_review" || task === "change_impact" ? value.coding * 0.5 + value.reasoning * 0.3 + value.reliability * 0.2
+    : task === "large_repository_review" ? value.coding * 0.4 + value.reasoning * 0.25 + longContext * 0.25 + value.reliability * 0.1
+    : task === "image_analysis" ? value.multimodal * 0.55 + value.reasoning * 0.3 + value.structuredOutput * 0.15
+    : value.multimodal * 0.8 + value.reliability * 0.2;
+  return Math.max(0, Math.min(100, Math.round(score)));
 }
 
 function expectedCost(model: OrbioCatalogueModel): number {
