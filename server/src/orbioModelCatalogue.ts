@@ -11,7 +11,10 @@ function price(value: unknown): number | undefined { const parsed = Number(value
 export function parseOrbioCatalogue(payload: unknown): OrbioCatalogueModel[] {
   const data = payload && typeof payload === "object" && Array.isArray((payload as { data?: unknown }).data) ? (payload as { data: ProviderModel[] }).data : [];
   return data.flatMap((item) => {
-    const id = String(item.id ?? "").trim(); if (!id) return [];
+    const id = String(item.id ?? "").trim();
+    // Batch aliases are job-oriented models, not valid targets for the
+    // synchronous /chat/completions requests used by this application.
+    if (!id || id.endsWith(":batch")) return [];
     const input = price(item.pricing?.prompt); const output = price(item.pricing?.completion);
     return [{ id, contextLength: Math.max(1, Number(item.context_length ?? 0) || 32_000), inputModalities: modalities(item.architecture?.input_modalities), outputModalities: Array.isArray(item.architecture?.output_modalities) ? item.architecture!.output_modalities!.map(String) : ["text"], ...(input !== undefined ? { inputPricePerToken: input } : {}), ...(output !== undefined ? { outputPricePerToken: output } : {}) }];
   });

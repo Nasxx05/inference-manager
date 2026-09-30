@@ -53,7 +53,11 @@ function costClass(model: OrbioCatalogueModel): "low" | "medium" | "high" {
 }
 
 function eligible(model: OrbioCatalogueModel, input: { taskClass: ModelTaskClass; requiredModalities: RequiredModality[]; contextTokens: number }): boolean {
-  return input.requiredModalities.every((modality) => model.inputModalities.includes(modality))
+  // Orbio exposes asynchronous batch variants in the general catalogue. They
+  // are cheaper, but cannot be used by the synchronous chat-completions path
+  // that powers an interactive Promgent turn.
+  return !model.id.endsWith(":batch")
+    && input.requiredModalities.every((modality) => model.inputModalities.includes(modality))
     && model.contextLength >= input.contextTokens
     && capability(model, input.taskClass) >= minimumCapability[input.taskClass];
 }

@@ -16,6 +16,18 @@ describe("Orbio model router", () => {
     expect(route.reasonCode).toBe("lowest_cost_adequate");
   });
 
+  it("never routes an interactive turn to a cheaper batch-only alias", () => {
+    const route = routeOrbioModel({
+      models: [
+        { id: "openai/gpt-6-luna:batch", contextLength: 128000, inputModalities: ["text"], outputModalities: ["text"], inputPricePerToken: 0.00000005, outputPricePerToken: 0.00000025 },
+        { id: "openai/gpt-6-luna", contextLength: 128000, inputModalities: ["text"], outputModalities: ["text"], inputPricePerToken: 0.0000001, outputPricePerToken: 0.0000005 },
+      ],
+      mode: "auto",
+      taskClass: "structured_project_update",
+    });
+    expect(route.model.id).toBe("openai/gpt-6-luna");
+  });
+
   it("filters by modality", () => {
     expect(routeOrbioModel({ models, mode: "auto", taskClass: "image_analysis", requiredModalities: ["text", "image"] }).model.id).toBe("google/gemini-3-pro");
     expect(routeOrbioModel({ models, mode: "auto", taskClass: "transcription", requiredModalities: ["audio"] }).model.id).toBe("openai/whisper-large-v3");
@@ -31,5 +43,12 @@ describe("Orbio model router", () => {
 
   it("parses provider metadata without treating it as a benchmark", () => {
     expect(parseOrbioCatalogue({ data: [{ id: "vendor/model", context_length: 64000, pricing: { prompt: "0.000001", completion: "0.000002" }, architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] } }] })).toEqual([{ id: "vendor/model", contextLength: 64000, inputModalities: ["text", "image"], outputModalities: ["text"], inputPricePerToken: 0.000001, outputPricePerToken: 0.000002 }]);
+  });
+
+  it("omits batch-only aliases from the interactive catalogue", () => {
+    expect(parseOrbioCatalogue({ data: [
+      { id: "openai/gpt-6-luna:batch", context_length: 128000, architecture: { input_modalities: ["text"] } },
+      { id: "openai/gpt-6-luna", context_length: 128000, architecture: { input_modalities: ["text"] } },
+    ] }).map((model) => model.id)).toEqual(["openai/gpt-6-luna"]);
   });
 });
