@@ -28,6 +28,19 @@ describe("Orbio model router", () => {
     expect(route.model.id).toBe("openai/gpt-6-luna");
   });
 
+  it("never routes a text interview to an image-only generator", () => {
+    const route = routeOrbioModel({
+      models: [
+        { id: "qwen/qwen-image-3", contextLength: 65536, inputModalities: ["text", "image"], outputModalities: ["image"], inputPricePerToken: 0, outputPricePerToken: 0 },
+        { id: "z-ai/glm-5.3-flash", contextLength: 1048576, inputModalities: ["text", "image"], outputModalities: ["text"], inputPricePerToken: 0.00000015, outputPricePerToken: 0.0000005 },
+      ],
+      mode: "auto",
+      taskClass: "structured_project_update",
+      contextTokens: 32000,
+    });
+    expect(route.model.id).toBe("z-ai/glm-5.3-flash");
+  });
+
   it("filters by modality", () => {
     expect(routeOrbioModel({ models, mode: "auto", taskClass: "image_analysis", requiredModalities: ["text", "image"] }).model.id).toBe("google/gemini-3-pro");
     expect(routeOrbioModel({ models, mode: "auto", taskClass: "transcription", requiredModalities: ["audio"] }).model.id).toBe("openai/whisper-large-v3");

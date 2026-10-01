@@ -106,7 +106,11 @@ export async function runPromgentConversation(input: {
     } catch (error) {
       const mayTryAnother = mode === "auto"
         && error instanceof AiError
-        && error.code === "AI_MODEL_UNAVAILABLE"
+        // Catalogue metadata can lag the provider's actual serving surface.
+        // A definitive 400/422 for one auto-selected model should exclude that
+        // model for this process and try the next eligible text model, just as
+        // a 404 does. Locked mode still reports the error without switching.
+        && (error.code === "AI_MODEL_UNAVAILABLE" || error.code === "AI_VALIDATION_FAILED")
         && attempt < 3;
       if (!mayTryAnother) throw error;
       unavailableInteractiveModels.add(decision.model.id);

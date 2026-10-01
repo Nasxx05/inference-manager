@@ -74,6 +74,11 @@ function eligible(model: OrbioCatalogueModel, input: { taskClass: ModelTaskClass
   // are cheaper, but cannot be used by the synchronous chat-completions path
   // that powers an interactive Promgent turn.
   return !model.id.endsWith(":batch")
+    // Every route served through chat/completions must produce natural-language
+    // or structured text. Some image generators accept text prompts and carry
+    // familiar family names (for example, Qwen), but return only images; price
+    // and name-based capability scoring must never make them eligible here.
+    && model.outputModalities.includes("text")
     && input.requiredModalities.every((modality) => model.inputModalities.includes(modality))
     && model.contextLength >= input.contextTokens
     && capability(model, input.taskClass) >= minimumCapability[input.taskClass];
