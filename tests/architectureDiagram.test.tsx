@@ -12,9 +12,10 @@ import {
 const renderMermaid = vi.fn(async (_id: string, source: string) => ({
   svg: `<svg viewBox="0 0 1200 700"><text>${source.includes("Next.js Server Actions and API Routes") ? "Next.js Server Actions and API Routes" : "Architecture"}</text></svg>`,
 }));
+const initializeMermaid = vi.fn();
 
 vi.mock("mermaid", () => ({
-  default: { initialize: vi.fn(), render: renderMermaid },
+  default: { initialize: initializeMermaid, render: renderMermaid },
 }));
 
 const branching = `flowchart TD
@@ -52,6 +53,10 @@ describe("ArchitectureDiagram", () => {
   it("renders controls, zooms, expands, and closes expanded view with Escape", async () => {
     render(<ArchitectureDiagram source={`${branching}\nAPI --> SERVER[Next.js Server Actions and API Routes]`} />);
     expect(await screen.findByRole("img", { name: /architecture diagram showing/i })).toBeInTheDocument();
+    expect(initializeMermaid).toHaveBeenCalledWith(expect.objectContaining({
+      securityLevel: "strict",
+      suppressErrorRendering: true,
+    }));
     expect(screen.getByText("Next.js Server Actions and API Routes")).toBeInTheDocument();
     const zoomLabel = screen.getByRole("button", { name: "Reset zoom to 100%" });
     const beforeZoom = Number(zoomLabel.textContent?.replace("%", ""));

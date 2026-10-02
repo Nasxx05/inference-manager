@@ -126,6 +126,7 @@ export function ArchitectureDiagram({ source }: { source: string }) {
         const { default: mermaid } = await import("mermaid");
         mermaid.initialize({
           startOnLoad: false,
+          suppressErrorRendering: true,
           securityLevel: "strict",
           theme: "base",
           flowchart: { htmlLabels: false, useMaxWidth: false, curve: "linear", nodeSpacing: 35, rankSpacing: 50, wrappingWidth: 220 },
