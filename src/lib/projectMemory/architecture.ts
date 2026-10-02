@@ -36,8 +36,8 @@ export function architectureForMemory(input: {
     edges.push("Application API --> File Storage");
   }
 
-  const diagramSource = ["flowchart TD", ...edges].join("\n");
   const boundaries = nodes.slice(3);
+  const diagramSource = [`flowchart ${boundaries.length >= 3 ? "LR" : "TD"}`, ...edges].join("\n");
   const summary = `Users enter through the client, which talks to the application API${boundaries.length ? ` and its ${boundaries.join(", ")}` : ""}.`;
   const changed = previous?.diagramSource !== diagramSource;
   const version = previous ? (changed ? previous.version + 1 : previous.version) : 1;

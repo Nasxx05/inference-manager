@@ -52,9 +52,9 @@ export function ArtifactCard({ artifact }: { artifact: ProjectArtifact }) {
         </div>
         {isPrompt && Array.isArray(artifact.structuredData.qualityWarnings) && artifact.structuredData.qualityWarnings.length ? <div className="mb-4 rounded-md bg-credit-light px-3 py-2 text-xs leading-5 text-credit">Generated with assumptions: {artifact.structuredData.qualityWarnings.map(String).join(" ")}</div> : null}
         {diagramSource ? <div className="space-y-4">
-          {architectureSummary ? <AssistantMessageContent content={architectureSummary} /> : null}
           <ArchitectureDiagram source={diagramSource} />
-          <details className="text-xs text-muted"><summary className="cursor-pointer">View diagram source</summary><pre className="mt-2 overflow-auto whitespace-pre-wrap rounded-md bg-canvas p-3 font-mono leading-6 text-ink">{diagramSource}</pre></details>
+          {architectureSummary ? <section aria-label="Architecture explanation"><h4 className="mb-2 text-sm font-semibold text-ink">How it works</h4><AssistantMessageContent content={architectureSummary} /></section> : null}
+          <details className="text-xs text-muted"><summary className="cursor-pointer">View Mermaid source</summary><pre className="mt-2 overflow-auto whitespace-pre-wrap rounded-md bg-canvas p-3 font-mono leading-6 text-ink">{diagramSource}</pre></details>
         </div> : isPrompt ? <div className="max-h-[32rem] overflow-auto whitespace-pre-wrap font-mono text-xs leading-6 text-ink">{artifact.content}</div> : <div className="max-h-[32rem] overflow-auto"><AssistantMessageContent content={artifact.content} /></div>}
       </div>
     </details>

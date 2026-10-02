@@ -89,10 +89,15 @@ function architecture(memory: ProjectMemory, stack: ReturnType<typeof recommendS
   const frontend = stack.frontend?.technology ?? "Web Client";
   const backend = stack.backend?.technology ?? "Application Server";
   const database = stack.database?.technology;
-  const lines = ["flowchart TD", `USER[${memory.users[0] ?? "User"}] --> CLIENT[${frontend}]`, `CLIENT --> SERVER[${backend}]`];
+  const branchCount = Number(Boolean(stack.authentication)) + Number(Boolean(database)) + Number(Boolean(stack.storage)) + (memory.externalServices?.length ?? 0);
+  const direction = branchCount >= 3 || entities.length >= 4 ? "LR" : "TD";
+  const lines = [`flowchart ${direction}`, `USER[${memory.users[0] ?? "User"}] --> CLIENT[${frontend}]`, `CLIENT --> SERVER[${backend}]`];
   if ((memory.adminWorkflows?.length ?? 0) > 0) lines.push("ADMIN[Administrator] --> CLIENT");
   if (stack.authentication) lines.push(`CLIENT --> AUTH[${stack.authentication.technology}]`, "SERVER --> AUTH");
-  if (entities.length) lines.push("SERVER --> DOMAIN[Domain workflows and validation]");
+  if (entities.length) {
+    const primaryDomain = entities[0]!.name.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+    lines.push(`SERVER --> DOMAIN[${primaryDomain} Service]`);
+  }
   if (database) lines.push(`${entities.length ? "DOMAIN" : "SERVER"} --> DB[(${database})]`);
   if (stack.storage) lines.push(`SERVER --> STORAGE[${stack.storage.technology}]`);
   for (const service of memory.externalServices ?? []) lines.push(`SERVER --> ${id(service)}[${service}]`);

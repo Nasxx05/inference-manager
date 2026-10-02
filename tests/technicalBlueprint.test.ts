@@ -67,7 +67,7 @@ describe("Technical Blueprint", () => {
     expect(blueprint.dataEntities.some((item) => item.name === "reservations")).toBe(true);
     expect(blueprint.apiSurface.length).toBeGreaterThan(0);
     expect(blueprint.security.some((item) => item.area === "Authorization")).toBe(true);
-    expect(blueprint.architecture.mermaid).toContain("flowchart TD");
+    expect(blueprint.architecture.mermaid).toContain("flowchart LR");
     expect(blueprint.implementationPhases.length).toBeGreaterThanOrEqual(4);
   });
 

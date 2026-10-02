@@ -46,6 +46,7 @@ import {
 } from "@/lib/guidedApi";
 import { ORBIO_ACCOUNT_URL, EXTERNAL_LINK_REL } from "@/lib/externalLinks";
 import { Button, Field, Select } from "./ui";
+import { ArchitectureDiagram } from "./project/ArchitectureDiagram";
 const IterationWorkspace = dynamic(
   () =>
     import("./IterationWorkspace").then((module) => module.IterationWorkspace),
@@ -1763,87 +1764,6 @@ function InterviewCard(props: {
   );
 }
 
-function diagramEdges(source: string): Array<[string, string]> {
-  return source.split("\n").flatMap((line): Array<[string, string]> => {
-    const match = line.match(/^\s*([\w -]{1,80})\s*-->\s*([\w -]{1,80})\s*$/);
-    return match ? [[match[1].trim(), match[2].trim()]] : [];
-  });
-}
-
-export function ArchitectureDiagram({ source }: { source: string }) {
-  const edges = diagramEdges(source);
-  const nodes = [...new Set(edges.flat())];
-  const width = 720;
-  const height = Math.max(180, nodes.length * 100);
-  const positions = new Map(
-    nodes.map((node, index) => [
-      node,
-      { x: index % 2 ? 440 : 40, y: 35 + Math.floor(index / 2) * 120 },
-    ]),
-  );
-  return (
-    <svg
-      viewBox={`0 0 ${width} ${height}`}
-      role="img"
-      aria-label="System architecture diagram"
-      className="h-auto w-full rounded border border-line bg-canvas"
-    >
-      <defs>
-        <marker
-          id="architecture-arrow"
-          markerWidth="8"
-          markerHeight="8"
-          refX="7"
-          refY="4"
-          orient="auto"
-        >
-          <path d="M0,0 L8,4 L0,8 z" fill="currentColor" />
-        </marker>
-      </defs>
-      {edges.map(([from, to], index) => {
-        const a = positions.get(from);
-        const b = positions.get(to);
-        return a && b ? (
-          <line
-            key={`${from}-${to}-${index}`}
-            x1={a.x + 110}
-            y1={a.y + 28}
-            x2={b.x + 110}
-            y2={b.y + 28}
-            stroke="currentColor"
-            strokeWidth="2"
-            markerEnd="url(#architecture-arrow)"
-          />
-        ) : null;
-      })}
-      {nodes.map((node) => {
-        const position = positions.get(node)!;
-        return (
-          <g key={node}>
-            <rect
-              x={position.x}
-              y={position.y}
-              width="220"
-              height="56"
-              rx="6"
-              fill="white"
-              stroke="currentColor"
-            />
-            <text
-              x={position.x + 110}
-              y={position.y + 34}
-              textAnchor="middle"
-              className="fill-ink text-sm"
-            >
-              {node}
-            </text>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
-
 export function ArchitectureCard(props: {
   architecture: ArchitectureVersion;
   projectTitle: string;
@@ -1858,15 +1778,18 @@ export function ArchitectureCard(props: {
         Architecture v{props.architecture.version}
       </p>
       <h1 className="display mt-1 text-3xl text-ink">{props.projectTitle}</h1>
-      <p className="mt-4 text-sm leading-relaxed text-ink">
-        {props.architecture.summary}
-      </p>
-      <p className="mt-2 text-xs text-muted">
-        {props.architecture.reasonForChange}
-      </p>
       <div className="mt-7">
         <ArchitectureDiagram source={props.architecture.diagramSource} />
       </div>
+      <section className="mt-6" aria-labelledby="architecture-explanation">
+        <h2 id="architecture-explanation" className="text-base font-semibold text-ink">How it works</h2>
+        <p className="mt-2 text-sm leading-relaxed text-ink">{props.architecture.summary}</p>
+        <p className="mt-2 text-xs text-muted">{props.architecture.reasonForChange}</p>
+      </section>
+      <details className="mt-4 text-xs text-muted">
+        <summary className="cursor-pointer">View Mermaid source</summary>
+        <pre className="mt-2 overflow-auto whitespace-pre-wrap rounded-md bg-canvas p-3 font-mono leading-6 text-ink">{props.architecture.diagramSource}</pre>
+      </details>
       {props.error ? (
         <p role="alert" className="mt-4 text-sm text-danger">
           {props.error}

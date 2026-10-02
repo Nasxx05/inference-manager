@@ -9,6 +9,13 @@ import { ArtifactCard } from "@/components/project/ArtifactCard";
 import { AssistantMessageContent } from "@/components/project/AssistantMessageContent";
 import { createInitialMemory, createProjectRecord } from "@/lib/projectMemory";
 
+vi.mock("mermaid", () => ({
+  default: {
+    initialize: vi.fn(),
+    render: vi.fn(async () => ({ svg: '<svg viewBox="0 0 720 320"><text>Application API</text><text>Database</text></svg>' })),
+  },
+}));
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe("conversation product enhancements", () => {
@@ -52,18 +59,18 @@ describe("conversation product enhancements", () => {
     expect(artifact.content).toContain("Keep the booking form usable on mobile.");
   });
 
-  it("renders Mermaid-style architecture edges as an accessible skeleton diagram", () => {
+  it("renders Mermaid-style architecture edges as an accessible diagram", async () => {
     const source = "flowchart TD\nUSER[User] --> CLIENT[Next.js Web App]\nCLIENT --> API[Application API]\nAPI --> DB[(PostgreSQL)]";
     expect(parseArchitectureEdges(source)).toHaveLength(3);
     render(<ArchitectureDiagram source={source} />);
-    expect(screen.getByRole("img", { name: /system architecture skeleton diagram/i })).toBeInTheDocument();
-    expect(screen.getByText("Application API")).toBeInTheDocument();
+    expect(await screen.findByRole("img", { name: /architecture diagram showing/i })).toBeInTheDocument();
+    expect(await screen.findByText("Application API")).toBeInTheDocument();
   });
 
-  it("renders an inline architecture diagram inside a detailed assistant response", () => {
+  it("renders an inline architecture diagram inside a detailed assistant response", async () => {
     render(<AssistantMessageContent content={"## Architecture at a glance\nThe client calls trusted server logic.\n\n```mermaid\nflowchart TD\nUSER[User] --> CLIENT[Web app]\nCLIENT --> API[Application API]\nAPI --> DB[(Database)]\n```"} />);
     expect(screen.getByRole("heading", { name: "Architecture at a glance" })).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: /system architecture skeleton diagram/i })).toBeInTheDocument();
+    expect(await screen.findByRole("img", { name: /architecture diagram showing/i })).toBeInTheDocument();
     expect(screen.queryByText("```mermaid")).not.toBeInTheDocument();
   });
 
