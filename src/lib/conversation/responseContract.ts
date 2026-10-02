@@ -1,4 +1,4 @@
-import type { ArtifactType, ConversationIntent, ProjectAction, PromgentResponseProposal } from "@/types/conversation";
+import type { ArtifactType, BriefRequirementPatch, ConversationIntent, ProjectAction, ProjectBriefPatch, PromgentResponseProposal } from "@/types/conversation";
 
 const artifactTypes = new Set<ArtifactType>(["project_blueprint", "technical_blueprint", "architecture", "implementation_plan", "implementation_prompt", "correction_prompt", "enhancement_prompt", "test_plan", "srs", "requirements_snapshot", "data_model", "api_plan", "deployment_plan", "repository_review", "live_product_review", "cost_estimate"]);
 
@@ -15,6 +15,58 @@ function strings(value: unknown, limit = 8, max = 800): string[] {
 function objects<T>(value: unknown, limit: number, parse: (item: Record<string, unknown>) => T | null): T[] {
   if (!Array.isArray(value)) return [];
   return value.map(record).map(parse).filter((item): item is T => item !== null).slice(0, limit);
+}
+
+function listPatch(value: unknown): { add: string[]; remove: string[] } | undefined {
+  const item = record(value);
+  const add = strings(item.add, 20, 800);
+  const remove = strings(item.remove, 20, 800);
+  return add.length || remove.length ? { add, remove } : undefined;
+}
+
+function briefPatch(value: unknown): ProjectBriefPatch | undefined {
+  const root = record(value);
+  if (!Object.keys(root).length) return undefined;
+  const features = objects(root.features, 30, (item): BriefRequirementPatch | null => {
+    const action = text(item.action, 20);
+    if (!(["add", "change", "remove"] as string[]).includes(action)) return null;
+    const description = text(item.description, 1200);
+    const requirementId = text(item.requirementId, 160);
+    const previousDescription = text(item.previousDescription, 1200);
+    if (action === "add" && !description) return null;
+    if (action !== "add" && !requirementId && !previousDescription && !description) return null;
+    const type = text(item.type, 40) as BriefRequirementPatch["type"];
+    const priority = text(item.priority, 20) as BriefRequirementPatch["priority"];
+    return {
+      action: action as BriefRequirementPatch["action"],
+      ...(requirementId ? { requirementId } : {}),
+      ...(previousDescription ? { previousDescription } : {}),
+      ...(description ? { description } : {}),
+      ...(["business", "functional", "non_functional", "design", "technical", "data", "security", "integration", "acceptance"].includes(type ?? "") ? { type } : {}),
+      ...(text(item.category, 80) ? { category: text(item.category, 80) } : {}),
+      ...(["critical", "high", "medium", "low"].includes(priority ?? "") ? { priority } : {}),
+      ...(typeof item.required === "boolean" ? { required: item.required } : {}),
+      ...(text(item.reason, 500) ? { reason: text(item.reason, 500) } : {}),
+    };
+  });
+  const decisionsRoot = record(root.decisions);
+  const decisionAdd = objects(decisionsRoot.add, 20, (item) => {
+    const decision = text(item.decision, 1200);
+    return decision ? { decision, reason: text(item.reason, 1200) } : null;
+  });
+  const questionsRoot = record(root.openQuestions);
+  const architectureRoot = record(root.architecture);
+  const patch: ProjectBriefPatch = {
+    ...(text(root.goal, 2400) ? { goal: text(root.goal, 2400) } : {}),
+    ...(listPatch(root.targetUsers) ? { targetUsers: listPatch(root.targetUsers) } : {}),
+    ...(features.length ? { features } : {}),
+    ...(listPatch(root.techChoices) ? { techChoices: listPatch(root.techChoices) } : {}),
+    ...(listPatch(root.constraints) ? { constraints: listPatch(root.constraints) } : {}),
+    ...(decisionAdd.length || strings(decisionsRoot.remove, 20, 1200).length ? { decisions: { add: decisionAdd, remove: strings(decisionsRoot.remove, 20, 1200) } } : {}),
+    ...(strings(questionsRoot.add, 20, 1200).length || strings(questionsRoot.resolve, 20, 1200).length ? { openQuestions: { add: strings(questionsRoot.add, 20, 1200), resolve: strings(questionsRoot.resolve, 20, 1200) } } : {}),
+    ...(typeof architectureRoot.changed === "boolean" ? { architecture: { changed: architectureRoot.changed, ...(text(architectureRoot.summary, 2400) ? { summary: text(architectureRoot.summary, 2400) } : {}), ...(text(architectureRoot.reason, 500) ? { reason: text(architectureRoot.reason, 500) } : {}) } } : {}),
+  };
+  return Object.keys(patch).length ? patch : undefined;
 }
 
 export function validatePromgentResponse(raw: unknown, routedIntents: ConversationIntent[]): PromgentResponseProposal {
@@ -70,6 +122,7 @@ export function validatePromgentResponse(raw: unknown, routedIntents: Conversati
         ...(text(guidance.nextDecision, 1200) ? { nextDecision: text(guidance.nextDecision, 1200) } : {}),
       },
     } : {}),
+    ...(briefPatch(root.briefPatch ?? root.projectBriefPatch) ? { briefPatch: briefPatch(root.briefPatch ?? root.projectBriefPatch) } : {}),
     memoryChanges: Array.isArray(root.memoryChanges) ? root.memoryChanges.slice(0, 50) : [],
     decisions: (Array.isArray(root.decisions) ? root.decisions : []).flatMap((item) => {
       const value = record(item); const decision = text(value.decision, 1200); const reason = text(value.reason, 1200);

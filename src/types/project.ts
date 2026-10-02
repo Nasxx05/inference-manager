@@ -137,6 +137,8 @@ export interface Requirement {
   version: number;
   createdAt: string;
   updatedAt: string;
+  /** Describes the latest explicit change for the live brief UI. */
+  briefChangeStatus?: "new" | "changed" | "removed";
 }
 
 export interface RequirementUpdateProposal {

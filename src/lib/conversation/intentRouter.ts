@@ -1,7 +1,7 @@
 import type { ConversationIntent } from "@/types/conversation";
 
 const rules: Array<[ConversationIntent, RegExp]> = [
-  ["repository_review", /github\.com\/[\w.-]+\/[\w.-]+|review (?:my |the )?(?:repo|repository|code)|i (?:built|implemented|pushed) it/i],
+  ["repository_review", /github\.com\/[\w.-]+\/[\w.-]+|review (?:my |the |this )?(?:repo|repository|code|implementation|build)|i (?:built|implemented|pushed) it/i],
   ["live_product_review", /https?:\/\/(?!github\.com)|review (?:my |the )?(?:site|app|product)|live (?:site|app|url)/i],
   ["architecture_request", /(?:show|create|generate|draw|give).{0,64}architecture|how (?:does|will) (?:it|everything) connect/i],
   ["architecture_discussion", /architecture|tech stack|how should (?:it|this) work/i],
@@ -30,4 +30,13 @@ export function routeConversationIntents(message: string): ConversationIntent[] 
 
 export function intentMayChangeProject(intent: ConversationIntent): boolean {
   return ["project_discovery", "requirement_change", "change_request"].includes(intent);
+}
+
+const substantialIntents = new Set<ConversationIntent>([
+  "project_discovery", "requirement_change", "change_request", "architecture_request",
+  "architecture_discussion", "build_plan_request", "prompt_generation", "next_step_request",
+]);
+
+export function isSubstantialEngineeringTurn(intents: ConversationIntent[]): boolean {
+  return intents.some((intent) => substantialIntents.has(intent));
 }

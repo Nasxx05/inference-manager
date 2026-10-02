@@ -95,8 +95,7 @@ import type { ProjectReference } from "@/types/project";
 import { buildPlanWithMetrics } from "@/lib/planner";
 import { planningRequestFromApprovedSrs } from "@/lib/projectMemory/plannerAdapter";
 import { applyConversationTurn } from "@/lib/conversation/conversationTurn";
-import { formatEngineeringGuidance, isSubstantialEngineeringTurn } from "@/lib/conversation/engineeringGuidance";
-import { routeConversationIntents } from "@/lib/conversation/intentRouter";
+import { isSubstantialEngineeringTurn, routeConversationIntents } from "@/lib/conversation/intentRouter";
 import {
   architectureArtifact,
   buildArtifact,
@@ -856,7 +855,9 @@ export function guidedRouter(): express.Router {
       const parsedRequest = projectRequestInput(request);
       const input = parsedRequest.input;
       const description = String(input.description ?? "").trim();
-      const budget = Number(input.budget);
+      const requestedBudget = Number(input.budget);
+      const configuredBudget = Number(process.env.PROMGENT_SESSION_CREDIT_BUDGET);
+      const budget = Number.isFinite(configuredBudget) && configuredBudget > 0 ? configuredBudget : requestedBudget;
       const modelId = String(input.modelId ?? "auto").trim() || "auto";
       if (
         !description ||
@@ -1052,11 +1053,7 @@ export function guidedRouter(): express.Router {
         projectId: project.id,
         sessionId: session.id,
         role: "assistant" as const,
-        content: formatEngineeringGuidance({
-          proposal: inference.response,
-          memory,
-          intents: inference.response.intents,
-        }),
+        content: inference.response.message,
         source: "system" as const,
         modelRoute: {
           ...inference.route,
@@ -1313,6 +1310,12 @@ export function guidedRouter(): express.Router {
           loadRecentInterviewMessages(request.params.projectId, 8),
           projectUsageForUser(request.params.projectId, user.id),
         ]);
+      if (priorUsage.remaining <= 0)
+        throw new PersistenceError(
+          "PROJECT_BUDGET_EXHAUSTED",
+          "This project has used its interview credit budget. Increase the budget before sending another turn.",
+          402,
+        );
       const intents = routeConversationIntents(content);
       let repositoryRetrievalMs = 0;
       let repositorySnapshot: Awaited<ReturnType<typeof inspectRepository>> | undefined;
@@ -1393,6 +1396,7 @@ export function guidedRouter(): express.Router {
             memory: state.memory,
             recentMessages,
             userContent: content,
+            budget: { budget: priorUsage.budget, remaining: priorUsage.remaining },
             ...(repositorySnapshot || liveProductSnapshot || imageAnalyses.length
               ? {
                   externalEvidence: [
@@ -1480,19 +1484,9 @@ export function guidedRouter(): express.Router {
             updatedAt: new Date().toISOString(),
           },
         };
-      turn = {
-        ...turn,
-        assistantMessage: {
-          ...turn.assistantMessage,
-          content: formatEngineeringGuidance({
-            proposal: inference.response,
-            memory: turn.memory,
-            intents: inference.response.intents,
-          }),
-        },
-      };
       const engineeringTurn = isSubstantialEngineeringTurn(inference.response.intents);
-      const blueprintRelevant = inference.response.intents.some((intent) => [
+      const architecturePatchChanged = inference.response.briefPatch?.architecture?.changed === true;
+      const blueprintRelevant = architecturePatchChanged || inference.response.intents.some((intent) => [
         "architecture_request",
         "architecture_discussion",
         "build_plan_request",
@@ -1516,6 +1510,7 @@ export function guidedRouter(): express.Router {
           ].flatMap(([pattern, name]) => (pattern as RegExp).test(repositorySnapshot.evidenceText) ? [name as string] : [])
         : [];
       let technicalBlueprint: TechnicalBlueprint | undefined;
+      let architectureChanged = false;
       let promptPlanResult: Awaited<ReturnType<typeof runPromptPlanInference>> | undefined;
       if (blueprintRelevant) {
         technicalBlueprint = buildTechnicalBlueprint({
@@ -1546,6 +1541,7 @@ export function guidedRouter(): express.Router {
             ...(repositorySnapshot ? { repositoryEvidence: { url: repositorySnapshot.repositoryUrl, ...(repositorySnapshot.commitSha ? { commitSha: repositorySnapshot.commitSha } : {}), existingStack: detectedRepositoryStack, relevantFiles: repositorySnapshot.relevantFiles } } : {}),
           });
         }
+        architectureChanged = previousArchitecture?.diagramSource !== technicalBlueprint.architecture.mermaid;
         const promptDepth = inferPromptDepth({ userRequest: content, memory: turn.memory, hasRepository: Boolean(repositorySnapshot) });
         if (inference.response.intents.includes("prompt_generation") && ["major_feature", "full_mvp", "repository_correction", "refactor"].includes(promptDepth)) {
           try {
@@ -1559,7 +1555,10 @@ export function guidedRouter(): express.Router {
           }
         }
       }
-      const requested = [...inference.response.artifactRequests];
+      const architectureWasRequested = inference.response.intents.includes("architecture_request");
+      const requested = inference.response.artifactRequests.filter((item) =>
+        item.type !== "architecture" || architectureWasRequested || architecturePatchChanged
+      );
       const hasEngineeringBrief = previousArtifacts.some((item) => item.type === "project_blueprint");
       if (
         engineeringTurn && (!hasEngineeringBrief || blueprintRelevant) &&
@@ -1571,7 +1570,7 @@ export function guidedRouter(): express.Router {
           reason: "Keep the product outcome, MVP boundary, decisions, and success criteria inspectable as the idea changes.",
         });
       if (
-        inference.response.intents.includes("architecture_request") &&
+        architectureWasRequested &&
         !requested.some((item) => item.type === "architecture")
       )
         requested.push({
@@ -1616,8 +1615,9 @@ export function guidedRouter(): express.Router {
           reason: "A technical plan was prepared for the requested engineering artifact.",
         });
       if (
-        engineeringTurn &&
+        (architectureWasRequested || architecturePatchChanged) &&
         technicalBlueprint &&
+        architectureChanged &&
         turn.memory.completeness.level !== "insufficient" &&
         !requested.some((item) => item.type === "architecture")
       )
@@ -1665,6 +1665,17 @@ export function guidedRouter(): express.Router {
             ci: ciEvidence ?? null,
             testRun: testRun ?? null,
           },
+        });
+      else if (
+        inference.response.intents.includes("repository_review") &&
+        !requested.some((item) => item.type === "repository_review")
+      )
+        requested.push({
+          type: "repository_review",
+          title: "Implementation review",
+          reason: "Compare the supplied implementation evidence with the saved project brief.",
+          content: inference.response.message,
+          structuredData: { evidenceSource: "user_supplied_code_or_files", runtimeExecuted: false },
         });
 
       const artifactPriority = [
@@ -1791,8 +1802,10 @@ export function guidedRouter(): express.Router {
           sourceMessageId: turn.assistantMessage.id,
           previous,
         });
-        attachedArtifactIds.push(artifact.id);
-        if (artifact !== previous) artifacts.push(artifact);
+        if (artifact !== previous) {
+          attachedArtifactIds.push(artifact.id);
+          artifacts.push(artifact);
+        }
       }
 
       const allArtifactIds = attachedArtifactIds;

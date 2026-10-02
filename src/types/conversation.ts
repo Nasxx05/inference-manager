@@ -108,10 +108,34 @@ export interface ProjectAction {
 
 export interface NextRecommendedAction { type: string; label: string; reason: string; }
 
+export interface BriefRequirementPatch {
+  action: "add" | "change" | "remove";
+  requirementId?: string;
+  previousDescription?: string;
+  description?: string;
+  type?: "business" | "functional" | "non_functional" | "design" | "technical" | "data" | "security" | "integration" | "acceptance";
+  category?: string;
+  priority?: "critical" | "high" | "medium" | "low";
+  required?: boolean;
+  reason?: string;
+}
+
+export interface ProjectBriefPatch {
+  goal?: string;
+  targetUsers?: { add: string[]; remove: string[] };
+  features?: BriefRequirementPatch[];
+  techChoices?: { add: string[]; remove: string[] };
+  constraints?: { add: string[]; remove: string[] };
+  decisions?: { add: Array<{ decision: string; reason: string }>; remove: string[] };
+  openQuestions?: { add: string[]; resolve: string[] };
+  architecture?: { changed: boolean; summary?: string; reason?: string };
+}
+
 export interface PromgentResponseProposal {
   message: string;
   intents: ConversationIntent[];
   guidance?: EngineeringGuidance;
+  briefPatch?: ProjectBriefPatch;
   memoryChanges: unknown[];
   decisions: Array<Omit<ProjectDecision, "id" | "projectId" | "createdAt" | "updatedAt">>;
   artifactRequests: Array<{ type: ArtifactType; title?: string; reason: string; content?: string; structuredData?: Record<string, unknown> }>;

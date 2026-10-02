@@ -80,9 +80,7 @@ function parsedResponse(content: string): { assistantContent: string; structured
     const message = String((parsed as { assistantMessage?: unknown }).assistantMessage ?? "").trim();
     if (message) return { assistantContent: message.slice(0, 4000), structuredProposal: parsed };
   }
-  const plain = content.trim();
-  if (!plain) throw new PersistenceError("ORBIO_INVALID_RESPONSE", "Orbio returned an empty interview response.", 502);
-  return { assistantContent: plain.slice(0, 4000), structuredProposal: {} };
+  throw new PersistenceError("ORBIO_INVALID_RESPONSE", "Orbio returned an invalid interview response. No project state was changed.", 502);
 }
 
 /**
@@ -111,23 +109,48 @@ export async function runGuidedInterviewInference(input: {
     ? "Start the interview with one useful question based on the initial project idea and its highest-value unknown."
     : "Respond to the user's latest answer and continue the adaptive interview.";
 
-  const result = await chat({
+  const request = {
     apiKey,
     baseUrl,
     model,
     messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: `${direction}\n\n${context}` },
+      { role: "system" as const, content: SYSTEM_PROMPT },
+      { role: "user" as const, content: `${direction}\n\n${context}` },
     ],
     maxTokens: maxTokens(input.project.planningDepth),
     temperature: 0.2,
     jsonMode: true,
-    stage: "guided-interview",
+    stage: "guided-interview" as const,
     timeoutMs: guidedInterviewTimeoutMs(),
     retry: false,
-  });
+  };
+  let result = await chat(request);
+  let parsed: ReturnType<typeof parsedResponse>;
+  try {
+    parsed = parsedResponse(result.content);
+  } catch (error) {
+    if (!(error instanceof PersistenceError) || error.code !== "ORBIO_INVALID_RESPONSE") throw error;
+    const retryResult = await chat({
+      ...request,
+      stage: "guided-interview",
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: "The prior draft did not match the JSON contract. Return one complete valid JSON object only." },
+        { role: "user", content: `${direction}\n\n${context}` },
+      ],
+    });
+    result = {
+      ...retryResult,
+      durationMs: result.durationMs + retryResult.durationMs,
+      ...(result.usage || retryResult.usage ? { usage: {
+        inputTokens: (result.usage?.inputTokens ?? 0) + (retryResult.usage?.inputTokens ?? 0),
+        outputTokens: (result.usage?.outputTokens ?? 0) + (retryResult.usage?.outputTokens ?? 0),
+        cost: (result.usage?.cost ?? 0) + (retryResult.usage?.cost ?? 0),
+      } } : {}),
+    };
+    parsed = parsedResponse(result.content);
+  }
 
-  const parsed = parsedResponse(result.content);
   return {
     ...parsed,
     model: result.model,

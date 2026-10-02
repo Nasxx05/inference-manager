@@ -1,4 +1,4 @@
-import { CircleDot, GitBranch, Layers3, Route, ShieldAlert, Users, WalletCards } from "lucide-react";
+import { Bot, CircleDot, GitBranch, Layers3, Route, ShieldAlert, Users, WalletCards } from "lucide-react";
 import type { GuidedProjectSnapshot } from "@/types/project";
 
 function List({ values, empty }: { values?: string[]; empty: string }) {
@@ -15,6 +15,8 @@ export function ProjectContextPanel({ snapshot, balance }: { snapshot: GuidedPro
   const phase = memory.projectPhase ?? project.phase ?? "exploring";
   const next = memory.nextRecommendedAction ?? project.nextRecommendedAction;
   const budgetPercent = usage.budget > 0 ? Math.min(100, (usage.used / usage.budget) * 100) : 0;
+  const activeModel = [...snapshot.messages].reverse().find((message) => message.role === "assistant" && message.modelRoute?.chosenModel)?.modelRoute?.chosenModel;
+  const changedRequirements = memory.requirements.filter((item) => item.briefChangeStatus).slice(-5).reverse();
   return (
     <aside className="h-full overflow-y-auto border-l border-line bg-paper px-5 py-6">
       <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-muted">Project memory</p>
@@ -26,9 +28,19 @@ export function ProjectContextPanel({ snapshot, balance }: { snapshot: GuidedPro
       </section>
 
       <section className="mt-6">
+        <div className="mb-2 flex items-center gap-2 text-xs font-medium"><Bot className="h-3.5 w-3.5 text-forest" /> Active model</div>
+        <p className="break-all font-mono text-[10px] leading-4 text-muted">{activeModel ?? (project.selectedModel === "auto" ? "Auto — selected per turn" : project.selectedModel)}</p>
+      </section>
+
+      <section className="mt-6">
         <h3 className="mb-2 text-xs font-medium">Goal</h3>
         <p className="text-xs leading-5 text-muted">{memory.purpose || project.initialDescription}</p>
       </section>
+
+      {changedRequirements.length ? <section className="mt-6">
+        <h3 className="mb-2 text-xs font-medium">Latest brief changes</h3>
+        <ul className="space-y-2">{changedRequirements.map((item) => <li key={item.id} className="text-xs leading-5 text-muted"><span className={`mr-1.5 rounded px-1.5 py-0.5 font-mono text-[8px] uppercase ${item.briefChangeStatus === "removed" ? "bg-danger-light text-danger" : item.briefChangeStatus === "new" ? "bg-forest-light text-forest" : "bg-credit-light text-credit"}`}>{item.briefChangeStatus}</span>{item.description}</li>)}</ul>
+      </section> : null}
 
       <section className="mt-6">
         <div className="mb-2 flex items-center gap-2 text-xs font-medium"><Users className="h-3.5 w-3.5 text-forest" /> Primary users</div>
@@ -43,6 +55,11 @@ export function ProjectContextPanel({ snapshot, balance }: { snapshot: GuidedPro
       <section className="mt-6">
         <div className="mb-2 flex items-center gap-2 text-xs font-medium"><Route className="h-3.5 w-3.5 text-forest" /> User journeys</div>
         <List values={[...(memory.workflows ?? []), ...(memory.adminWorkflows ?? [])]} empty="The end-to-end success journey is not yet clear." />
+      </section>
+
+      <section className="mt-6">
+        <h3 className="mb-2 text-xs font-medium">Current architecture</h3>
+        <p className="text-xs leading-5 text-muted">{memory.architectureSummary || "Architecture has not changed from the initial product shape yet."}</p>
       </section>
 
       <section className="mt-6">
@@ -69,6 +86,7 @@ export function ProjectContextPanel({ snapshot, balance }: { snapshot: GuidedPro
       <section className="mt-6 rounded-lg border border-line bg-canvas p-3">
         <div className="flex items-center justify-between gap-3"><h3 className="text-xs font-medium">Engineering CREDIT</h3><span className="font-mono text-[9px] uppercase text-muted">{usage.estimated ? "Includes estimates" : "Provider charges"}</span></div>
         <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-line"><div className="h-full rounded-full bg-forest" style={{ width: `${budgetPercent}%` }} /></div>
+        {usage.budget > 0 && usage.remaining / usage.budget <= 0.1 ? <p className="mt-2 rounded bg-credit-light px-2 py-1.5 text-[10px] leading-4 text-credit">This interview is near its CREDIT limit. Keep the next turn focused or increase the project budget.</p> : null}
         <div className="mt-3 grid grid-cols-3 gap-2">
           <div><p className="font-mono text-sm">{usage.used.toFixed(3)}</p><p className="text-[9px] text-muted">Used</p></div>
           <div><p className="font-mono text-sm">{usage.remaining.toFixed(3)}</p><p className="text-[9px] text-muted">Budget left</p></div>
