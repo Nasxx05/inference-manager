@@ -64,7 +64,7 @@ function briefPatch(value: unknown): ProjectBriefPatch | undefined {
     ...(listPatch(root.constraints) ? { constraints: listPatch(root.constraints) } : {}),
     ...(decisionAdd.length || strings(decisionsRoot.remove, 20, 1200).length ? { decisions: { add: decisionAdd, remove: strings(decisionsRoot.remove, 20, 1200) } } : {}),
     ...(strings(questionsRoot.add, 20, 1200).length || strings(questionsRoot.resolve, 20, 1200).length ? { openQuestions: { add: strings(questionsRoot.add, 20, 1200), resolve: strings(questionsRoot.resolve, 20, 1200) } } : {}),
-    ...(typeof architectureRoot.changed === "boolean" ? { architecture: { changed: architectureRoot.changed, ...(text(architectureRoot.summary, 2400) ? { summary: text(architectureRoot.summary, 2400) } : {}), ...(text(architectureRoot.reason, 500) ? { reason: text(architectureRoot.reason, 500) } : {}) } } : {}),
+    ...(typeof architectureRoot.changed === "boolean" ? { architecture: { changed: architectureRoot.changed, ...(text(architectureRoot.summary, 2400) ? { summary: text(architectureRoot.summary, 2400) } : {}), ...(text(architectureRoot.reason, 500) ? { reason: text(architectureRoot.reason, 500) } : {}), ...(text(architectureRoot.diagram, 12_000) ? { diagram: text(architectureRoot.diagram, 12_000) } : {}) } } : {}),
   };
   return Object.keys(patch).length ? patch : undefined;
 }

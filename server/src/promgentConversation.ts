@@ -4,6 +4,7 @@ import { extractJson } from "@/lib/ai/json";
 import { composeConversationContext } from "@/lib/conversation/contextComposer";
 import { routeConversationIntents } from "@/lib/conversation/intentRouter";
 import { validatePromgentResponse } from "@/lib/conversation/responseContract";
+import { validateProductArchitectureDiagram } from "@/lib/architecture/productArchitecture";
 import { validatePromptPlan } from "@/lib/prompts/promptCompiler";
 import { routeOrbioModel, type ModelTaskClass, type OrbioCatalogueModel } from "@/lib/models/orbioRouter";
 import { getModel } from "@/data/models";
@@ -29,9 +30,18 @@ briefPatch is the only way to update the project brief. Include only changes sup
   "constraints":{"add":[],"remove":[]},
   "decisions":{"add":[{"decision":"...","reason":"..."}],"remove":[]},
   "openQuestions":{"add":[],"resolve":[]},
-  "architecture":{"changed":false,"summary":"only when changed","reason":"what boundary or data flow changed"}
+  "architecture":{"changed":false,"summary":"only when changed","reason":"what product structure changed","diagram":"Mermaid flowchart only when changed"}
 }
-Omit empty patch fields. For a factual question with no project change, omit briefPatch entirely. Never invent a requirement from a question. Never silently overwrite confirmed scope. Mark architecture.changed true only when a system boundary, component responsibility, integration, storage choice, or important data flow really changed.
+Omit empty patch fields. For a factual question with no project change, omit briefPatch entirely. Never invent a requirement from a question. Never silently overwrite confirmed scope. Mark architecture.changed true only when the saved product structure changed: a user role, entry path, main screen, core feature, product data area, or external service was added, removed, or reorganized. Otherwise set changed to false, omit diagram, and say "no diagram changes" in the reply when relevant.
+
+DIAGRAM RULES — whenever architecture.changed is true, diagram is required:
+- Return Mermaid flowchart syntax using the app's existing format.
+- Describe the product, never its implementation technology. Framework, language, hosting, library, and server-mechanism names such as Next.js, TypeScript, React, Node, Server Actions, and Route Handlers must never be diagram boxes. Technology belongs only in the written plan.
+- Build only from the saved project brief and the newest supported patch: users/roles, optional entry such as landing page or sign in, main screens or areas, real core features grouped under their screen, and purpose-named data/services such as Orders data, Payment provider, or Market data API.
+- Every box must be a user, screen, feature, or purpose-named data/service component actually supported by the brief. Do not invent generic Client, Server, API, Application, Service, or Database boxes.
+- Use short plain labels of 2–4 words. Aim for 6–14 boxes. Use subgraphs to group features under their screen. Create branching connections from users to screens, screens to features, and features to the data/services they use. Never return one straight chain.
+- The map must make sense to a non-technical person. Do not derive its boxes from the recommended or confirmed tech stack.
+- If the user requests the first diagram and canonical memory says architecture is not yet established, treat that initial product map as changed and include it.
 
 Optional artifactRequests items use {type,title,reason,content?,structuredData?}. Valid types: project_blueprint, technical_blueprint, architecture, implementation_plan, implementation_prompt, correction_prompt, enhancement_prompt, test_plan, srs, requirements_snapshot, data_model, api_plan, deployment_plan, repository_review, live_product_review, cost_estimate. Request architecture only when explicitly asked or architecture.changed is true. Request implementation_prompt for final-prompt requests. For repository_review, make message include a requirement-by-requirement checklist labelled Done, Partial, or Missing, cite concrete file/test evidence, and end with a copyable fix prompt for every Partial or Missing item.
 
@@ -188,14 +198,23 @@ export async function runPromgentConversation(input: {
   try { if (parsed) response = validatePromgentResponse(parsed, intents); } catch { response = undefined; }
   const previousAssistant = [...input.recentMessages].reverse().find((message) => message.role === "assistant")?.content ?? "";
   const copied = Boolean(response && previousAssistant && responseSimilarity(response.message, previousAssistant) > 0.7);
-  if (!response || copied) {
+  const firstDiagram = response?.briefPatch?.architecture?.diagram;
+  const firstDiagramValidation = firstDiagram ? validateProductArchitectureDiagram(firstDiagram) : undefined;
+  const firstArchitectureChanged = response?.briefPatch?.architecture?.changed === true;
+  const missingDiagram = firstArchitectureChanged && !firstDiagram;
+  const invalidDiagram = Boolean(missingDiagram || (firstDiagramValidation && !firstDiagramValidation.valid));
+  if (!response || copied || invalidDiagram) {
     const retry = await chat({
       apiKey: input.apiKey,
       baseUrl,
       model: decision.model.id,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "system", content: copied ? "Your draft was too similar to the previous reply. Answer only the newest request with new analysis; do not recap." : "The prior draft was not valid contract JSON. Return one complete valid JSON object matching the contract." },
+        { role: "system", content: invalidDiagram
+          ? `Your architecture diagram was rejected: ${missingDiagram ? "architecture.changed was true but diagram was missing." : firstDiagramValidation!.reasons.join(" ")} Regenerate it once as a branching 6–14 box product map built from saved users, screens, features, data, and purpose-named external services. Do not use any technology boxes or a straight chain.`
+          : copied
+            ? "Your draft was too similar to the previous reply. Answer only the newest request with new analysis; do not recap."
+            : "The prior draft was not valid contract JSON. Return one complete valid JSON object matching the contract." },
         { role: "user", content: context },
       ],
       maxTokens: configuredMaxTokens(1800, input.budget?.remaining, input.budget?.budget),
@@ -218,6 +237,13 @@ export async function runPromgentConversation(input: {
     try { response = parsed ? validatePromgentResponse(parsed, intents) : undefined; } catch { response = undefined; }
   }
   if (!parsed || !response) throw new PersistenceError("PROMGENT_INVALID_RESPONSE", "Promgent returned an invalid response. No project state was changed. Please retry this turn.", 502);
+  const finalDiagram = response.briefPatch?.architecture?.diagram;
+  if (firstArchitectureChanged && response.briefPatch?.architecture?.changed !== true)
+    throw new PersistenceError("PROMGENT_INVALID_ARCHITECTURE", "Promgent did not preserve the required architecture change while regenerating the diagram. No project state was changed. Please retry this turn.", 502);
+  if ((firstArchitectureChanged || response.briefPatch?.architecture?.changed === true) && !finalDiagram)
+    throw new PersistenceError("PROMGENT_INVALID_ARCHITECTURE", "Promgent did not return the required product architecture diagram. No project state was changed. Please retry this turn.", 502);
+  if (finalDiagram && !validateProductArchitectureDiagram(finalDiagram).valid)
+    throw new PersistenceError("PROMGENT_INVALID_ARCHITECTURE", "Promgent could not produce a useful product architecture diagram. No project state was changed. Please retry this turn.", 502);
   return {
     response, structuredMemoryProposal: parsed,
     route: { taskClass: taskClass(intents), chosenModel: result.model || decision.model.id, reasonCode: decision.reasonCode, expectedCostClass: decision.expectedCostClass, fallbackUsed, estimated: decision.estimated },

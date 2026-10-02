@@ -1,6 +1,7 @@
 import { normalizeProjectMemory } from "@/lib/projectMemory/compatibility";
 import { activeRequirements } from "@/lib/projectMemory/requirements";
 import { structuredAcceptanceCriteria } from "@/lib/projectMemory/proposals";
+import { buildProductArchitecture } from "@/lib/architecture/productArchitecture";
 import type { ProjectMemory } from "@/types/project";
 import type { ApiDefinition, DataEntityDefinition, ImplementationPhase, PageDefinition, TechnicalBlueprint, WorkflowDefinition } from "@/types/technicalBlueprint";
 import { recommendStack, stackChoices } from "./stackRecommendation";
@@ -32,6 +33,18 @@ function deriveWorkflows(memory: ProjectMemory, requirements: string[]): Workflo
 function derivePages(memory: ProjectMemory, text: string): PageDefinition[] {
   const pages: PageDefinition[] = [{ route: "/", name: "Home", purpose: "Explain the product or service and direct users to the primary action.", visibleContent: [memory.purpose || "Project value proposition", "Primary navigation", "Primary call to action"], actions: ["Navigate to the main workflow"], dataNeeded: ["Published public content"] }];
   if (/url short|shorten.{0,20}(?:url|link)|short link/i.test(text)) pages.push({ route: "/links", name: "Link workspace", purpose: "Let a user create a short link and understand whether it was saved successfully.", visibleContent: ["Destination URL field", "Optional custom alias", "Generated short link", "Copy action", "Validation and error feedback"], actions: ["Create a short link", "Copy the generated link", "Review existing links"], dataNeeded: ["The user's short-link records and visit totals"] });
+  if (/to-?do|task list|manage.{0,20}tasks?/i.test(text)) pages.push({ route: "/tasks", name: "Task dashboard", purpose: "Let a user organize and complete their tasks.", visibleContent: ["Task list", "Completion state", "Task controls"], actions: [
+    ...(/add|create/i.test(text) ? ["Add task"] : []),
+    ...(/complete|finish|done/i.test(text) ? ["Complete task"] : []),
+    ...(/edit|update|rename/i.test(text) ? ["Edit task"] : []),
+    ...(/delete|remove/i.test(text) ? ["Delete task"] : []),
+  ], dataNeeded: ["The user's tasks"] });
+  if (/crypto|coin|token|market screener/i.test(text)) pages.push({ route: "/markets", name: "Market dashboard", purpose: "Let a trader inspect market assets using the requested criteria.", visibleContent: ["Market results", "Filters", "Asset details"], actions: [
+    ...(/screen|filter|criteria/i.test(text) ? ["Filter assets"] : []),
+    ...(/compare/i.test(text) ? ["Compare assets"] : []),
+    ...(/watchlist/i.test(text) ? ["Manage watchlist"] : []),
+    ...(/alert/i.test(text) ? ["Set price alerts"] : []),
+  ], dataNeeded: ["Current market data", ...(/watchlist/i.test(text) ? ["The user's watchlist"] : [])] });
   if (/service|menu|product|listing|catalog/i.test(text)) pages.push({ route: /menu/i.test(text) ? "/menu" : "/services", name: /menu/i.test(text) ? "Menu" : "Services", purpose: "Show the available offering clearly.", visibleContent: ["Available items", "Descriptions", "Relevant price or detail information"], actions: ["View an item", "Begin the primary request"], dataNeeded: ["Published offering records"] });
   if (/book|reserv|appointment|request date/i.test(text)) pages.push({ route: "/booking", name: "Booking request", purpose: "Collect a valid date or appointment request.", visibleContent: ["Availability guidance", "Request form", "Confirmation state"], actions: ["Submit a booking request"], dataNeeded: ["Service options", "Existing availability rules"] });
   if (/contact|message|enquiry|inquiry/i.test(text)) pages.push({ route: "/contact", name: "Contact", purpose: "Let a visitor send a structured enquiry.", visibleContent: ["Contact details", "Contact form"], actions: ["Send an enquiry"], dataNeeded: ["Public contact information"] });
@@ -53,6 +66,8 @@ function field(name: string): DataEntityDefinition["fields"][number] {
 function deriveEntities(memory: ProjectMemory, text: string): DataEntityDefinition[] {
   const entities: DataEntityDefinition[] = [];
   if (/url short|shorten.{0,20}(?:url|link)|short link|redirect/i.test(text)) entities.push(entity("short_links", "Maps a unique short code to its validated destination and records lifecycle information.", [{ name: "id", type: "uuid", required: true, constraints: ["Stable primary key"] }, { name: "code", type: "text", required: true, constraints: ["Unique, URL-safe, and indexed"] }, { name: "destination_url", type: "text", required: true, constraints: ["Allow only validated http or https URLs"] }, { name: "visit_count", type: "numeric", required: true, constraints: ["Defaults to zero and never becomes negative"] }, { name: "expires_at", type: "timestamptz", required: false, constraints: ["A past expiry disables redirects"] }]));
+  if (/to-?do|task list|manage.{0,20}tasks?/i.test(text)) entities.push(entity("tasks", "A user's task and its current completion state.", [{ name: "id", type: "uuid", required: true, constraints: [] }, { name: "title", type: "text", required: true, constraints: ["Non-empty and length-limited"] }, { name: "is_complete", type: "boolean", required: true, constraints: ["Defaults to false"] }, { name: "due_at", type: "timestamptz", required: false, constraints: [] }]));
+  if (/watchlist/i.test(text)) entities.push(entity("watchlists", "Assets saved by a user for later screening or comparison.", [{ name: "id", type: "uuid", required: true, constraints: [] }, { name: "asset_identifier", type: "text", required: true, constraints: ["References a supported market asset"] }, { name: "created_at", type: "timestamptz", required: true, constraints: [] }]));
   if (/account|profile|login|admin|user/i.test(text)) entities.push(entity("profiles", "Application identity and role data linked to authentication.", [{ name: "id", type: "uuid", required: true, constraints: ["References the authenticated user"] }, { name: "role", type: "text", required: true, constraints: ["Allow only defined roles"] }, { name: "display_name", type: "text", required: true, constraints: ["Trim and length-limit"] }]));
   if (/service|menu|product|listing|catalog/i.test(text)) entities.push(entity(/menu/i.test(text) ? "menu_items" : /product|listing/i.test(text) ? "listings" : "services", "Published items shown to users.", [{ name: "id", type: "uuid", required: true, constraints: [] }, { name: "name", type: "text", required: true, constraints: ["Non-empty"] }, { name: "description", type: "text", required: true, constraints: ["Length-limited"] }, { name: "is_published", type: "boolean", required: true, constraints: ["Defaults to false"] }]));
   if (/book|reserv|appointment|request date/i.test(text)) entities.push(entity(/reserv/i.test(text) ? "reservations" : "booking_requests", "A customer's requested date and its operational status.", [{ name: "id", type: "uuid", required: true, constraints: [] }, { name: "customer_name", type: "text", required: true, constraints: ["Trim and length-limit"] }, { name: "customer_email", type: "text", required: true, constraints: ["Normalize and validate"] }, { name: "requested_at", type: "timestamptz", required: true, constraints: ["Must satisfy booking rules"] }, { name: "status", type: "text", required: true, constraints: ["pending, confirmed, declined, cancelled"] }], ["Optionally belongs to a profile or service"]));
@@ -82,27 +97,6 @@ function deriveApi(memory: ProjectMemory, pages: PageDefinition[], accounts: boo
     };
   });
   return [...explicit, ...inferred].filter((item, index, values) => values.findIndex((candidate) => candidate.name.toLowerCase() === item.name.toLowerCase()) === index).slice(0, 24);
-}
-
-function architecture(memory: ProjectMemory, stack: ReturnType<typeof recommendStack>, entities: DataEntityDefinition[]) {
-  const choices = stackChoices(stack);
-  const frontend = stack.frontend?.technology ?? "Web Client";
-  const backend = stack.backend?.technology ?? "Application Server";
-  const database = stack.database?.technology;
-  const branchCount = Number(Boolean(stack.authentication)) + Number(Boolean(database)) + Number(Boolean(stack.storage)) + (memory.externalServices?.length ?? 0);
-  const direction = branchCount >= 3 || entities.length >= 4 ? "LR" : "TD";
-  const lines = [`flowchart ${direction}`, `USER[${memory.users[0] ?? "User"}] --> CLIENT[${frontend}]`, `CLIENT --> SERVER[${backend}]`];
-  if ((memory.adminWorkflows?.length ?? 0) > 0) lines.push("ADMIN[Administrator] --> CLIENT");
-  if (stack.authentication) lines.push(`CLIENT --> AUTH[${stack.authentication.technology}]`, "SERVER --> AUTH");
-  if (entities.length) {
-    const primaryDomain = entities[0]!.name.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
-    lines.push(`SERVER --> DOMAIN[${primaryDomain} Service]`);
-  }
-  if (database) lines.push(`${entities.length ? "DOMAIN" : "SERVER"} --> DB[(${database})]`);
-  if (stack.storage) lines.push(`SERVER --> STORAGE[${stack.storage.technology}]`);
-  for (const service of memory.externalServices ?? []) lines.push(`SERVER --> ${id(service)}[${service}]`);
-  entities.slice(0, 6).forEach((item) => { if (database) lines.push(`DB --> ${id(item.name)}[${item.name.replaceAll("_", " ")}]`); });
-  return { summary: `The ${frontend} handles user interaction and delegates trusted operations to ${backend}${database ? `, which persists structured state in ${database}` : ""}. ${choices.filter((item) => item.status === "proposed").length ? "The technologies are Promgent recommendations until the user confirms them." : "The stack reflects confirmed or existing technical direction."}`, mermaid: unique(lines, 30).join("\n") };
 }
 
 function phases(pages: PageDefinition[], entities: DataEntityDefinition[]): ImplementationPhase[] {
@@ -157,7 +151,7 @@ export function buildTechnicalBlueprint(input: { memory: ProjectMemory; previous
     implementationPhases: phases(pages, entities),
     testingStrategy: { unit: ["Validation, authorization, state transitions, and deterministic domain logic"], integration: ["Database constraints, authenticated operations, and external-service adapters"], endToEnd: workflows.slice(0, 6).map((item) => item.name), regression: ["Existing working routes and persisted records", "Failed submissions do not create partial or duplicate state"] },
     deploymentPlan: { platform: stack.hosting?.technology ?? "Use the repository's established platform", steps: ["Validate environment configuration", "Apply additive database migrations", "Build and test the production artifact", "Deploy and run critical-journey smoke tests"], environmentVariables: unique([...(stack.database ? ["DATABASE_URL or managed database project variables"] : []), ...(stack.authentication ? ["Authentication provider URL and public/server keys"] : []), ...(memory.externalServices ?? []).map((item) => `${id(item)}_API_KEY`)]), releaseChecks: ["Production build succeeds", "Migrations are applied", "Authentication and critical write/read journey succeeds", "No secret appears in browser output or logs"] },
-    architecture: architecture(memory, stack, entities),
+    architecture: buildProductArchitecture({ memory, pages, entities }),
     assumptions: unique([...memory.assumptions, ...qualityWarnings.map((warning) => `Assumption: ${warning}`)]),
     risks: unique(memory.risks),
     acceptanceCriteria: structuredAcceptanceCriteria(memory).filter((item) => item.status !== "rejected" && item.status !== "superseded").map((item) => item.description),

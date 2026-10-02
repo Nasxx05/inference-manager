@@ -128,7 +128,7 @@ export interface ProjectBriefPatch {
   constraints?: { add: string[]; remove: string[] };
   decisions?: { add: Array<{ decision: string; reason: string }>; remove: string[] };
   openQuestions?: { add: string[]; resolve: string[] };
-  architecture?: { changed: boolean; summary?: string; reason?: string };
+  architecture?: { changed: boolean; summary?: string; reason?: string; diagram?: string };
 }
 
 export interface PromgentResponseProposal {

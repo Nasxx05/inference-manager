@@ -5,6 +5,7 @@ import { validateInterviewProposal } from "@/lib/projectMemory/proposals";
 import { buildTechnicalBlueprint } from "@/lib/technicalBlueprint";
 import { compileImplementationPrompt, inferPromptDepth, validateCompiledPrompt } from "@/lib/prompts";
 import type { ProjectMemory } from "@/types/project";
+import { validateProductArchitectureDiagram } from "@/lib/architecture/productArchitecture";
 
 const now = "2026-01-01T00:00:00.000Z";
 
@@ -60,6 +61,14 @@ describe("Technical Blueprint", () => {
     expect(changed.version).toBe(first.version + 1);
   });
 
+  it("does not redraw the product map when only the technology stack changes", () => {
+    const memory = restaurantMemory();
+    const original = buildTechnicalBlueprint({ memory, now });
+    const withDifferentTechnology = buildTechnicalBlueprint({ memory: { ...memory, confirmedStack: ["FastAPI + Python", "PostgreSQL"] }, previous: original, now });
+    expect(withDifferentTechnology.recommendedStack.backend?.technology).toBe("FastAPI + Python");
+    expect(withDifferentTechnology.architecture.mermaid).toBe(original.architecture.mermaid);
+  });
+
   it("derives workflows, pages, data, APIs, security, architecture, and phases", () => {
     const blueprint = buildTechnicalBlueprint({ memory: restaurantMemory(), now });
     expect(blueprint.workflows.some((item) => /reservation/i.test(item.name))).toBe(true);
@@ -68,6 +77,10 @@ describe("Technical Blueprint", () => {
     expect(blueprint.apiSurface.length).toBeGreaterThan(0);
     expect(blueprint.security.some((item) => item.area === "Authorization")).toBe(true);
     expect(blueprint.architecture.mermaid).toContain("flowchart LR");
+    expect(blueprint.architecture.mermaid).toContain("Browse menu");
+    expect(blueprint.architecture.mermaid).toContain("Manage reservations");
+    expect(blueprint.architecture.mermaid).not.toMatch(/Next\.js|TypeScript|PostgreSQL|Server Actions/i);
+    expect(validateProductArchitectureDiagram(blueprint.architecture.mermaid).valid).toBe(true);
     expect(blueprint.implementationPhases.length).toBeGreaterThanOrEqual(4);
   });
 
@@ -84,7 +97,59 @@ describe("Technical Blueprint", () => {
     const blueprint = buildTechnicalBlueprint({ memory: createInitialMemory(project, now), now });
     expect(blueprint.pages.some((page) => page.name === "Link workspace")).toBe(true);
     expect(blueprint.dataEntities.some((entity) => entity.name === "short_links")).toBe(true);
-    expect(blueprint.architecture.mermaid).toContain("DB[(Supabase PostgreSQL)]");
+    expect(blueprint.architecture.mermaid).toContain("Create short link");
+    expect(blueprint.architecture.mermaid).toContain("Links data");
+    expect(blueprint.architecture.mermaid).not.toMatch(/Supabase|PostgreSQL|Next\.js/i);
+  });
+
+  it("builds different branching product maps for a restaurant, to-do app, and crypto screener", () => {
+    const restaurant = buildTechnicalBlueprint({ memory: restaurantMemory(), now }).architecture.mermaid;
+
+    const todoProject = createProjectRecord({ id: "project_todo", userId: "user", description: "A private to-do app where users sign in, add tasks, edit tasks, and mark tasks complete", modelId: "auto", planningDepth: "balanced", budget: 5, now });
+    const todoMemory = createInitialMemory(todoProject, now);
+    const todoBase = todoMemory.requirements[0]!;
+    todoMemory.users = ["Task owner"];
+    todoMemory.requirements = [
+      { ...todoBase, id: "todo_add", description: "Users can add tasks", type: "functional", status: "confirmed" },
+      { ...todoBase, id: "todo_edit", description: "Users can edit tasks", type: "functional", status: "confirmed" },
+      { ...todoBase, id: "todo_complete", description: "Users can mark tasks complete", type: "functional", status: "confirmed" },
+      { ...todoBase, id: "todo_login", description: "Users must sign in to see their private task dashboard", type: "security", status: "confirmed" },
+    ];
+    const todo = buildTechnicalBlueprint({ memory: todoMemory, now }).architecture.mermaid;
+
+    const cryptoProject = createProjectRecord({ id: "project_crypto", userId: "user", description: "A crypto screener for individual traders to filter assets, compare coins, and save a watchlist", modelId: "auto", planningDepth: "balanced", budget: 5, now });
+    const cryptoMemory = createInitialMemory(cryptoProject, now);
+    const cryptoBase = cryptoMemory.requirements[0]!;
+    cryptoMemory.users = ["Individual trader"];
+    cryptoMemory.externalServices = ["Live crypto market prices"];
+    cryptoMemory.requirements = [
+      { ...cryptoBase, id: "crypto_filter", description: "Traders can filter crypto assets using screening criteria", type: "functional", status: "confirmed" },
+      { ...cryptoBase, id: "crypto_compare", description: "Traders can compare crypto assets", type: "functional", status: "confirmed" },
+      { ...cryptoBase, id: "crypto_watch", description: "Traders can save crypto assets to a watchlist", type: "functional", status: "confirmed" },
+    ];
+    const crypto = buildTechnicalBlueprint({ memory: cryptoMemory, now }).architecture.mermaid;
+
+    expect(todo).toMatch(/Sign in|Task dashboard/);
+    expect(todo).toContain("Add task");
+    expect(todo).toContain("Tasks data");
+    expect(crypto).toContain("Market dashboard");
+    expect(crypto).toContain("Filter assets");
+    expect(crypto).toContain("Market data API");
+    for (const diagram of [restaurant, todo, crypto]) {
+      const validation = validateProductArchitectureDiagram(diagram);
+      expect(validation.valid, validation.reasons.join(" ")).toBe(true);
+      expect(validation.straightChain).toBe(false);
+      expect(diagram).not.toMatch(/Next\.js|TypeScript|React|Node\.js|Server Actions|Route Handlers/i);
+    }
+    expect(new Set([restaurant, todo, crypto]).size).toBe(3);
+  });
+
+  it("rejects technology-heavy diagrams and single straight chains", () => {
+    const technologyChain = `flowchart LR\nA[Individual traders] --> B[Next.js]\nB --> C[TypeScript]\nC --> D[Server Actions]\nD --> E[React]\nE --> F[PostgreSQL]`;
+    const validation = validateProductArchitectureDiagram(technologyChain);
+    expect(validation.valid).toBe(false);
+    expect(validation.technologyNodeCount).toBeGreaterThan(validation.nodeCount / 2);
+    expect(validation.straightChain).toBe(true);
   });
 });
 

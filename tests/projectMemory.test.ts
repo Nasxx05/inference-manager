@@ -68,8 +68,9 @@ describe("guided project memory", () => {
   it("generates architecture only from structured requirements", () => {
     const memory = createInitialMemory(project());
     const architecture = architectureForMemory({ memory });
-    expect(architecture.diagramSource).toContain("flowchart TD");
-    expect(architecture.summary).toContain("application");
+    expect(architecture.diagramSource).toContain("flowchart LR");
+    expect(architecture.diagramSource).not.toMatch(/Next\.js|TypeScript|Server Actions/i);
+    expect(architecture.summary).toContain("product map");
   });
 
   it("reuses an unchanged architecture version and advances a changed one", () => {
@@ -79,7 +80,7 @@ describe("guided project memory", () => {
     expect(unchanged.version).toBe(first.version);
     expect(unchanged.id).toBe(first.id);
 
-    const changedMemory = { ...memory, requirements: memory.requirements.map((item, index) => index ? item : { ...item, description: `${item.description} Accept payment at checkout.` }) };
+    const changedMemory = { ...memory, requirements: [...memory.requirements, { ...memory.requirements[0]!, id: "req-payment", type: "functional" as const, description: "Customers can pay at checkout." }] };
     const changed = architectureForMemory({ memory: changedMemory, previous: first });
     expect(changed.version).toBe(first.version + 1);
     expect(changed.id).not.toBe(first.id);

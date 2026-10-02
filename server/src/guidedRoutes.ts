@@ -1541,6 +1541,16 @@ export function guidedRouter(): express.Router {
             ...(repositorySnapshot ? { repositoryEvidence: { url: repositorySnapshot.repositoryUrl, ...(repositorySnapshot.commitSha ? { commitSha: repositorySnapshot.commitSha } : {}), existingStack: detectedRepositoryStack, relevantFiles: repositorySnapshot.relevantFiles } } : {}),
           });
         }
+        const modelArchitectureDiagram = inference.response.briefPatch?.architecture?.diagram;
+        if (architecturePatchChanged && modelArchitectureDiagram) {
+          technicalBlueprint = {
+            ...technicalBlueprint,
+            architecture: {
+              summary: inference.response.briefPatch?.architecture?.summary || technicalBlueprint.architecture.summary,
+              mermaid: modelArchitectureDiagram,
+            },
+          };
+        }
         architectureChanged = previousArchitecture?.diagramSource !== technicalBlueprint.architecture.mermaid;
         const promptDepth = inferPromptDepth({ userRequest: content, memory: turn.memory, hasRepository: Boolean(repositorySnapshot) });
         if (inference.response.intents.includes("prompt_generation") && ["major_feature", "full_mvp", "repository_correction", "refactor"].includes(promptDepth)) {
@@ -1718,7 +1728,7 @@ export function guidedRouter(): express.Router {
             version: previousArchitecture?.diagramSource === technicalBlueprint.architecture.mermaid ? previousArchitecture.version : (previousArchitecture?.version ?? 0) + 1,
             diagramSource: technicalBlueprint.architecture.mermaid,
             summary: technicalBlueprint.architecture.summary,
-            reasonForChange: previousArchitecture ? "The current Technical Blueprint changed the system structure or technology responsibilities." : "Initial architecture derived from the Technical Blueprint.",
+            reasonForChange: previousArchitecture ? "The saved users, screens, features, data, or services changed." : "Initial product architecture derived from the saved project brief.",
             createdAt: new Date().toISOString(),
           } : architectureForMemory({ memory: turn.memory, previous: previousArchitecture });
           const generated = architectureArtifact(architecture);
