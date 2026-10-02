@@ -7,7 +7,7 @@ import { validatePromgentResponse } from "@/lib/conversation/responseContract";
 import { validatePromptPlan } from "@/lib/prompts/promptCompiler";
 import { routeOrbioModel, type ModelTaskClass, type OrbioCatalogueModel } from "@/lib/models/orbioRouter";
 import { getModel } from "@/data/models";
-import type { ModelRouteSummary, PromgentResponseProposal } from "@/types/conversation";
+import type { ConversationIntent, ModelRouteSummary, PromgentResponseProposal } from "@/types/conversation";
 import type { InterviewMessage, ProjectMemory, ProjectRecord } from "@/types/project";
 import type { PromptPlan, TechnicalBlueprint } from "@/types/technicalBlueprint";
 import { PersistenceError } from "./persistence";
@@ -55,6 +55,22 @@ Rules:
 // provider. Remember definitive 404-style rejections for this server process
 // so subsequent auto-routed turns do not repeatedly select them.
 const unavailableInteractiveModels = new Set<string>();
+
+function boundedTimeout(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.min(240_000, Math.max(30_000, Math.round(parsed)))
+    : fallback;
+}
+
+export function projectConversationTimeoutMs(intents: ConversationIntent[]): number {
+  const fallback = intents.includes("project_discovery")
+    ? 180_000
+    : intents.some((intent) => ["architecture_request", "architecture_discussion", "build_plan_request", "prompt_generation"].includes(intent))
+      ? 150_000
+      : 120_000;
+  return boundedTimeout(process.env.ORBIO_CONVERSATION_TIMEOUT_MS, fallback);
+}
 
 function taskClass(intents: ReturnType<typeof routeConversationIntents>): ModelTaskClass {
   if (intents.includes("repository_review")) return "code_review";
@@ -106,7 +122,7 @@ export async function runPromgentConversation(input: {
     try {
       const discovery = intents.includes("project_discovery");
       const substantial = intents.some((intent) => ["requirement_change", "change_request", "architecture_request", "architecture_discussion", "build_plan_request", "next_step_request"].includes(intent));
-      const request = { apiKey: input.apiKey, baseUrl, model: decision.model.id, messages: [{ role: "system" as const, content: SYSTEM_PROMPT }, { role: "user" as const, content: context }], maxTokens: discovery ? 3000 : intents.includes("prompt_generation") ? 2400 : substantial ? 2400 : taskClass(intents) === "light_chat" ? 1000 : 1900, temperature: 0.2, stage: "project-conversation" as const, retry: false };
+      const request = { apiKey: input.apiKey, baseUrl, model: decision.model.id, messages: [{ role: "system" as const, content: SYSTEM_PROMPT }, { role: "user" as const, content: context }], maxTokens: discovery ? 3000 : intents.includes("prompt_generation") ? 2400 : substantial ? 2400 : taskClass(intents) === "light_chat" ? 1000 : 1900, temperature: 0.2, stage: "project-conversation" as const, timeoutMs: projectConversationTimeoutMs(intents), retry: false };
       try {
         result = await chat({ ...request, jsonMode: true });
       } catch (error) {
@@ -118,6 +134,11 @@ export async function runPromgentConversation(input: {
       }
       break;
     } catch (error) {
+      // Do not retry a potentially billable timed-out call inside this turn.
+      // In auto mode, remember the slow model so the user's explicit retry can
+      // choose another capable model instead of repeating the same timeout.
+      if (mode === "auto" && error instanceof AiError && error.code === "AI_TIMEOUT")
+        unavailableInteractiveModels.add(decision.model.id);
       const mayTryAnother = mode === "auto"
         && error instanceof AiError
         // Catalogue metadata can lag the provider's actual serving surface.

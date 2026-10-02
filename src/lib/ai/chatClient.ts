@@ -197,6 +197,7 @@ interface LogFields {
   status?: number;
   errorCode?: string;
   attempt?: number;
+  timeoutMs?: number;
 }
 
 /**
@@ -222,6 +223,7 @@ function logCall(fields: LogFields): void {
     `status=${fields.status ?? "-"}`,
     `errorCode=${fields.errorCode ?? "-"}`,
     `attempt=${fields.attempt ?? 1}`,
+    `timeoutMs=${fields.timeoutMs ?? "-"}`,
   ].join(" ");
   console.log(`[ai] ${line}`);
 }
@@ -316,6 +318,7 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
         status: response.status,
         errorCode: error.code,
         attempt,
+        timeoutMs,
       });
       throw error;
     }
@@ -358,6 +361,7 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
         status: response.status,
         errorCode: error.code,
         attempt,
+        timeoutMs,
       });
       throw error;
     }
@@ -372,6 +376,7 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
       success: true,
       status: response.status,
       attempt,
+      timeoutMs,
     });
 
     return {
@@ -407,6 +412,7 @@ async function attemptOnce(request: ChatRequest, attempt: number): Promise<ChatR
       success: false,
       errorCode: ai.code,
       attempt,
+      timeoutMs,
     });
     throw ai;
   } finally {

@@ -67,6 +67,13 @@ function maxTokens(depth: ProjectRecord["planningDepth"]): number {
     : dynamic;
 }
 
+export function guidedInterviewTimeoutMs(): number {
+  const configured = Number(process.env.ORBIO_INTERVIEW_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? Math.min(180_000, Math.max(30_000, Math.round(configured)))
+    : 120_000;
+}
+
 function parsedResponse(content: string): { assistantContent: string; structuredProposal: unknown } {
   const parsed = extractJson(content);
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -116,6 +123,7 @@ export async function runGuidedInterviewInference(input: {
     temperature: 0.2,
     jsonMode: true,
     stage: "guided-interview",
+    timeoutMs: guidedInterviewTimeoutMs(),
     retry: false,
   });
 
