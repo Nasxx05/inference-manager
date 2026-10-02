@@ -69,6 +69,33 @@ export interface EngineeringGuidance {
   mvpNow: string[];
   defer: string[];
   risks: string[];
+  overview?: string;
+  productBehavior?: string;
+  technicalApproach?: string;
+  architectureExplanation?: string;
+  features?: Array<{
+    name: string;
+    explanation: string;
+    whyItMatters?: string;
+  }>;
+  stack?: Array<{
+    technology: string;
+    purpose: string;
+    reason: string;
+  }>;
+  userJourney?: Array<{
+    step: string;
+    explanation: string;
+  }>;
+  screens?: Array<{
+    name: string;
+    purpose: string;
+    keyElements: string[];
+  }>;
+  riskMitigations?: Array<{
+    risk: string;
+    mitigation: string;
+  }>;
   nextDecision?: string;
 }
 

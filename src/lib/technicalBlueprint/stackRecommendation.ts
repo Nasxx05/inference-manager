@@ -51,9 +51,9 @@ export function recommendStack(memory: ProjectMemory): RecommendedStack {
   const text = corpus(memory);
   const mobile = /mobile app|ios|android|react native/.test(text);
   const python = /\bpython\b|django|fastapi/.test(text);
-  const persistence = /book|reserv|account|profile|order|store|persist|history|admin|dashboard|request/.test(text);
+  const persistence = /book|reserv|account|profile|order|store|persist|history|admin|dashboard|request|shorten|short link|redirect|analytics/.test(text);
   const accounts = /account|login|sign.?in|admin|role|protected|owner/.test(text);
-  const files = /upload|image|photo|document|file|asset/.test(text);
+  const files = /upload|image|photo|document|\bfiles?\b|asset/.test(text);
   const realtime = /real.?time|live chat|presence|instant message/.test(text);
   const result: RecommendedStack = { additional: [] };
 

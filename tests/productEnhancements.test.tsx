@@ -6,6 +6,7 @@ import { chat } from "@/lib/ai/chatClient";
 import { implementationPromptArtifact } from "@/lib/artifacts/artifacts";
 import { ArchitectureDiagram, parseArchitectureEdges } from "@/components/project/ArchitectureDiagram";
 import { ArtifactCard } from "@/components/project/ArtifactCard";
+import { AssistantMessageContent } from "@/components/project/AssistantMessageContent";
 import { createInitialMemory, createProjectRecord } from "@/lib/projectMemory";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -57,6 +58,13 @@ describe("conversation product enhancements", () => {
     render(<ArchitectureDiagram source={source} />);
     expect(screen.getByRole("img", { name: /system architecture skeleton diagram/i })).toBeInTheDocument();
     expect(screen.getByText("Application API")).toBeInTheDocument();
+  });
+
+  it("renders an inline architecture diagram inside a detailed assistant response", () => {
+    render(<AssistantMessageContent content={"## Architecture at a glance\nThe client calls trusted server logic.\n\n```mermaid\nflowchart TD\nUSER[User] --> CLIENT[Web app]\nCLIENT --> API[Application API]\nAPI --> DB[(Database)]\n```"} />);
+    expect(screen.getByRole("heading", { name: "Architecture at a glance" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /system architecture skeleton diagram/i })).toBeInTheDocument();
+    expect(screen.queryByText("```mermaid")).not.toBeInTheDocument();
   });
 
   it("copies the complete compiled prompt rather than a preview", async () => {

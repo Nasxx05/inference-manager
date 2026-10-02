@@ -46,20 +46,35 @@ describe("conversation contract and state", () => {
     const response = validatePromgentResponse({
       message: "A booking flow is the core of this product.",
       guidance: {
+        overview: "A booking product coordinates a customer's request with the barber's real availability. It replaces an informal message exchange with a visible, reliable process.",
         assessment: "The customer needs to request a time and the barber needs to confirm it.",
+        productBehavior: "A customer chooses a service and time, then submits the request.\n- The system validates availability.\n- It saves the booking and shows a clear confirmation without allowing duplicate appointments.",
         recommendation: "Build one request-and-confirm workflow before adding payments.",
         rationale: ["This proves the operational value with less risk."],
+        features: [{ name: "Booking request", explanation: "The customer selects a service and an available time. The server rejects invalid or newly occupied slots before saving anything.", whyItMatters: "This is the core customer outcome." }],
         mvpNow: ["Customer submits a booking request", "Barber confirms or declines it"],
+        technicalApproach: "Use a responsive web client for the booking form, a trusted server operation for availability rules, and a relational database for durable bookings.",
+        stack: [{ technology: "Next.js", purpose: "Web interface and server operations", reason: "It keeps the small MVP in one typed codebase." }],
+        userJourney: [{ step: "Choose a time", explanation: "The customer sees currently available slots and selects one before entering contact details." }],
+        screens: [{ name: "Booking", purpose: "Lets a customer complete a booking request without leaving the page.", keyElements: ["Service selector", "Available times", "Confirmation state"] }],
+        architectureExplanation: "The browser calls trusted booking logic, which validates and persists the appointment.",
+        riskMitigations: [{ risk: "Two customers may request the same time", mitigation: "Enforce a database uniqueness rule and return a friendly conflict message." }],
         defer: ["Online payments"],
         risks: ["Two customers may request the same time"],
         nextDecision: "Decide whether time slots are fixed or free-form.",
       },
     }, ["project_discovery"]);
     const content = formatEngineeringGuidance({ proposal: response, memory, intents: response.intents });
-    expect(content).toContain("## Engineering assessment");
+    expect(content).toContain("## What this product is");
+    expect(content).toContain("## How it should work");
     expect(content).toContain("## My recommendation");
-    expect(content).toContain("### Build in the MVP");
-    expect(content).toContain("Two customers may request the same time");
+    expect(content).toContain("### 1. Booking request");
+    expect(content).toContain("## Suggested screens");
+    expect(content).toContain("## Architecture at a glance");
+    expect(content).toContain("```mermaid");
+    expect(content).toContain("Enforce a database uniqueness rule");
+    expect(content.match(/^- /gm)).toBeNull();
+    expect(content.length).toBeGreaterThan(2_000);
   });
 
   it("composes compact canonical context without the complete transcript", () => {

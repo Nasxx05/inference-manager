@@ -12,6 +12,11 @@ function strings(value: unknown, limit = 8, max = 800): string[] {
     : [];
 }
 
+function objects<T>(value: unknown, limit: number, parse: (item: Record<string, unknown>) => T | null): T[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(record).map(parse).filter((item): item is T => item !== null).slice(0, limit);
+}
+
 export function validatePromgentResponse(raw: unknown, routedIntents: ConversationIntent[]): PromgentResponseProposal {
   const root = record(raw);
   const message = text(root.message ?? root.assistantMessage, 8000);
@@ -19,8 +24,29 @@ export function validatePromgentResponse(raw: unknown, routedIntents: Conversati
   const rawArtifacts = Array.isArray(root.artifactRequests) ? root.artifactRequests : [];
   const rawActions = Array.isArray(root.suggestedActions) ? root.suggestedActions : [];
   const guidance = record(root.guidance);
-  const assessment = text(guidance.assessment, 2400);
+  const overview = text(guidance.overview, 4000);
+  const assessment = text(guidance.assessment, 2400) || overview;
   const recommendation = text(guidance.recommendation, 2400);
+  const features = objects(guidance.features, 8, (item) => {
+    const name = text(item.name, 160); const explanation = text(item.explanation, 1600);
+    return name && explanation ? { name, explanation, ...(text(item.whyItMatters, 800) ? { whyItMatters: text(item.whyItMatters, 800) } : {}) } : null;
+  });
+  const stack = objects(guidance.stack, 8, (item) => {
+    const technology = text(item.technology, 160); const purpose = text(item.purpose, 800); const reason = text(item.reason, 1200);
+    return technology && purpose && reason ? { technology, purpose, reason } : null;
+  });
+  const userJourney = objects(guidance.userJourney, 8, (item) => {
+    const step = text(item.step, 160); const explanation = text(item.explanation, 1400);
+    return step && explanation ? { step, explanation } : null;
+  });
+  const screens = objects(guidance.screens, 6, (item) => {
+    const name = text(item.name, 160); const purpose = text(item.purpose, 1200);
+    return name && purpose ? { name, purpose, keyElements: strings(item.keyElements, 8, 240) } : null;
+  });
+  const riskMitigations = objects(guidance.riskMitigations, 6, (item) => {
+    const risk = text(item.risk, 1000); const mitigation = text(item.mitigation, 1200);
+    return risk && mitigation ? { risk, mitigation } : null;
+  });
   return {
     message,
     intents: routedIntents,
@@ -32,6 +58,15 @@ export function validatePromgentResponse(raw: unknown, routedIntents: Conversati
         mvpNow: strings(guidance.mvpNow),
         defer: strings(guidance.defer),
         risks: strings(guidance.risks),
+        ...(overview ? { overview } : {}),
+        ...(text(guidance.productBehavior, 4000) ? { productBehavior: text(guidance.productBehavior, 4000) } : {}),
+        ...(text(guidance.technicalApproach, 4000) ? { technicalApproach: text(guidance.technicalApproach, 4000) } : {}),
+        ...(text(guidance.architectureExplanation, 3000) ? { architectureExplanation: text(guidance.architectureExplanation, 3000) } : {}),
+        ...(features.length ? { features } : {}),
+        ...(stack.length ? { stack } : {}),
+        ...(userJourney.length ? { userJourney } : {}),
+        ...(screens.length ? { screens } : {}),
+        ...(riskMitigations.length ? { riskMitigations } : {}),
         ...(text(guidance.nextDecision, 1200) ? { nextDecision: text(guidance.nextDecision, 1200) } : {}),
       },
     } : {}),

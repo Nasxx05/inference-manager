@@ -78,6 +78,14 @@ describe("Technical Blueprint", () => {
     expect(blueprint.quality).toBe("incomplete");
     expect(blueprint.assumptions.join(" ")).toMatch(/Primary users|MVP scope/i);
   });
+
+  it("produces a useful URL-shortener skeleton even before every detail is confirmed", () => {
+    const project = createProjectRecord({ id: "shortener", userId: "user", description: "Build a simple URL shortener that redirects short links and shows basic click counts", modelId: "auto", planningDepth: "balanced", budget: 5, now });
+    const blueprint = buildTechnicalBlueprint({ memory: createInitialMemory(project, now), now });
+    expect(blueprint.pages.some((page) => page.name === "Link workspace")).toBe(true);
+    expect(blueprint.dataEntities.some((entity) => entity.name === "short_links")).toBe(true);
+    expect(blueprint.architecture.mermaid).toContain("DB[(Supabase PostgreSQL)]");
+  });
 });
 
 describe("Prompt Compiler", () => {
