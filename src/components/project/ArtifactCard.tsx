@@ -4,6 +4,7 @@ import { Check, Copy, FileCode2, FileText } from "lucide-react";
 import { useState } from "react";
 import type { ProjectArtifact } from "@/types/conversation";
 import { ArchitectureDiagram } from "./ArchitectureDiagram";
+import { AssistantMessageContent } from "./AssistantMessageContent";
 
 export function ArtifactCard({ artifact }: { artifact: ProjectArtifact }) {
   const [copied, setCopied] = useState(false);
@@ -13,9 +14,14 @@ export function ArtifactCard({ artifact }: { artifact: ProjectArtifact }) {
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1400);
   }
+  const blueprint = artifact.structuredData.blueprint && typeof artifact.structuredData.blueprint === "object"
+    ? artifact.structuredData.blueprint as { architecture?: { mermaid?: unknown } }
+    : null;
   const diagramSource = artifact.type === "architecture" && typeof artifact.structuredData.diagramSource === "string"
     ? artifact.structuredData.diagramSource
-    : null;
+    : artifact.type === "technical_blueprint" && typeof blueprint?.architecture?.mermaid === "string"
+      ? blueprint.architecture.mermaid
+      : null;
   const architectureSummary = diagramSource ? artifact.content.split("```mermaid")[0]?.trim() : null;
   const isPrompt = ["implementation_prompt", "correction_prompt", "enhancement_prompt"].includes(artifact.type);
 
@@ -46,10 +52,10 @@ export function ArtifactCard({ artifact }: { artifact: ProjectArtifact }) {
         </div>
         {isPrompt && Array.isArray(artifact.structuredData.qualityWarnings) && artifact.structuredData.qualityWarnings.length ? <div className="mb-4 rounded-md bg-credit-light px-3 py-2 text-xs leading-5 text-credit">Generated with assumptions: {artifact.structuredData.qualityWarnings.map(String).join(" ")}</div> : null}
         {diagramSource ? <div className="space-y-4">
-          {architectureSummary ? <p className="text-sm leading-6 text-muted">{architectureSummary}</p> : null}
+          {architectureSummary ? <AssistantMessageContent content={architectureSummary} /> : null}
           <ArchitectureDiagram source={diagramSource} />
           <details className="text-xs text-muted"><summary className="cursor-pointer">View diagram source</summary><pre className="mt-2 overflow-auto whitespace-pre-wrap rounded-md bg-canvas p-3 font-mono leading-6 text-ink">{diagramSource}</pre></details>
-        </div> : <div className="max-h-[32rem] overflow-auto whitespace-pre-wrap font-mono text-xs leading-6 text-ink">{artifact.content}</div>}
+        </div> : isPrompt ? <div className="max-h-[32rem] overflow-auto whitespace-pre-wrap font-mono text-xs leading-6 text-ink">{artifact.content}</div> : <div className="max-h-[32rem] overflow-auto"><AssistantMessageContent content={artifact.content} /></div>}
       </div>
     </details>
   );

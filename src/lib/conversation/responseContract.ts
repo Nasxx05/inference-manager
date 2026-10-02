@@ -6,6 +6,11 @@ function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 function text(value: unknown, max = 8000): string { return typeof value === "string" ? value.trim().slice(0, max) : ""; }
+function strings(value: unknown, limit = 8, max = 800): string[] {
+  return Array.isArray(value)
+    ? [...new Set(value.map((item) => text(item, max)).filter(Boolean))].slice(0, limit)
+    : [];
+}
 
 export function validatePromgentResponse(raw: unknown, routedIntents: ConversationIntent[]): PromgentResponseProposal {
   const root = record(raw);
@@ -13,9 +18,23 @@ export function validatePromgentResponse(raw: unknown, routedIntents: Conversati
   if (!message) throw new Error("Promgent returned no conversational response.");
   const rawArtifacts = Array.isArray(root.artifactRequests) ? root.artifactRequests : [];
   const rawActions = Array.isArray(root.suggestedActions) ? root.suggestedActions : [];
+  const guidance = record(root.guidance);
+  const assessment = text(guidance.assessment, 2400);
+  const recommendation = text(guidance.recommendation, 2400);
   return {
     message,
     intents: routedIntents,
+    ...(assessment && recommendation ? {
+      guidance: {
+        assessment,
+        recommendation,
+        rationale: strings(guidance.rationale),
+        mvpNow: strings(guidance.mvpNow),
+        defer: strings(guidance.defer),
+        risks: strings(guidance.risks),
+        ...(text(guidance.nextDecision, 1200) ? { nextDecision: text(guidance.nextDecision, 1200) } : {}),
+      },
+    } : {}),
     memoryChanges: Array.isArray(root.memoryChanges) ? root.memoryChanges.slice(0, 50) : [],
     decisions: (Array.isArray(root.decisions) ? root.decisions : []).flatMap((item) => {
       const value = record(item); const decision = text(value.decision, 1200); const reason = text(value.reason, 1200);

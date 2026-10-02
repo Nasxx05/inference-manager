@@ -22,13 +22,18 @@ export interface ModelRouteDecision {
 
 const minimumCapability: Record<ModelTaskClass, number> = {
   light_chat: 45, explanation: 50, requirements_reasoning: 68, architecture: 72,
-  structured_project_update: 68, implementation_prompt: 74, code_review: 76,
+  structured_project_update: 74, implementation_prompt: 76, code_review: 76,
   large_repository_review: 82, change_impact: 74, image_analysis: 64, transcription: 55,
 };
 
 interface CuratedCapabilities { coding: number; reasoning: number; structuredOutput: number; multimodal: number; speed: number; reliability: number }
 const CAPABILITY_REGISTRY: Array<{ pattern: RegExp; capabilities: CuratedCapabilities }> = [
   { pattern: /whisper|transcri|asr|stt|chirp|nova/i, capabilities: { coding: 5, reasoning: 20, structuredOutput: 30, multimodal: 95, speed: 80, reliability: 82 } },
+  // Provider family names can contain a high-capability generation marker and
+  // a deliberately reduced "flash/lite" variant. Match the reduced variant
+  // first so price alone cannot promote it to principal-engineering work.
+  { pattern: /deepseek.*(?:flash|lite|mini)|qwen.*(?:flash|lite|mini)/i, capabilities: { coding: 62, reasoning: 60, structuredOutput: 65, multimodal: 55, speed: 90, reliability: 70 } },
+  { pattern: /qwen[^/]*(?:0\.5b|1\.5b|3b|4b|7b|8b|9b|14b)(?:-|$)/i, capabilities: { coding: 64, reasoning: 62, structuredOutput: 66, multimodal: 55, speed: 86, reliability: 70 } },
   { pattern: /gpt-6|gpt-5(?!-nano)|claude-(?:opus|sonnet)-5|gemini-3(?:\.|-|$)|glm-5|deepseek-v3|deepseek-r1|qwen3\.8/i, capabilities: { coding: 90, reasoning: 90, structuredOutput: 88, multimodal: 78, speed: 58, reliability: 86 } },
   { pattern: /gpt-4|claude-(?:opus|sonnet)|gemini-(?:2\.5|2\.0)|glm-4|deepseek-v4|qwen|coder/i, capabilities: { coding: 82, reasoning: 80, structuredOutput: 80, multimodal: 68, speed: 66, reliability: 80 } },
   { pattern: /mini|flash|haiku|small|lite|nano/i, capabilities: { coding: 62, reasoning: 60, structuredOutput: 65, multimodal: 55, speed: 90, reliability: 70 } },
@@ -74,6 +79,14 @@ function eligible(model: OrbioCatalogueModel, input: { taskClass: ModelTaskClass
   // are cheaper, but cannot be used by the synchronous chat-completions path
   // that powers an interactive Promgent turn.
   return !model.id.endsWith(":batch")
+    // Some catalogue entries omit accurate output-modality metadata. Known
+    // media/embedding families are not conversational models even if their
+    // metadata defaults to text.
+    && !/(?:^|\/)(?:lyria|veo|sora|imagen|flux|stable-diffusion|seedream|musicgen|embeddings?|rerank)(?:[-/.]|$)/i.test(model.id)
+    // These catalogue entries have repeatedly returned HTTP 200 with no
+    // assistant content on JSON-constrained requests. Do not make a user pay
+    // for a known-empty response before falling back to a reliable model.
+    && !/(?:^|\/)qwen3-coder-30b-a3b-instruct(?:$|:)/i.test(model.id)
     // Every route served through chat/completions must produce natural-language
     // or structured text. Some image generators accept text prompts and carry
     // familiar family names (for example, Qwen), but return only images; price

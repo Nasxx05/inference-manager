@@ -54,6 +54,22 @@ export interface ModelRouteSummary {
   expectedCostClass: "low" | "medium" | "high";
   fallbackUsed: boolean;
   estimated?: boolean;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cost: number;
+    estimated: boolean;
+  };
+}
+
+export interface EngineeringGuidance {
+  assessment: string;
+  recommendation: string;
+  rationale: string[];
+  mvpNow: string[];
+  defer: string[];
+  risks: string[];
+  nextDecision?: string;
 }
 
 export interface ProjectAction {
@@ -68,6 +84,7 @@ export interface NextRecommendedAction { type: string; label: string; reason: st
 export interface PromgentResponseProposal {
   message: string;
   intents: ConversationIntent[];
+  guidance?: EngineeringGuidance;
   memoryChanges: unknown[];
   decisions: Array<Omit<ProjectDecision, "id" | "projectId" | "createdAt" | "updatedAt">>;
   artifactRequests: Array<{ type: ArtifactType; title?: string; reason: string; content?: string; structuredData?: Record<string, unknown> }>;

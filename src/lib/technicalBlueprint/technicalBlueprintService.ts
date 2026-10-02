@@ -43,17 +43,43 @@ function entity(name: string, purpose: string, fields: DataEntityDefinition["fie
   return { name, purpose, fields, relationships, constraints: ["Use a stable primary key.", "Record creation and update timestamps."] };
 }
 
-function deriveEntities(text: string): DataEntityDefinition[] {
+function field(name: string): DataEntityDefinition["fields"][number] {
+  const clean = name.trim().replace(/[^a-zA-Z0-9_ ]/g, "").replace(/\s+/g, "_").toLowerCase();
+  const type = /(?:^|_)id$/.test(clean) ? "uuid" : /(?:_at|date|time)$/.test(clean) ? "timestamptz" : /^(?:is_|has_)/.test(clean) ? "boolean" : /(?:count|amount|price|total)$/.test(clean) ? "numeric" : "text";
+  return { name: clean || "value", type, required: true, constraints: clean === "id" ? ["Stable primary key"] : ["Validate and length-limit on the server"] };
+}
+
+function deriveEntities(memory: ProjectMemory, text: string): DataEntityDefinition[] {
   const entities: DataEntityDefinition[] = [];
   if (/account|profile|login|admin|user/i.test(text)) entities.push(entity("profiles", "Application identity and role data linked to authentication.", [{ name: "id", type: "uuid", required: true, constraints: ["References the authenticated user"] }, { name: "role", type: "text", required: true, constraints: ["Allow only defined roles"] }, { name: "display_name", type: "text", required: true, constraints: ["Trim and length-limit"] }]));
   if (/service|menu|product|listing|catalog/i.test(text)) entities.push(entity(/menu/i.test(text) ? "menu_items" : /product|listing/i.test(text) ? "listings" : "services", "Published items shown to users.", [{ name: "id", type: "uuid", required: true, constraints: [] }, { name: "name", type: "text", required: true, constraints: ["Non-empty"] }, { name: "description", type: "text", required: true, constraints: ["Length-limited"] }, { name: "is_published", type: "boolean", required: true, constraints: ["Defaults to false"] }]));
   if (/book|reserv|appointment|request date/i.test(text)) entities.push(entity(/reserv/i.test(text) ? "reservations" : "booking_requests", "A customer's requested date and its operational status.", [{ name: "id", type: "uuid", required: true, constraints: [] }, { name: "customer_name", type: "text", required: true, constraints: ["Trim and length-limit"] }, { name: "customer_email", type: "text", required: true, constraints: ["Normalize and validate"] }, { name: "requested_at", type: "timestamptz", required: true, constraints: ["Must satisfy booking rules"] }, { name: "status", type: "text", required: true, constraints: ["pending, confirmed, declined, cancelled"] }], ["Optionally belongs to a profile or service"]));
   if (/contact|message|enquiry|inquiry/i.test(text)) entities.push(entity("contact_requests", "A visitor enquiry and its processing status.", [{ name: "id", type: "uuid", required: true, constraints: [] }, { name: "name", type: "text", required: true, constraints: ["Trim and length-limit"] }, { name: "email", type: "text", required: true, constraints: ["Normalize and validate"] }, { name: "message", type: "text", required: true, constraints: ["Length-limit"] }, { name: "status", type: "text", required: true, constraints: ["Defaults to new"] }]));
-  return entities;
+  for (const description of memory.dataModel ?? []) {
+    const [rawName, rawFields = ""] = description.split(/:\s*/, 2);
+    const name = rawName?.trim().replace(/\b(?:record|entity|table)\b/gi, "").replace(/[^a-zA-Z0-9 ]/g, " ").trim().replace(/\s+/g, "_").toLowerCase();
+    if (!name || name.length > 48 || entities.some((item) => item.name === name)) continue;
+    const parsedFields = rawFields.split(/[,|]/).map(field).filter((item) => item.name).slice(0, 12);
+    entities.push(entity(name, `Persistent ${rawName.trim()} state required by the described user workflows.`, parsedFields.length ? parsedFields : [field("id"), field("status"), field("created_at")]));
+  }
+  return entities.slice(0, 12);
 }
 
-function deriveApi(pages: PageDefinition[], accounts: boolean): ApiDefinition[] {
-  return pages.flatMap((page) => page.actions.filter((action) => /submit|send|review|confirm|update|sign in/i.test(action)).map((action) => ({ name: action, method: /view|review/i.test(action) ? "GET" : "POST", authentication: /admin|review|confirm|update/i.test(`${page.name} ${action}`) ? "Authenticated administrator role" : accounts && /sign in/i.test(action) ? "Public authentication operation" : "Public with abuse controls", request: ["Only fields required by the operation"], validation: ["Validate types, lengths, allowed values, and business rules on the server"], response: "Return a typed success result or a safe field-level/domain error without leaking internals." })));
+function deriveApi(memory: ProjectMemory, pages: PageDefinition[], accounts: boolean): ApiDefinition[] {
+  const inferred = pages.flatMap((page) => page.actions.filter((action) => /submit|send|review|confirm|update|sign in/i.test(action)).map((action) => ({ name: action, method: /view|review/i.test(action) ? "GET" : "POST", authentication: /admin|review|confirm|update/i.test(`${page.name} ${action}`) ? "Authenticated administrator role" : accounts && /sign in/i.test(action) ? "Public authentication operation" : "Public with abuse controls", request: ["Only fields required by the operation"], validation: ["Validate types, lengths, allowed values, and business rules on the server"], response: "Return a typed success result or a safe field-level/domain error without leaking internals." })));
+  const explicit = (memory.apis ?? []).map((description) => {
+    const match = description.match(/\b(GET|POST|PUT|PATCH|DELETE)\s+(\/[^\s]*)/i);
+    return {
+      name: description,
+      method: match?.[1]?.toUpperCase() ?? (/read|list|view|fetch|get/i.test(description) ? "GET" : "POST"),
+      ...(match?.[2] ? { path: match[2] } : {}),
+      authentication: /admin|owner|private|protected/i.test(description) ? "Authenticated authorized role" : "Derive from the owning workflow; default to least privilege",
+      request: ["Only the fields required for this operation"],
+      validation: ["Validate identity, authorization, types, limits, allowed values, and domain rules on the server"],
+      response: "Return a typed success result or a safe actionable error; make retryable writes idempotent where needed.",
+    };
+  });
+  return [...explicit, ...inferred].filter((item, index, values) => values.findIndex((candidate) => candidate.name.toLowerCase() === item.name.toLowerCase()) === index).slice(0, 24);
 }
 
 function architecture(memory: ProjectMemory, stack: ReturnType<typeof recommendStack>, entities: DataEntityDefinition[]) {
@@ -61,12 +87,14 @@ function architecture(memory: ProjectMemory, stack: ReturnType<typeof recommendS
   const frontend = stack.frontend?.technology ?? "Web Client";
   const backend = stack.backend?.technology ?? "Application Server";
   const database = stack.database?.technology;
-  const lines = ["flowchart TD", `USER[User] --> CLIENT[${frontend}]`, `CLIENT --> SERVER[${backend}]`];
+  const lines = ["flowchart TD", `USER[${memory.users[0] ?? "User"}] --> CLIENT[${frontend}]`, `CLIENT --> SERVER[${backend}]`];
+  if ((memory.adminWorkflows?.length ?? 0) > 0) lines.push("ADMIN[Administrator] --> CLIENT");
   if (stack.authentication) lines.push(`CLIENT --> AUTH[${stack.authentication.technology}]`, "SERVER --> AUTH");
-  if (database) lines.push(`SERVER --> DB[(${database})]`);
+  if (entities.length) lines.push("SERVER --> DOMAIN[Domain workflows and validation]");
+  if (database) lines.push(`${entities.length ? "DOMAIN" : "SERVER"} --> DB[(${database})]`);
   if (stack.storage) lines.push(`SERVER --> STORAGE[${stack.storage.technology}]`);
   for (const service of memory.externalServices ?? []) lines.push(`SERVER --> ${id(service)}[${service}]`);
-  entities.slice(0, 6).forEach((item) => { if (database) lines.push(`DB --> ${id(item.name)}[${item.name}]`); });
+  entities.slice(0, 6).forEach((item) => { if (database) lines.push(`DB --> ${id(item.name)}[${item.name.replaceAll("_", " ")}]`); });
   return { summary: `The ${frontend} handles user interaction and delegates trusted operations to ${backend}${database ? `, which persists structured state in ${database}` : ""}. ${choices.filter((item) => item.status === "proposed").length ? "The technologies are Promgent recommendations until the user confirms them." : "The stack reflects confirmed or existing technical direction."}`, mermaid: unique(lines, 30).join("\n") };
 }
 
@@ -89,7 +117,7 @@ export function buildTechnicalBlueprint(input: { memory: ProjectMemory; previous
   if (input.repositoryEvidence?.existingStack?.length && !memory.confirmedStack?.length) memory.proposedStack = input.repositoryEvidence.existingStack;
   const stack = recommendStack(memory);
   const mvpScope = unique(memory.mvpScope?.length ? memory.mvpScope : active.filter((item) => item.required).map((item) => item.description), 30);
-  const entities = deriveEntities(text);
+  const entities = deriveEntities(memory, text);
   const pages = derivePages(memory, text);
   const workflows = deriveWorkflows(memory, requirementText);
   const accounts = /account|login|admin|role|protected/i.test(text);
@@ -103,11 +131,14 @@ export function buildTechnicalBlueprint(input: { memory: ProjectMemory; previous
     mvpScope,
     excludedScope: unique([...(memory.deferredScope ?? []), ...(memory.rejectedIdeas ?? [])]),
     recommendedStack: stack,
-    systemComponents: stackChoices(stack).map((item) => ({ id: id(item.purpose), name: item.purpose, responsibility: item.rationale, technology: item.technology, communicatesWith: [] })),
+    systemComponents: [
+      ...stackChoices(stack).map((item) => ({ id: id(item.purpose), name: item.purpose, responsibility: item.rationale, technology: item.technology, communicatesWith: [] })),
+      ...(entities.length ? [{ id: "DOMAIN_WORKFLOWS", name: "Domain workflows", responsibility: `Validate and coordinate ${workflows.map((item) => item.name).slice(0, 5).join(", ") || "the primary product workflows"} without leaving partial state.`, communicatesWith: [stack.backend?.technology ?? "Application server", stack.database?.technology ?? "Persistent storage"] }] : []),
+    ],
     workflows,
     pages,
     dataEntities: entities,
-    apiSurface: deriveApi(pages, accounts),
+    apiSurface: deriveApi(memory, pages, accounts),
     security: [
       { area: "Server validation", behavior: "Validate all untrusted input on the server; browser validation is usability support only.", rationale: "Client input can be bypassed." },
       ...(accounts ? [{ area: "Authorization", behavior: "Verify the authenticated identity and required role on every protected server operation and database policy.", rationale: "Hiding controls in the UI is not authorization." }] : []),

@@ -116,6 +116,14 @@ function criterionExpandsScope(description: string, requirement: string, userCon
     .some((pattern) => pattern.test(description) && !pattern.test(combined));
 }
 
+function fallbackCriterion(requirement: Requirement): string {
+  if (requirement.type === "non_functional")
+    return `${requirement.description} is verified by a repeatable automated or documented check with a clear pass/fail result.`;
+  if (requirement.type === "design")
+    return `${requirement.description} is usable with keyboard controls and on both a 320px mobile viewport and a desktop viewport without hidden actions or horizontal page overflow.`;
+  return `A user can complete this behavior end to end: ${requirement.description}. Valid input produces a visible success result, invalid or unauthorized input creates no partial state, and confirmed state remains correct after refresh.`;
+}
+
 export function structuredAcceptanceCriteria(memory: Pick<ProjectMemory, "projectId" | "acceptanceCriteria" | "requirements">, now = new Date().toISOString()): AcceptanceCriterion[] {
   const firstRequirement = memory.requirements.find((item) => item.status !== "rejected" && item.status !== "superseded");
   return memory.acceptanceCriteria.flatMap((item, index) => {
@@ -177,6 +185,32 @@ export function validateInterviewProposal(input: { raw: unknown; memory: Project
     const criterion: AcceptanceCriterion = { id: existing?.id ?? id, projectId: input.memory.projectId, requirementId: requirement.id, description, source: userConfirmed ? "user" : "ai_inferred", ...(userConfirmed ? { sourceMessageId: input.sourceMessageId } : {}), status: userConfirmed ? "confirmed" : "proposed", confidence: userConfirmed ? "high" : CONFIDENCE.has(value.confidence as "low" | "medium" | "high") ? value.confidence as "low" | "medium" | "high" : "medium", version: existing ? existing.version + (existing.description === description ? 0 : 1) : 1, createdAt: existing?.createdAt ?? input.now, updatedAt: input.now };
     if (existing) criteria.splice(criteria.indexOf(existing), 1, criterion); else criteria.push(criterion);
   }
+  // A usable engineering brief cannot have requirements with no definition of
+  // done. Models occasionally omit the optional acceptanceCriteria array, so
+  // create one bounded, explicitly inferred criterion for each active
+  // requirement that is otherwise untestable. This also covers confirmed
+  // requirements extracted deterministically during the initial intake.
+  const fallbackCriterionCandidates = rawCriteria.length
+    ? accepted
+    : requirements;
+  for (const requirement of fallbackCriterionCandidates
+    .filter((item) => item.status !== "rejected" && item.status !== "superseded")
+    .slice(0, 20)) {
+    if (criteria.some((criterion) => criterion.requirementId === requirement.id && criterion.status !== "rejected" && criterion.status !== "superseded")) continue;
+    const description = fallbackCriterion(requirement);
+    criteria.push({
+      id: acceptanceId(input.memory.projectId, requirement.id, description),
+      projectId: input.memory.projectId,
+      requirementId: requirement.id,
+      description,
+      source: "ai_inferred",
+      status: "proposed",
+      confidence: "medium",
+      version: 1,
+      createdAt: input.now,
+      updatedAt: input.now,
+    });
+  }
 
   const explicitOrConfirmed = (value: string) => explicitEvidence(value, input.userContent)
     || requirements.some((requirement) => requirement.status === "confirmed" && similarity(requirement.description, value) >= 0.4);
@@ -203,7 +237,14 @@ export function validateInterviewProposal(input: { raw: unknown; memory: Project
     deferredScope: strings(root.deferredScope).filter((item) => explicitEvidence(item, input.userContent)),
     rejectedIdeas: strings(root.rejectedIdeas).filter((item) => explicitEvidence(item, input.userContent)),
     futureIdeas: strings(root.futureIdeas).filter((item) => explicitEvidence(item, input.userContent)),
-    workflows: strings(root.workflows).filter(explicitOrConfirmed),
+    workflows: (() => {
+      const supplied = strings(root.workflows).filter(explicitOrConfirmed);
+      if (supplied.length) return supplied;
+      return (accepted.length ? accepted : requirements)
+        .filter((item) => item.type === "functional")
+        .map((item) => item.description)
+        .slice(0, 8);
+    })(),
     adminWorkflows: strings(root.adminWorkflows).filter(explicitOrConfirmed),
     proposedStack,
     confirmedStack: [...new Set(confirmedStack)],

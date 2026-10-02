@@ -95,6 +95,7 @@ import type { ProjectReference } from "@/types/project";
 import { buildPlanWithMetrics } from "@/lib/planner";
 import { planningRequestFromApprovedSrs } from "@/lib/projectMemory/plannerAdapter";
 import { applyConversationTurn } from "@/lib/conversation/conversationTurn";
+import { formatEngineeringGuidance, isSubstantialEngineeringTurn } from "@/lib/conversation/engineeringGuidance";
 import { routeConversationIntents } from "@/lib/conversation/intentRouter";
 import {
   architectureArtifact,
@@ -1011,6 +1012,24 @@ export function guidedRouter(): express.Router {
             ...intakeProposal.technicalConstraints,
           ]),
         ],
+        mvpScope: [...new Set([...(memory.mvpScope ?? []), ...intakeProposal.mvpScope])],
+        deferredScope: [...new Set([...(memory.deferredScope ?? []), ...intakeProposal.deferredScope])],
+        rejectedIdeas: [...new Set([...(memory.rejectedIdeas ?? []), ...intakeProposal.rejectedIdeas])],
+        futureIdeas: [...new Set([...(memory.futureIdeas ?? []), ...intakeProposal.futureIdeas])],
+        workflows: [...new Set([...(memory.workflows ?? []), ...intakeProposal.workflows])],
+        adminWorkflows: [...new Set([...(memory.adminWorkflows ?? []), ...intakeProposal.adminWorkflows])],
+        proposedStack: [...new Set([...(memory.proposedStack ?? []), ...intakeProposal.proposedStack])],
+        confirmedStack: [...new Set([...(memory.confirmedStack ?? []), ...intakeProposal.confirmedStack])],
+        hosting: [...new Set([...(memory.hosting ?? []), ...intakeProposal.hosting])],
+        database: [...new Set([...(memory.database ?? []), ...intakeProposal.database])],
+        authentication: [...new Set([...(memory.authentication ?? []), ...intakeProposal.authentication])],
+        externalServices: [...new Set([...(memory.externalServices ?? []), ...intakeProposal.externalServices])],
+        apis: [...new Set([...(memory.apis ?? []), ...intakeProposal.apis])],
+        dataModel: [...new Set([...(memory.dataModel ?? []), ...intakeProposal.dataModel])],
+        risks: [...new Set([...memory.risks, ...intakeProposal.risks])],
+        constraints: [...new Set([...(memory.constraints ?? []), ...intakeProposal.constraints])],
+        knownProblems: [...new Set([...(memory.knownProblems ?? []), ...intakeProposal.knownProblems])],
+        architectureSummary: intakeProposal.architectureSummary || memory.architectureSummary,
         version: memory.version + 1,
         updatedAt: project.createdAt,
       };
@@ -1033,12 +1052,22 @@ export function guidedRouter(): express.Router {
         projectId: project.id,
         sessionId: session.id,
         role: "assistant" as const,
-        content: inference.response.message,
+        content: formatEngineeringGuidance({
+          proposal: inference.response,
+          memory,
+          intents: inference.response.intents,
+        }),
         source: "system" as const,
         modelRoute: {
           ...inference.route,
           requestId: inference.requestId,
           modelMode: project.modelMode ?? "auto",
+          usage: {
+            ...(inference.usage?.inputTokens !== undefined ? { inputTokens: inference.usage.inputTokens } : {}),
+            ...(inference.usage?.outputTokens !== undefined ? { outputTokens: inference.usage.outputTokens } : {}),
+            cost: Math.max(0, Number(inference.usage?.cost) || 0),
+            estimated: inference.usage?.cost === undefined,
+          },
         },
         createdAt: project.createdAt,
       };
@@ -1451,8 +1480,21 @@ export function guidedRouter(): express.Router {
             updatedAt: new Date().toISOString(),
           },
         };
+      turn = {
+        ...turn,
+        assistantMessage: {
+          ...turn.assistantMessage,
+          content: formatEngineeringGuidance({
+            proposal: inference.response,
+            memory: turn.memory,
+            intents: inference.response.intents,
+          }),
+        },
+      };
+      const engineeringTurn = isSubstantialEngineeringTurn(inference.response.intents);
       const blueprintRelevant = inference.response.intents.some((intent) => [
         "architecture_request",
+        "architecture_discussion",
         "build_plan_request",
         "prompt_generation",
         "repository_review",
@@ -1518,6 +1560,16 @@ export function guidedRouter(): express.Router {
         }
       }
       const requested = [...inference.response.artifactRequests];
+      const hasEngineeringBrief = previousArtifacts.some((item) => item.type === "project_blueprint");
+      if (
+        engineeringTurn && (!hasEngineeringBrief || blueprintRelevant) &&
+        !requested.some((item) => item.type === "project_blueprint")
+      )
+        requested.push({
+          type: "project_blueprint",
+          title: "Engineering Brief",
+          reason: "Keep the product outcome, MVP boundary, decisions, and success criteria inspectable as the idea changes.",
+        });
       if (
         inference.response.intents.includes("architecture_request") &&
         !requested.some((item) => item.type === "architecture")
@@ -1562,6 +1614,17 @@ export function guidedRouter(): express.Router {
           type: "technical_blueprint",
           title: "Technical Blueprint",
           reason: "A technical plan was prepared for the requested engineering artifact.",
+        });
+      if (
+        engineeringTurn &&
+        technicalBlueprint &&
+        turn.memory.completeness.level !== "insufficient" &&
+        !requested.some((item) => item.type === "architecture")
+      )
+        requested.push({
+          type: "architecture",
+          title: "System Architecture",
+          reason: "Show how the proposed first-version components and data flow fit together.",
         });
       if (
         inference.response.intents.includes("prompt_generation") &&
@@ -1610,6 +1673,7 @@ export function guidedRouter(): express.Router {
         ...(inference.response.intents.includes("architecture_request") ? ["architecture"] : []),
         ...(inference.response.intents.includes("prompt_generation") ? ["technical_blueprint", "implementation_prompt", "correction_prompt", "enhancement_prompt"] : []),
         ...(inference.response.intents.includes("credit_estimate_request") ? ["cost_estimate"] : []),
+        ...(engineeringTurn ? ["project_blueprint", "technical_blueprint", "architecture"] : []),
       ];
       requested.sort((left, right) => {
         const leftIndex = artifactPriority.indexOf(left.type);
@@ -1743,13 +1807,24 @@ export function guidedRouter(): express.Router {
           label: `View ${artifact.title}`,
           payload: { artifactId: artifact.id },
         });
+      const inferenceCost = Math.max(0, Number(inference.usage?.cost) || 0);
+      const promptPlanCost = Math.max(0, Number(promptPlanResult?.usage?.cost) || 0);
+      const turnCost = inferenceCost + promptPlanCost;
       const assistantMessage = {
         ...turn.assistantMessage,
         ...(artifacts.some((artifact) => ["implementation_prompt", "correction_prompt", "enhancement_prompt"].includes(artifact.type))
           ? { content: `${turn.assistantMessage.content}\n\nYou can paste this prompt into Cursor, Claude Code, Codex, Cline, or your preferred coding agent. When the implementation is ready, send me the GitHub repository and I can compare what was built against this plan.` }
           : {}),
         artifactIds: allArtifactIds,
-        modelRoute: inference.route,
+        modelRoute: {
+          ...inference.route,
+          usage: {
+            inputTokens: Math.max(0, Number(inference.usage?.inputTokens) || 0) + Math.max(0, Number(promptPlanResult?.usage?.inputTokens) || 0),
+            outputTokens: Math.max(0, Number(inference.usage?.outputTokens) || 0) + Math.max(0, Number(promptPlanResult?.usage?.outputTokens) || 0),
+            cost: turnCost,
+            estimated: inference.usage?.cost === undefined || (promptPlanResult !== undefined && promptPlanResult.usage?.cost === undefined),
+          },
+        },
       };
       const persistenceStarted = Date.now();
       await Promise.all([
@@ -1796,7 +1871,6 @@ export function guidedRouter(): express.Router {
         }),
       ]);
       const persistenceMs = Date.now() - persistenceStarted;
-      const turnCost = Math.max(0, Number(inference.usage?.cost) || 0) + Math.max(0, Number(promptPlanResult?.usage?.cost) || 0);
       const usage = {
         ...priorUsage,
         used: Number((priorUsage.used + turnCost).toFixed(6)),
@@ -1807,7 +1881,7 @@ export function guidedRouter(): express.Router {
             phase: inference.route.taskClass,
             source: "promgent" as const,
             model: inference.model,
-            cost: turnCost,
+            cost: inferenceCost,
             estimated: inference.usage?.cost === undefined,
             createdAt: new Date().toISOString(),
           },

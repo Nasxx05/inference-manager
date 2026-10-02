@@ -41,6 +41,43 @@ describe("Orbio model router", () => {
     expect(route.model.id).toBe("z-ai/glm-5.3-flash");
   });
 
+  it("does not treat a cheap reduced flash variant as principal-engineering quality", () => {
+    const route = routeOrbioModel({
+      models: [
+        { id: "deepseek/deepseek-v4-flash", contextLength: 128000, inputModalities: ["text"], outputModalities: ["text"], inputPricePerToken: 0.00000001, outputPricePerToken: 0.00000002 },
+        { id: "deepseek/deepseek-v3", contextLength: 128000, inputModalities: ["text"], outputModalities: ["text"], inputPricePerToken: 0.0000003, outputPricePerToken: 0.000001 },
+      ],
+      mode: "auto",
+      taskClass: "structured_project_update",
+    });
+    expect(route.model.id).toBe("deepseek/deepseek-v3");
+  });
+
+  it("never routes chat work to a media model with misleading text metadata", () => {
+    const route = routeOrbioModel({
+      models: [
+        { id: "google/lyria-3-clip-preview", contextLength: 128000, inputModalities: ["text"], outputModalities: ["text"], inputPricePerToken: 0, outputPricePerToken: 0 },
+        { id: "deepseek/deepseek-v3", contextLength: 128000, inputModalities: ["text"], outputModalities: ["text"], inputPricePerToken: 0.0000003, outputPricePerToken: 0.000001 },
+      ],
+      mode: "auto",
+      taskClass: "light_chat",
+    });
+    expect(route.model.id).toBe("deepseek/deepseek-v3");
+  });
+
+  it("keeps small and empirically empty-output models off engineering routes", () => {
+    const route = routeOrbioModel({
+      models: [
+        { id: "qwen/qwen-2.5-7b-instruct", contextLength: 128000, inputModalities: ["text"], outputModalities: ["text"], inputPricePerToken: 0.00000001, outputPricePerToken: 0.00000002 },
+        { id: "qwen/qwen3-coder-30b-a3b-instruct", contextLength: 128000, inputModalities: ["text"], outputModalities: ["text"], inputPricePerToken: 0.00000002, outputPricePerToken: 0.00000003 },
+        { id: "deepseek/deepseek-v3", contextLength: 128000, inputModalities: ["text"], outputModalities: ["text"], inputPricePerToken: 0.0000003, outputPricePerToken: 0.000001 },
+      ],
+      mode: "auto",
+      taskClass: "implementation_prompt",
+    });
+    expect(route.model.id).toBe("deepseek/deepseek-v3");
+  });
+
   it("filters by modality", () => {
     expect(routeOrbioModel({ models, mode: "auto", taskClass: "image_analysis", requiredModalities: ["text", "image"] }).model.id).toBe("google/gemini-3-pro");
     expect(routeOrbioModel({ models, mode: "auto", taskClass: "transcription", requiredModalities: ["audio"] }).model.id).toBe("openai/whisper-large-v3");

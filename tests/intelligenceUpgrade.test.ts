@@ -35,6 +35,47 @@ describe("structured requirements proposals", () => {
     expect(result.requirements.find((item) => item.description.includes("pay online"))?.status).toBe("proposed");
   });
 
+  it("keeps an explicitly described workflow testable when the model omits supporting arrays", () => {
+    const result = validateInterviewProposal({
+      raw: { requirements: [{ description: "Customers request a preferred cleaning date", type: "functional", sourceEvidence: "Customers request a preferred cleaning date" }] },
+      memory: memory(),
+      userContent: "Customers request a preferred cleaning date.",
+      sourceMessageId: "message_workflow",
+      now,
+    });
+    const requirement = result.requirements.find((item) => item.sourceMessageId === "message_workflow");
+    expect(result.workflows).toContain("Customers request a preferred cleaning date");
+    expect(result.acceptanceCriteria.some((item) => item.requirementId === requirement?.id && item.status === "proposed")).toBe(true);
+  });
+
+  it("keeps optional proposed requirements testable when the model omits criteria", () => {
+    const result = validateInterviewProposal({
+      raw: { requirements: [{ description: "Owners may export a weekly appointment report", type: "functional", required: false }] },
+      memory: memory(),
+      userContent: "Build an appointment app for barbers.",
+      sourceMessageId: "message_optional",
+      now,
+      fallbackToUserContent: false,
+    });
+    const requirement = result.requirements.find((item) => item.description.includes("weekly appointment report"));
+    expect(requirement?.status).toBe("proposed");
+    expect(result.acceptanceCriteria.some((item) => item.requirementId === requirement?.id)).toBe(true);
+  });
+
+  it("backfills definitions of done and workflows for confirmed intake requirements", () => {
+    const current = memory();
+    const result = validateInterviewProposal({
+      raw: {},
+      memory: current,
+      userContent: project.initialDescription,
+      sourceMessageId: "intake_project",
+      now,
+      fallbackToUserContent: false,
+    });
+    expect(result.acceptanceCriteria.length).toBeGreaterThan(0);
+    expect(result.workflows.length).toBeGreaterThan(0);
+  });
+
   it("preserves a stable requirement id for semantic duplicates", () => {
     const current = memory();
     const existing: Requirement = { id: "req_reserve", projectId: project.id, type: "functional", category: "core_functionality", description: "Customers can reserve tables", priority: "high", required: true, source: "user", status: "confirmed", confidence: "high", dependencies: [], version: 1, createdAt: now, updatedAt: now };

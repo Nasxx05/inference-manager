@@ -40,17 +40,22 @@ export function projectBlueprint(memory: ProjectMemory): { title: string; conten
   const requirements = activeRequirements(memory);
   const core = requirements.filter((item) => item.required).slice(0, 16);
   const stack = memory.confirmedStack?.length ? memory.confirmedStack : memory.proposedStack ?? [];
+  const decisions = (memory.decisions ?? []).filter((item) => item.status !== "rejected" && item.status !== "superseded").slice(-8);
+  const openDecisions = memory.openQuestions.filter((item) => !item.resolved).sort((left, right) => right.importance - left.importance).slice(0, 8);
   const sections = [
-    `# Project Blueprint: ${memory.purpose || "Untitled project"}`,
-    `\n## What we are building\n${memory.purpose || "Still being defined."}`,
-    `\n## Who it is for\n${memory.users.length ? memory.users.map((item) => `- ${item}`).join("\n") : "- Primary users are still being clarified."}`,
-    `\n## Core first-version features\n${core.length ? core.map((item) => `- ${item.description}`).join("\n") : "- The first-version scope is still being shaped."}`,
-    `\n## Recommended technology\n${stack.length ? stack.map((item) => `- ${item}`).join("\n") : "- Promgent will recommend the simplest adequate stack after the key workflow is clear."}`,
-    `\n## Main user flows\n${memory.workflows?.length ? memory.workflows.map((item) => `- ${item}`).join("\n") : "- Main flows are still being clarified."}`,
-    `\n## Deliberately left out\n${memory.deferredScope?.length ? memory.deferredScope.map((item) => `- ${item}`).join("\n") : "- Nothing recorded yet."}`,
-    `\n## Definition of done\n${memory.acceptanceCriteria.length ? memory.acceptanceCriteria.slice(0, 20).map((item) => `- ${typeof item === "string" ? item : item.description}`).join("\n") : "- Acceptance criteria are still being shaped."}`,
+    `# Engineering Brief: ${memory.purpose || "Untitled project"}`,
+    `\n## Product outcome — What we are building\n${memory.purpose || "Still being defined."}`,
+    `\n## Primary users\n${memory.users.length ? memory.users.map((item) => `- ${item}`).join("\n") : "- Primary users are still being clarified."}`,
+    `\n## MVP — Core first-version features\n${core.length ? core.map((item) => `- [${item.priority}] ${item.description}`).join("\n") : "- The first-version scope is still being shaped."}`,
+    `\n## Main user journeys\n${memory.workflows?.length ? memory.workflows.map((item) => `- ${item}`).join("\n") : "- The end-to-end success journey still needs to be described."}`,
+    `\n## Engineering direction\n${stack.length ? stack.map((item) => `- ${item}${memory.confirmedStack?.length ? " (confirmed)" : " (Promgent recommendation)"}`).join("\n") : "- Promgent will recommend the simplest coherent stack after the key workflow is clear."}`,
+    `\n## Decisions and reasoning\n${decisions.length ? decisions.map((item) => `- ${item.decision} — ${item.reason || "Reason not recorded."}`).join("\n") : "- No durable engineering decision has been recorded yet."}`,
+    `\n## Risks and constraints\n${[...memory.risks, ...(memory.constraints ?? [])].length ? [...memory.risks, ...(memory.constraints ?? [])].slice(0, 12).map((item) => `- ${item}`).join("\n") : "- No project-specific risks have been recorded yet."}`,
+    `\n## Leave for later\n${memory.deferredScope?.length ? memory.deferredScope.map((item) => `- ${item}`).join("\n") : "- No deferred scope is recorded yet; Promgent should challenge nonessential additions as the MVP is shaped."}`,
+    `\n## Definition of done\n${memory.acceptanceCriteria.length ? memory.acceptanceCriteria.slice(0, 20).map((item) => `- ${typeof item === "string" ? item : item.description}`).join("\n") : "- Testable acceptance criteria are still being shaped."}`,
+    `\n## Open decisions\n${openDecisions.length ? openDecisions.map((item) => `- ${item.question}`).join("\n") : "- No blocking decisions are currently recorded."}`,
   ];
-  return { title: "Project Blueprint", content: sections.join("\n"), structuredData: { requirementIds: core.map((item) => item.id), phase: memory.projectPhase ?? "exploring" } };
+  return { title: "Engineering Brief", content: sections.join("\n"), structuredData: { requirementIds: core.map((item) => item.id), phase: memory.projectPhase ?? "exploring", completeness: memory.completeness } };
 }
 
 export function architectureArtifact(architecture: ArchitectureVersion): { title: string; content: string; structuredData: Record<string, unknown> } {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Menu, Plus, Settings2, X } from "lucide-react";
+import { Coins, Menu, Plus, Settings2, X } from "lucide-react";
 import { PromgentLogo } from "@/components/PromgentLogo";
 import {
   completePasswordReset,
@@ -23,6 +23,7 @@ import {
 import type { ProjectAction, ProjectArtifact } from "@/types/conversation";
 import type { GuidedProjectSnapshot, ProjectRecord } from "@/types/project";
 import { ArtifactCard } from "./ArtifactCard";
+import { AssistantMessageContent } from "./AssistantMessageContent";
 import { IntakeVoiceButton, ProjectComposer } from "./ProjectComposer";
 import { ProjectContextPanel } from "./ProjectContextPanel";
 
@@ -155,7 +156,7 @@ export function ProjectWorkspace() {
   return <div className="h-screen overflow-hidden bg-canvas">
     <header className="z-30 flex h-16 items-center justify-between border-b border-line bg-canvas/95 px-4 backdrop-blur sm:px-5">
       <div className="flex items-center gap-3"><button className="lg:hidden" onClick={() => setSidebar(true)} aria-label="Open projects"><Menu className="h-5 w-5" /></button><PromgentLogo size={30} priority /><span className="font-mono text-sm font-medium">Promgent</span>{snapshot ? <><span className="text-lineStrong">/</span><span className="max-w-[180px] truncate text-sm">{snapshot.project.title}</span></> : null}</div>
-      <div className="flex items-center gap-2"><button onClick={() => setShowOrbio(true)} className={`rounded-full px-3 py-1.5 font-mono text-[10px] uppercase tracking-wide ${connected ? "bg-forest-light text-forest" : "bg-credit-light text-credit"}`}>{connected ? `${orbio?.balance ? orbio.balance.available.toFixed(2) : "Loading…"} CREDIT` : "Connect Orbio"}</button>{snapshot ? <button onClick={() => setContextOpen(true)} className="rounded-md border border-line p-2 lg:hidden" aria-label="Project context"><Settings2 className="h-4 w-4" /></button> : null}<button onClick={() => void signOut().then(() => { window.localStorage.removeItem(ACTIVE_PROJECT_KEY); setUser(null); setSnapshot(null); })} className="hidden text-xs text-muted hover:text-ink sm:block">Sign out</button></div>
+      <div className="flex items-center gap-2">{snapshot ? <span className="hidden items-center gap-1.5 rounded-full border border-line px-3 py-1.5 font-mono text-[10px] uppercase tracking-wide text-muted sm:inline-flex" title="Total CREDIT used by this project's engineering conversation"><Coins className="h-3 w-3" />{snapshot.usage.used.toFixed(3)} used</span> : null}<button onClick={() => setShowOrbio(true)} className={`rounded-full px-3 py-1.5 font-mono text-[10px] uppercase tracking-wide ${connected ? "bg-forest-light text-forest" : "bg-credit-light text-credit"}`}>{connected ? `${orbio?.balance ? orbio.balance.available.toFixed(2) : "Loading…"} CREDIT` : "Connect Orbio"}</button>{snapshot ? <button onClick={() => setContextOpen(true)} className="rounded-md border border-line p-2 lg:hidden" aria-label="Project context"><Settings2 className="h-4 w-4" /></button> : null}<button onClick={() => void signOut().then(() => { window.localStorage.removeItem(ACTIVE_PROJECT_KEY); setUser(null); setSnapshot(null); })} className="hidden text-xs text-muted hover:text-ink sm:block">Sign out</button></div>
     </header>
     <div className="grid h-[calc(100vh-64px)] min-h-0 lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)_300px]">
       <aside className={`${sidebar ? "fixed inset-y-0 left-0 z-50 block w-[280px] shadow-xl" : "hidden"} overflow-y-auto border-r border-line bg-paper p-4 lg:static lg:block lg:h-full lg:w-auto lg:shadow-none`}>
@@ -170,7 +171,8 @@ export function ProjectWorkspace() {
           <div className="mb-10"><p className="font-mono text-[10px] uppercase tracking-[0.16em] text-forest">Project conversation</p><h1 className="display mt-2 text-3xl">{snapshot.project.title}</h1></div>
           <div className="space-y-8">{snapshot.messages.map((item) => <article key={item.id} className={item.role === "user" ? "ml-auto max-w-[85%] rounded-xl bg-forest-light px-4 py-3" : "max-w-[95%]"}>
             <p className="mb-2 font-mono text-[9px] uppercase tracking-[0.14em] text-muted">{item.role === "user" ? "You" : "Promgent"}</p>
-            <div className="whitespace-pre-wrap text-sm leading-7">{item.content}</div>
+            {item.role === "assistant" ? <AssistantMessageContent content={item.content} /> : <div className="whitespace-pre-wrap text-sm leading-7">{item.content}</div>}
+            {item.role === "assistant" && item.modelRoute?.usage ? <p className="mt-3 flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-wide text-muted" title={`${item.modelRoute.usage.inputTokens ?? 0} input tokens · ${item.modelRoute.usage.outputTokens ?? 0} output tokens`}><Coins className="h-3 w-3" />This turn: {item.modelRoute.usage.cost.toFixed(4)} CREDIT{item.modelRoute.usage.estimated ? " estimated" : ""}</p> : null}
             {item.artifactIds?.map((id) => artifactById.get(id)).filter((artifact): artifact is ProjectArtifact => Boolean(artifact)).map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} />)}
           </article>)}</div>
           {sending ? <div className="mt-8 flex items-center gap-3 text-sm text-muted"><span className="flex gap-1"><i className="pg-mark h-1.5 w-1.5" /><i className="pg-mark pg-mark-2 h-1.5 w-1.5" /><i className="pg-mark pg-mark-3 h-1.5 w-1.5" /></span> {generationLabel(message)}</div> : null}

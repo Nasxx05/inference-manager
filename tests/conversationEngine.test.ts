@@ -3,6 +3,7 @@ import { routeConversationIntents } from "@/lib/conversation/intentRouter";
 import { composeConversationContext, conversationContextLimit } from "@/lib/conversation/contextComposer";
 import { validatePromgentResponse } from "@/lib/conversation/responseContract";
 import { applyConversationTurn } from "@/lib/conversation/conversationTurn";
+import { formatEngineeringGuidance } from "@/lib/conversation/engineeringGuidance";
 import { createInitialMemory, createProjectRecord } from "@/lib/projectMemory/intake";
 import type { InterviewSession } from "@/types/project";
 
@@ -16,6 +17,7 @@ describe("intent router", () => {
     ["Why do I need a database?", "technical_explanation"],
     ["Show me the architecture", "architecture_request"],
     ["Generate the prompt for the first version", "prompt_generation"],
+    ["Generate a complete implementation prompt for this MVP, including the architecture and how to verify it.", "prompt_generation"],
     ["I built it https://github.com/example/project", "repository_review"],
     ["Actually remove payments for now", "change_request"],
     ["What should I do next?", "next_step_request"],
@@ -38,6 +40,26 @@ describe("conversation contract and state", () => {
   it("validates useful artifact requests but ignores unknown artifact types", () => {
     const response = validatePromgentResponse({ message: "Here is the current design.", artifactRequests: [{ type: "architecture", reason: "The user asked for it" }, { type: "malware", reason: "invalid" }] }, ["architecture_request"]);
     expect(response.artifactRequests).toEqual([{ type: "architecture", reason: "The user asked for it" }]);
+  });
+
+  it("turns structured engineering judgment into a beginner-readable response", () => {
+    const response = validatePromgentResponse({
+      message: "A booking flow is the core of this product.",
+      guidance: {
+        assessment: "The customer needs to request a time and the barber needs to confirm it.",
+        recommendation: "Build one request-and-confirm workflow before adding payments.",
+        rationale: ["This proves the operational value with less risk."],
+        mvpNow: ["Customer submits a booking request", "Barber confirms or declines it"],
+        defer: ["Online payments"],
+        risks: ["Two customers may request the same time"],
+        nextDecision: "Decide whether time slots are fixed or free-form.",
+      },
+    }, ["project_discovery"]);
+    const content = formatEngineeringGuidance({ proposal: response, memory, intents: response.intents });
+    expect(content).toContain("## Engineering assessment");
+    expect(content).toContain("## My recommendation");
+    expect(content).toContain("### Build in the MVP");
+    expect(content).toContain("Two customers may request the same time");
   });
 
   it("composes compact canonical context without the complete transcript", () => {
