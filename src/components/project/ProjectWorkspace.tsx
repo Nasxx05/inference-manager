@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Coins, Menu, Plus, Settings2, X } from "lucide-react";
+import { Coins, Menu, Plus, Settings2, Trash2, X } from "lucide-react";
 import { PromgentLogo } from "@/components/PromgentLogo";
 import {
   completePasswordReset,
   connectOrbio,
   createProject,
+  deleteProject,
   getOrbioBalance,
   getOrbioStatus,
   getSession,
@@ -136,7 +137,7 @@ function NewProject({ connected, onConnect, onCreated }: { connected: boolean; o
 }
 
 export function ProjectWorkspace() {
-  const [user, setUser] = useState<GuidedUser | null>(null); const [loading, setLoading] = useState(true); const [recovery, setRecovery] = useState<{ accessToken: string; refreshToken: string } | null>(null); const [projects, setProjects] = useState<ProjectRecord[]>([]); const [snapshot, setSnapshot] = useState<GuidedProjectSnapshot | null>(null); const [orbio, setOrbio] = useState<OrbioStatus | null>(null); const [showOrbio, setShowOrbio] = useState(false); const [creating, setCreating] = useState(false); const [sidebar, setSidebar] = useState(false); const [contextOpen, setContextOpen] = useState(false); const [message, setMessage] = useState(""); const [messageImage, setMessageImage] = useState<File | null>(null); const [source, setSource] = useState<"text" | "voice_transcript">("text"); const [sending, setSending] = useState(false); const [error, setError] = useState<string | null>(null); const [actions, setActions] = useState<ProjectAction[]>([]); const endRef = useRef<HTMLDivElement>(null);
+  const [user, setUser] = useState<GuidedUser | null>(null); const [loading, setLoading] = useState(true); const [recovery, setRecovery] = useState<{ accessToken: string; refreshToken: string } | null>(null); const [projects, setProjects] = useState<ProjectRecord[]>([]); const [snapshot, setSnapshot] = useState<GuidedProjectSnapshot | null>(null); const [orbio, setOrbio] = useState<OrbioStatus | null>(null); const [showOrbio, setShowOrbio] = useState(false); const [creating, setCreating] = useState(false); const [sidebar, setSidebar] = useState(false); const [contextOpen, setContextOpen] = useState(false); const [message, setMessage] = useState(""); const [messageImage, setMessageImage] = useState<File | null>(null); const [source, setSource] = useState<"text" | "voice_transcript">("text"); const [sending, setSending] = useState(false); const [error, setError] = useState<string | null>(null); const [projectListError, setProjectListError] = useState<string | null>(null); const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null); const [actions, setActions] = useState<ProjectAction[]>([]); const endRef = useRef<HTMLDivElement>(null);
 
   async function refreshProjects(openId?: string | null) { const next = await listProjects(); setProjects(next); const id = openId ?? window.localStorage.getItem(ACTIVE_PROJECT_KEY); if (id && next.some((item) => item.id === id)) { setSnapshot(await loadProject(id)); setCreating(false); } else { setSnapshot(null); setCreating(next.length === 0); } }
   async function syncOrbio() { const status = await getOrbioStatus(); setOrbio(status); if (status.connected && status.status === "active") void getOrbioBalance().then((balance) => setOrbio((current) => current ? { ...current, balance } : current)).catch(() => undefined); }
@@ -145,7 +146,32 @@ export function ProjectWorkspace() {
   const artifacts = snapshot?.artifacts ?? [];
   const artifactById = useMemo(() => new Map(artifacts.map((item) => [item.id, item])), [artifacts]);
 
-  async function open(id: string) { setLoading(true); setError(null); try { const loaded = await loadProject(id); setSnapshot(loaded); setCreating(false); setSidebar(false); window.localStorage.setItem(ACTIVE_PROJECT_KEY, id); } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not open the project."); } finally { setLoading(false); } }
+  async function open(id: string) { setLoading(true); setError(null); setProjectListError(null); try { const loaded = await loadProject(id); setSnapshot(loaded); setCreating(false); setSidebar(false); window.localStorage.setItem(ACTIVE_PROJECT_KEY, id); } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not open the project."); } finally { setLoading(false); } }
+  async function removeProject(project: ProjectRecord) {
+    if (!window.confirm(`Delete “${project.title}” and all of its saved conversation, memory, and artifacts? This cannot be undone.`)) return;
+    setDeletingProjectId(project.id); setProjectListError(null);
+    try {
+      await deleteProject(project.id);
+      const remaining = projects.filter((item) => item.id !== project.id);
+      setProjects(remaining);
+      if (window.localStorage.getItem(ACTIVE_PROJECT_KEY) === project.id) window.localStorage.removeItem(ACTIVE_PROJECT_KEY);
+      if (snapshot?.project.id === project.id) {
+        setSnapshot(null); setActions([]);
+        const next = remaining[0];
+        if (next) {
+          const loaded = await loadProject(next.id);
+          setSnapshot(loaded); setCreating(false); setSidebar(false);
+          window.localStorage.setItem(ACTIVE_PROJECT_KEY, next.id);
+        } else {
+          setCreating(true); setSidebar(false);
+        }
+      }
+    } catch (caught) {
+      setProjectListError(caught instanceof Error ? caught.message : "Could not delete the project.");
+    } finally {
+      setDeletingProjectId(null);
+    }
+  }
   async function submitMessage(contentOverride?: string) { const content = (contentOverride ?? message).trim(); if (!snapshot || !content || sending) return; const projectId = snapshot.project.id; setSending(true); setError(null); try { const result = await sendConversation(projectId, content, contentOverride ? "text" : source, contentOverride ? null : messageImage); const updatedAt = new Date().toISOString(); setSnapshot((current) => current ? { ...current, project: { ...current.project, phase: result.memory.projectPhase, nextRecommendedAction: result.memory.nextRecommendedAction, updatedAt }, memory: result.memory, interview: result.interview, messages: [...current.messages, result.userMessage, result.assistantMessage], artifacts: [...(current.artifacts ?? []), ...result.artifacts.filter((artifact) => !(current.artifacts ?? []).some((old) => old.id === artifact.id))], usage: result.usage ?? current.usage } : current); setProjects((current) => current.map((project) => project.id === projectId ? { ...project, phase: result.memory.projectPhase, nextRecommendedAction: result.memory.nextRecommendedAction, updatedAt } : project)); setActions(result.actions); setMessage(""); setMessageImage(null); setSource("text"); void getOrbioBalance().then((balance) => setOrbio((current) => current ? { ...current, balance } : current)).catch(() => undefined); } catch (caught) { setError(caught instanceof Error ? caught.message : "Promgent could not complete that turn. No project state was changed."); } finally { setSending(false); } }
 
   if (loading && !user) return <div className="grid min-h-screen place-items-center text-sm text-muted">Loading Promgent…</div>;
@@ -161,9 +187,10 @@ export function ProjectWorkspace() {
     <div className="grid h-[calc(100vh-64px)] min-h-0 lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)_300px]">
       <aside className={`${sidebar ? "fixed inset-y-0 left-0 z-50 block w-[280px] shadow-xl" : "hidden"} overflow-y-auto border-r border-line bg-paper p-4 lg:static lg:block lg:h-full lg:w-auto lg:shadow-none`}>
         <div className="flex items-center justify-between lg:hidden"><span className="text-sm font-medium">Projects</span><button onClick={() => setSidebar(false)}><X className="h-4 w-4" /></button></div>
-        <button onClick={() => { setCreating(true); setSnapshot(null); setSidebar(false); }} className="mt-4 flex w-full items-center gap-2 rounded-md border border-line px-3 py-2.5 text-sm hover:border-lineStrong lg:mt-0"><Plus className="h-4 w-4" /> New project</button>
+        <button onClick={() => { setCreating(true); setSnapshot(null); setProjectListError(null); setSidebar(false); }} className="mt-4 flex w-full items-center gap-2 rounded-md border border-line px-3 py-2.5 text-sm hover:border-lineStrong lg:mt-0"><Plus className="h-4 w-4" /> New project</button>
         <p className="mb-2 mt-6 font-mono text-[10px] uppercase tracking-[0.15em] text-muted">Your projects</p>
-        <nav className="space-y-1">{projects.map((project) => <button key={project.id} onClick={() => void open(project.id)} className={`w-full rounded-md px-3 py-2.5 text-left text-sm ${snapshot?.project.id === project.id ? "bg-forest-light text-forest" : "text-muted hover:bg-canvas hover:text-ink"}`}><span className="block truncate">{project.title}</span><span className="mt-1 block font-mono text-[9px] uppercase opacity-70">{(project.phase ?? "exploring").replaceAll("_", " ")}</span>{project.nextRecommendedAction?.label ? <span className="mt-1 block truncate text-[10px] opacity-70">Next: {project.nextRecommendedAction.label}</span> : null}<span className="mt-1 block text-[9px] opacity-50">Updated {new Date(project.updatedAt).toLocaleDateString()}</span></button>)}</nav>
+        <nav className="space-y-1">{projects.map((project) => <div key={project.id} className={`group flex items-start rounded-md ${snapshot?.project.id === project.id ? "bg-forest-light text-forest" : "text-muted hover:bg-canvas hover:text-ink"}`}><button onClick={() => void open(project.id)} className="min-w-0 flex-1 px-3 py-2.5 text-left text-sm"><span className="block truncate">{project.title}</span><span className="mt-1 block font-mono text-[9px] uppercase opacity-70">{(project.phase ?? "exploring").replaceAll("_", " ")}</span>{project.nextRecommendedAction?.label ? <span className="mt-1 block truncate text-[10px] opacity-70">Next: {project.nextRecommendedAction.label}</span> : null}<span className="mt-1 block text-[9px] opacity-50">Updated {new Date(project.updatedAt).toLocaleDateString()}</span></button><button type="button" disabled={deletingProjectId === project.id} onClick={() => void removeProject(project)} aria-label={`Delete ${project.title}`} title={`Delete ${project.title}`} className="m-1.5 shrink-0 rounded p-1.5 text-muted opacity-60 transition hover:bg-danger-light hover:text-danger focus:opacity-100 disabled:cursor-wait disabled:opacity-30 sm:opacity-0 sm:group-hover:opacity-100"><Trash2 className="h-3.5 w-3.5" /></button></div>)}</nav>
+        {projectListError ? <p className="mt-3 rounded-md bg-danger-light px-3 py-2 text-xs leading-5 text-danger">{projectListError}</p> : null}
       </aside>
 
       {creating || !snapshot ? <div className="h-full overflow-y-auto"><NewProject connected={connected} onConnect={() => setShowOrbio(true)} onCreated={(id) => void refreshProjects(id)} /></div> : <main className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
