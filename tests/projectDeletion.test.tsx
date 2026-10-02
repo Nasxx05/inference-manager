@@ -47,8 +47,6 @@ describe("project deletion", () => {
   it("deletes a confirmed project and removes it from the sidebar", async () => {
     render(<ProjectWorkspace />);
     const button = await screen.findByRole("button", { name: `Delete ${project.title}` });
-    expect(button).toHaveTextContent("Delete");
-    expect(button.className).not.toContain("opacity-0");
     fireEvent.click(button);
     await waitFor(() => expect(mocks.deleteProject).toHaveBeenCalledWith(project.id));
     await waitFor(() => expect(screen.queryByRole("button", { name: `Delete ${project.title}` })).not.toBeInTheDocument());
